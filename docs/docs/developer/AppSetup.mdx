@@ -7,12 +7,11 @@ description: "Follow these steps to get started with your Omi. Don't want to bot
 
 Before starting, make sure you have the following installed:
 
-- [Flutter SDK](https://docs.flutter.dev/get-started/install?_gl=1*15npmc9*_gcl_aw*R0NMLjE3MzEyNzExNTAuQ2owS0NRaUEwTUc1QmhEMUFSSXNBRWNadHdTR2U5Ujc5bUNNVEk0eDBlVFlMRy1nY2NpT3hSV3JkUUlaaDVjVEc5NU4zTm9BT3JGendja2FBdk9oRUFMd193Y0I.*_gcl_dc*R0NMLjE3MzEyNzExNTAuQ2owS0NRaUEwTUc1QmhEMUFSSXNBRWNadHdTR2U5Ujc5bUNNVEk0eDBlVFlMRy1nY2NpT3hSV3JkUUlaaDVjVEc5NU4zTm9BT3JGendja2FBdk9oRUFMd193Y0I.*_up*MQ..*_ga*NzUzOTkzMzIyLjE3MjgzMzc5MDY.*_ga_04YGWK0175*MTczMTI3MDU5MC40LjEuMTczMTI3MTE1My4wLjAuMA..)
-- [Dart SDK](https://dart.dev/get-dart)
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) (includes Dart).
 - [Xcode](https://developer.apple.com/xcode/) (for iOS)
 - [Android Studio](https://developer.android.com/studio) (for Android)
 - [CocoaPods](https://cocoapods.org/) (for iOS dependencies)
-- [NDK 26.3.11579264](https://developer.android.com/ndk/downloads) or above (to build Opus for ARM Devices)
+- [NDK](https://developer.android.com/ndk/downloads) (to build Opus for ARM Devices).
 
 ## Build the app automatically[​](#build-the-app-automatically)
 
@@ -69,15 +68,84 @@ Alternatively, run `flutter run --flavor dev` in terminal
 
 ## Build the app manually:[​](#build-the-app-manually)
 
-Setup manually is useful if you want to build the app to use your own backend.
+Manual setup is useful if you want to build the app with your own backend.
 
-### 1. Upgrade Flutter[​](#1-upgrade-flutter)
+### 1. Flutter Setup
+Ensure Flutter is installed by following the official [Flutter Installation Guide](https://docs.flutter.dev/get-started/install).
 
-Before proceeding, make sure your Flutter SDK is up to date:
+After installation, run the following to verify your setup and see if any additional tools are required:
 
 ```
-flutter upgrade
+flutter doctor -v
 ```
+
+**Example output:**
+
+```
+[✓] Flutter (Channel stable, 3.24.1, on macOS 15.3.2 24D81 darwin-arm64, locale en-US)
+    • Flutter version 3.24.1 on channel stable at /Users/bread/fvm/versions/3.24.1
+    • Upstream repository https://github.com/flutter/flutter.git
+    • Framework revision 5874a72aa4 (9 months ago), 2024-08-20 16:46:00 -0500
+    • Engine revision c9b9d5780d
+    • Dart version 3.5.1
+    • DevTools version 2.37.2
+
+[✓] Android toolchain - develop for Android devices (Android SDK version 35.0.0)
+    • Android SDK at /Users/bread/Library/Android/sdk
+    • Platform android-35, build-tools 35.0.0
+    • ANDROID_HOME = /Users/bread/Library/Android/sdk
+    • ANDROID_SDK_ROOT = /Users/bread/Library/Android/sdk
+    • Java binary at: /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home/bin/java
+    • Java version Java(TM) SE Runtime Environment (build 17.0.7+8-LTS-224)
+    • All Android licenses accepted.
+
+[!] Xcode - develop for iOS and macOS (Xcode 16.3)
+    • Xcode at /Applications/Xcode.app/Contents/Developer
+    • Build 16E140
+    ✗ Unable to get list of installed Simulator runtimes.
+    ✗ CocoaPods not installed.
+        CocoaPods is a package manager for iOS or macOS platform code.
+        Without CocoaPods, plugins will not work on iOS or macOS.
+        For more info, see https://flutter.dev/to/platform-plugins
+      For installation instructions, see https://guides.cocoapods.org/using/getting-started.html#installation
+
+[✓] Chrome - develop for the web
+    • Chrome at /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+
+[✓] Android Studio (version 2024.3)
+    • Android Studio at /Applications/Android Studio.app/Contents
+    • Flutter plugin can be installed from:
+      🔨 https://plugins.jetbrains.com/plugin/9212-flutter
+    • Dart plugin can be installed from:
+      🔨 https://plugins.jetbrains.com/plugin/6351-dart
+    • Java version OpenJDK Runtime Environment (build 21.0.6+-13355223-b631.42)
+
+[✓] VS Code (version 1.100.2)
+    • VS Code at /Applications/Visual Studio Code.app/Contents
+    • Flutter extension version 3.110.0
+
+[✓] Connected device (4 available)
+    • sdk gphone64 arm64 (mobile)     • emulator-5554         • android-arm64  • Android 13 (API 33) (emulator)
+    • macOS (desktop)                 • macos                 • darwin-arm64   • macOS 15.3.2 24D81 darwin-arm64
+    • Mac Designed for iPad (desktop) • mac-designed-for-ipad • darwin         • macOS 15.3.2 24D81 darwin-arm64
+    • Chrome (web)                    • chrome                • web-javascript • Google Chrome 136.0.7103.114
+
+[✓] Network resources
+    • All expected network resources are available.
+
+! Doctor found issues in 1 category.
+```
+
+**Notes:**
+- This project is tested with specific versions of tools like Flutter SDK, Xcode, Android SDK, NDK, and JDK. Please refer to the [`app/setup.sh`](https://github.com/BasedHardware/omi/blob/main/app/setup.sh) script for these recommended versions (e.g., Flutter 3.24.1, Xcode 15.2, Android SDK Platform 34, NDK 27.0.12077973, JDK 17).
+
+- To ensure Android builds use the recommended JDK version (e.g., JDK 17), you might need to set it explicitly. For example, on macOS, you can configure Flutter to use a specific JDK path:
+```
+flutter config --jdk-dir /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
+```
+
+- CocoaPods must be installed to run on iOS/macOS.
+- Android Studio and VS Code editor versions generally do not matter as long as `flutter` commands are used from the correctly configured Flutter SDK.
 
 ### 2. Get Flutter Dependencies[​](#2-get-flutter-dependencies)
 
@@ -100,7 +168,7 @@ pod repo update
 
 ### 4. Environment Configuration[​](#4-environment-configuration)
 
-Create `.env` using template `.env.template`
+Create `.env` using template `.env.template`, the env template has OPENAI_API_KEY, GOOGLE_MAPS_API_KEY which are optional.
 
 ```
 cd ..
@@ -120,11 +188,12 @@ Add your API keys to the `.env` file. (Sentry is not needed)
 Generate necessary files with Build Runner:
 
 ```
-dart run build_runner build
+dart pub run build_runner clean
+dart pub run build_runner build
 ```
 
 ### 7. Setup Firebase[​](#7-setup-firebase)
-
+- This step is mandatory for running the app, otherwise firebase related code needs to be removed from the app.
 - Follow official [Firebase Docs](https://firebase.google.com/docs/flutter/setup) till Step 1
 - If you want to use Apple login, first go and [create an identifier on the apple developer website](https://developer.apple.com/account/resources/identifiers/list)
 - Run the following command to register the prod flavor of the app. The command will prompt you to select `configuration type`; under it, select `Target` and then `Runner`
@@ -144,6 +213,7 @@ If you're facing auth issues running the app, enable Google/Apple sign-in in Fir
 ### 8. Run the App[​](#8-run-the-app)
 
 - Select your target device in Xcode or Android Studio.
-- Run the app.
+- Run the app using `flutter run -v --flavor dev`
+- To generate a dev apk `flutter build apk --flavor dev`
 
 Having troubles? [Join Discord and search your issue in help channel](https://discord.gg/omi)

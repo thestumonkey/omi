@@ -25,7 +25,9 @@ build/
 dist/
 .build/
 .swiftpm/
-.vscode/
+
+# VS Code
+.vscode/*
 
 # Android specific
 **/android/**/build/
@@ -85,6 +87,8 @@ dist/
 **/web/.dart_tool/
 
 # Miscellaneous
+!app/pubspec.lock
+!app/ios/Podfile.lock
 *.lock
 *.log
 *.swo
@@ -183,3 +187,4 @@ omiGlass/.expo
 
 # Logs
 /backend/logs/
+app/.fvm/

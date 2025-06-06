@@ -7,13 +7,13 @@ from models.memories import Memory, MemoryCategory
 from models.transcript_segment import TranscriptSegment
 from utils.prompts import extract_memories_prompt, extract_learnings_prompt, extract_memories_text_content_prompt
 from utils.llms.memory import get_prompt_memories
-from .clients import llm_mini
+from .clients import llm_mini, llm_high
 
 
 class Memories(BaseModel):
     facts: List[Memory] = Field(
         min_items=0,
-        max_items=3,
+        max_items=4,
         description="List of **new** facts. If any",
         default=[],
     )
@@ -24,6 +24,20 @@ class MemoriesByTexts(BaseModel):
         description="List of **new** facts. If any",
         default=[],
     )
+
+
+# Map for converting categories from old to new format
+LEGACY_TO_NEW_CATEGORY = {
+    'core': MemoryCategory.system,
+    'hobbies': MemoryCategory.system,
+    'lifestyle': MemoryCategory.system,
+    'interests': MemoryCategory.system,
+    'work': MemoryCategory.system,
+    'skills': MemoryCategory.system,
+    'learnings': MemoryCategory.system,
+    'habits': MemoryCategory.system,
+    'other': MemoryCategory.system,
+}
 
 
 def new_memories_extractor(
@@ -50,8 +64,12 @@ def new_memories_extractor(
             'memories_str': memories_str,
             'format_instructions': parser.get_format_instructions(),
         })
-        # for fact in response:
-        #     fact.content = fact.content.replace(user_name, '').replace('The User', '').replace('User', '').strip()
+        
+        # Ensure all new memories use the new category format
+        for memory in response.facts:
+            if isinstance(memory.category, str) and memory.category in LEGACY_TO_NEW_CATEGORY:
+                memory.category = LEGACY_TO_NEW_CATEGORY[memory.category]
+        
         return response.facts
     except Exception as e:
         print(f'Error extracting new facts: {e}')
@@ -78,6 +96,12 @@ def extract_memories_from_text(
             'memories_str': memories_str,
             'format_instructions': parser.get_format_instructions(),
         })
+        
+        # Ensure all new memories use the new category format
+        for memory in response.facts:
+            if isinstance(memory.category, str) and memory.category in LEGACY_TO_NEW_CATEGORY:
+                memory.category = LEGACY_TO_NEW_CATEGORY[memory.category]
+        
         return response.facts
     except Exception as e:
         print(f'Error extracting facts from {text_source}: {e}')
@@ -106,14 +130,14 @@ def new_learnings_extractor(
 
     try:
         parser = PydanticOutputParser(pydantic_object=Learnings)
-        chain = extract_learnings_prompt | llm_mini | parser
+        chain = extract_learnings_prompt | llm_high | parser
         response: Learnings = chain.invoke({
             'user_name': user_name,
             'conversation': content,
             'learnings_str': learnings_str,
             'format_instructions': parser.get_format_instructions(),
         })
-        return list(map(lambda x: Memory(content=x, category=MemoryCategory.learnings), response.result))
+        return list(map(lambda x: Memory(content=x, category=MemoryCategory.interesting), response.result))
     except Exception as e:
         print(f'Error extracting new facts: {e}')
         return []
