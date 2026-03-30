@@ -33,7 +33,10 @@ serviceAccount:
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
-podAnnotations: {}
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
@@ -76,6 +79,11 @@ ingress:
   #      - chart-example.local
 
 env:
+  - name: GEMINI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: GEMINI_API_KEY
   - name: DEEPGRAM_API_KEY
     valueFrom:
       secretKeyRef:
@@ -101,19 +109,16 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: GITHUB_TOKEN
-  - name: SONIOX_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: dev-omi-backend-secrets
-        key: SONIOX_API_KEY
   - name: BUCKET_SPEECH_PROFILES
     value: "speech-profiles-dev"
   - name: BUCKET_TEMPORAL_SYNC_LOCAL
     value: "syncing-local-development"
   - name: HOSTED_VAD_API_URL
-    value: "http://34.172.155.20:80/v1/vad"
+    value: "http://vad.omiapi.com:80/v1/vad"
   - name: HOSTED_SPEECH_PROFILE_API_URL
-    value: "http://34.172.155.20:80/v1/speaker-identification"
+    value: "http://vad.omiapi.com:80/v1/speaker-identification"
+  - name: HOSTED_SPEAKER_EMBEDDING_API_URL
+    value: "http://diarizer.omiapi.com:80"
   - name: PINECONE_API_KEY
     valueFrom:
       secretKeyRef:
@@ -127,7 +132,7 @@ env:
         name: dev-omi-backend-secrets
         key: REDIS_DB_HOST
   - name: REDIS_DB_PORT
-    value: "10797"
+    value: "13151"
   - name: REDIS_DB_PASSWORD
     valueFrom:
       secretKeyRef:
@@ -143,10 +148,15 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: WORKFLOW_API_KEY
+  - name: STT_SERVICE_MODELS
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: STT_SERVICE_MODELS
   - name: NO_SOCKET_TIMEOUT
     value: "true"
   - name: HOSTED_PUSHER_API_URL
-    value: "http://internal-alb.pusher-ep-dev.il7.us-central1.lb.based-hardware-dev.internal"
+    value: "http://pusher.omiapi.com"
   - name: BUCKET_PLUGINS_LOGOS
     value: "plugin_resources"
   - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -214,9 +224,102 @@ env:
         name: dev-omi-backend-secrets
         key: TYPESENSE_API_KEY
   - name: DEEPGRAM_SELF_HOSTED_ENABLED
-    value: "true"
+    value: "false"
   - name: DEEPGRAM_SELF_HOSTED_URL
     value: "https://dg.omiapi.com"
+  - name: ENCRYPTION_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: ENCRYPTION_SECRET
+  - name: BASIC_TIER_MINUTES_LIMIT_PER_MONTH
+    value: "1000000"
+  - name: BASIC_TIER_WORDS_TRANSCRIBED_LIMIT_PER_MONTH
+    value: "0"
+  - name: BASIC_TIER_INSIGHTS_GAINED_LIMIT_PER_MONTH
+    value: "0"
+  - name: BASIC_TIER_MEMORIES_CREATED_LIMIT_PER_MONTH
+    value: "0"
+  - name: STRIPE_UNLIMITED_MONTHLY_PRICE_ID
+    value: "price_1RrxXL1F8wnoWYvwIddzR902"
+  - name: STRIPE_UNLIMITED_ANNUAL_PRICE_ID
+    value: "price_1RrxXL1F8wnoWYvw3kDbWmjs"
+  - name: STRIPE_PRO_MONTHLY_PRICE_ID
+    value: ""
+  - name: STRIPE_PRO_ANNUAL_PRICE_ID
+    value: ""
+  - name: SUBSCRIPTION_LAUNCH_DATE
+    value: "2025-08-21"
+  - name: BUCKET_PRIVATE_CLOUD_SYNC
+    value: "omi-dev-private-cloud-sync"
+  - name: SERVICE_ACCOUNT_JSON
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: SERVICE_ACCOUNT_JSON
+  - name: GOOGLE_CLOUD_PROJECT
+    value: "based-hardware"
+  - name: TWILIO_ACCOUNT_SID
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_ACCOUNT_SID
+  - name: TWILIO_AUTH_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_AUTH_TOKEN
+  - name: TWILIO_API_KEY_SID
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_API_KEY_SID
+  - name: TWILIO_API_KEY_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_API_KEY_SECRET
+  - name: TWILIO_TWIML_APP_SID
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_TWIML_APP_SID
+  - name: VAD_GATE_MODE
+    value: "active"
+  # Fair-use system (PR #5748)
+  - name: FAIR_USE_ENABLED
+    value: "true"
+  - name: FAIR_USE_KILL_SWITCH
+    value: "false"
+  - name: FAIR_USE_DAILY_SPEECH_MS
+    value: "7200000"
+  - name: FAIR_USE_3DAY_SPEECH_MS
+    value: "28800000"
+  - name: FAIR_USE_WEEKLY_SPEECH_MS
+    value: "36000000"
+  - name: FAIR_USE_BUCKET_SECONDS
+    value: "60"
+  - name: FAIR_USE_REDIS_RETENTION_SECONDS
+    value: "691200"
+  - name: FAIR_USE_CLASSIFIER_ABUSE_SCORE_THRESHOLD
+    value: "0.7"
+  - name: FAIR_USE_CLASSIFIER_COOLDOWN_SECONDS
+    value: "43200"
+  - name: FAIR_USE_CLASSIFIER_MODEL
+    value: "gpt-5.1"
+  - name: FAIR_USE_CLASSIFIER_LOOKBACK_DAYS
+    value: "7"
+  - name: FAIR_USE_CHECK_INTERVAL_SECONDS
+    value: "300"
+  - name: FAIR_USE_EXEMPT_UIDS
+    value: ""
+  - name: FAIR_USE_RESTRICT_DAILY_DG_MS
+    value: "1800000"
+  - name: METRICS_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: METRICS_SECRET
 
 resources:
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -224,11 +327,11 @@ resources:
   # resources, such as Minikube. If you do want to specify resources, uncomment the following
   # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   requests:
+    cpu: 0.7
+    memory: 2Gi
+  limits:
     cpu: 1
     memory: 4Gi
-  limits:
-    cpu: 2
-    memory: 6Gi
 
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 livenessProbe:
@@ -254,8 +357,47 @@ autoscaling:
   enabled: true
   minReplicas: 1
   maxReplicas: 10
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 70
+  # requestsPerPod: 60
+  # failedResponseCode: 10
+
+podDisruptionBudget:
+  minAvailable: "80%"
+  # maxUnavailable: "20%"
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 2
+
+terminationGracePeriodSeconds: 120
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 15"]
 
 # Additional volumes on the output Deployment definition.
 volumes: []

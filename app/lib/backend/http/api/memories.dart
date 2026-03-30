@@ -1,23 +1,23 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/utils/logger.dart';
 
-Future<bool> createMemoryServer(String content, String visibility) async {
+Future<Memory?> createMemoryServer(String content, String visibility, String category) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v3/memories',
     headers: {},
     method: 'POST',
-    body: json.encode({
-      'content': content,
-      'visibility': visibility,
-    }),
+    body: json.encode({'content': content, 'visibility': visibility, 'category': category}),
   );
-  if (response == null) return false;
-  debugPrint('createMemory response: ${response.body}');
-  return response.statusCode == 200;
+  if (response == null) return null;
+  Logger.debug('createMemory response: ${response.body}');
+  if (response.statusCode == 200) {
+    return Memory.fromJson(json.decode(response.body));
+  }
+  return null;
 }
 
 Future<bool> updateMemoryVisibilityServer(String memoryId, String visibility) async {
@@ -28,7 +28,7 @@ Future<bool> updateMemoryVisibilityServer(String memoryId, String visibility) as
     body: '',
   );
   if (response == null) return false;
-  debugPrint('updateMemoryVisibility response: ${response.body}');
+  Logger.debug('updateMemoryVisibility response: ${response.body}');
   return response.statusCode == 200;
 }
 
@@ -40,9 +40,13 @@ Future<List<Memory>> getMemories({int limit = 100, int offset = 0}) async {
     body: '',
   );
   if (response == null) return [];
-  debugPrint('getMemories response: ${response.body}');
-  List<dynamic> memories = json.decode(response.body);
-  return memories.map((memory) => Memory.fromJson(memory)).toList();
+  if (response.statusCode == 200) {
+    var decoded = json.decode(response.body);
+    if (decoded is List) {
+      return decoded.map((e) => Memory.fromJson(e)).toList();
+    }
+  }
+  return [];
 }
 
 Future<bool> deleteMemoryServer(String memoryId) async {
@@ -53,31 +57,14 @@ Future<bool> deleteMemoryServer(String memoryId) async {
     body: '',
   );
   if (response == null) return false;
-  debugPrint('deleteMemory response: ${response.body}');
+  Logger.debug('deleteMemory response: ${response.body}');
   return response.statusCode == 200;
 }
 
 Future<bool> deleteAllMemoriesServer() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v3/memories',
-    headers: {},
-    method: 'DELETE',
-    body: '',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v3/memories', headers: {}, method: 'DELETE', body: '');
   if (response == null) return false;
-  debugPrint('deleteAllMemories response: ${response.body}');
-  return response.statusCode == 200;
-}
-
-Future<bool> reviewMemoryServer(String memoryId, bool value) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v3/memories/$memoryId/review?value=$value',
-    headers: {},
-    method: 'POST',
-    body: '',
-  );
-  if (response == null) return false;
-  debugPrint('reviewMemory response: ${response.body}');
+  Logger.debug('deleteAllMemories response: ${response.body}');
   return response.statusCode == 200;
 }
 
@@ -89,6 +76,6 @@ Future<bool> editMemoryServer(String memoryId, String value) async {
     body: '',
   );
   if (response == null) return false;
-  debugPrint('editMemory response: ${response.body}');
+  Logger.debug('editMemory response: ${response.body}');
   return response.statusCode == 200;
 }

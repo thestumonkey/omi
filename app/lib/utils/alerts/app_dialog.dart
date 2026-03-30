@@ -2,7 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/main.dart';
+
+import 'package:omi/app_globals.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class AppDialog {
   static _getDialog({
@@ -12,42 +14,30 @@ class AppDialog {
     Function? onConfirm,
     Function? onCancel,
     bool singleButton = false,
-    String okButtonText = 'Ok',
+    String? okButtonText,
   }) {
+    final localizedOkText = okButtonText ?? context.l10n.ok;
     var actions = singleButton
         ? [
             TextButton(
               onPressed: () => onCancel?.call() ?? Navigator.pop(context),
-              child: Text(okButtonText, style: const TextStyle(color: Colors.white)),
-            )
+              child: Text(localizedOkText, style: const TextStyle(color: Colors.white)),
+            ),
           ]
         : [
             TextButton(
               onPressed: () => onCancel?.call() ?? Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: Colors.white)),
+              child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white)),
             ),
             TextButton(
               onPressed: () => onConfirm?.call() ?? Navigator.pop(context),
-              child: Text(
-                okButtonText,
-                style: const TextStyle(
-                  color: Colors.white,
-                ),
-              ),
+              child: Text(localizedOkText, style: const TextStyle(color: Colors.white)),
             ),
           ];
     if (Platform.isIOS) {
-      return CupertinoAlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: actions,
-      );
+      return CupertinoAlertDialog(title: Text(title), content: Text(content), actions: actions);
     }
-    return AlertDialog(
-      title: Text(title),
-      content: Text(content),
-      actions: actions,
-    );
+    return AlertDialog(title: Text(title), content: Text(content), actions: actions);
   }
 
   static void show({
@@ -56,12 +46,12 @@ class AppDialog {
     Function? onConfirm,
     Function? onCancel,
     bool singleButton = false,
-    String okButtonText = 'Ok',
+    String? okButtonText,
   }) {
     showDialog(
-      context: MyApp.navigatorKey.currentState!.overlay!.context,
+      context: globalNavigatorKey.currentState!.overlay!.context,
       builder: (c) => _getDialog(
-        context: MyApp.navigatorKey.currentState!.context,
+        context: globalNavigatorKey.currentState!.context,
         onConfirm: onConfirm,
         title: title,
         content: content,

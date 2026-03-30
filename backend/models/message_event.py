@@ -2,7 +2,11 @@ from typing import List, Optional, Any
 
 from pydantic import BaseModel
 
-from models.conversation import Conversation, Message
+from models.conversation import Conversation, Message, ConversationPhoto
+
+# Freemium action constants
+FREEMIUM_ACTION_SETUP_ON_DEVICE_STT = "setup_on_device_stt"
+FREEMIUM_ACTION_NONE = "none"
 
 
 class MessageEvent(BaseModel):
@@ -109,6 +113,68 @@ class LastConversationEvent(MessageEvent):
 class TranslationEvent(MessageEvent):
     event_type: str = "translating"
     segments: List = []
+
+    def to_json(self):
+        j = self.model_dump(mode="json")
+        j["type"] = self.event_type
+        del j["event_type"]
+        return j
+
+
+class PhotoProcessingEvent(MessageEvent):
+    event_type: str = "photo_processing"
+    temp_id: str
+    photo_id: str
+
+    def to_json(self):
+        j = self.model_dump(mode="json")
+        j["type"] = self.event_type
+        del j["event_type"]
+        return j
+
+
+class PhotoDescribedEvent(MessageEvent):
+    event_type: str = "photo_described"
+    photo_id: str
+    description: str
+    discarded: bool
+
+    def to_json(self):
+        j = self.model_dump(mode="json")
+        j["type"] = self.event_type
+        del j["event_type"]
+        return j
+
+
+class SpeakerLabelSuggestionEvent(MessageEvent):
+    event_type: str = "speaker_label_suggestion"
+    speaker_id: int
+    person_id: str
+    person_name: str
+    segment_id: str
+
+    def to_json(self):
+        j = self.model_dump(mode="json")
+        j["type"] = self.event_type
+        del j["event_type"]
+        return j
+
+
+class FreemiumThresholdReachedEvent(MessageEvent):
+    event_type: str = "freemium_threshold_reached"
+    remaining_seconds: int
+    action: str
+
+    def to_json(self):
+        j = self.model_dump(mode="json")
+        j["type"] = self.event_type
+        del j["event_type"]
+        return j
+
+
+class SegmentsDeletedEvent(MessageEvent):
+    event_type: str = "segments_deleted"
+    segment_ids: List[str]
 
     def to_json(self):
         j = self.model_dump(mode="json")

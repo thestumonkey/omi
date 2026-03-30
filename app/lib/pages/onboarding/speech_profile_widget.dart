@@ -1,16 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
 import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
-import 'package:omi/backend/preferences.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/pages/settings/language_selection_dialog.dart';
 import 'package:omi/pages/speech_profile/percentage_bar_progress.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/speech_profile_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/dialog.dart';
-import 'package:gradient_borders/box_borders/gradient_box_border.dart';
-import 'package:provider/provider.dart';
 
 class SpeechProfileWidget extends StatefulWidget {
   final VoidCallback goNext;
@@ -23,66 +25,101 @@ class SpeechProfileWidget extends StatefulWidget {
 }
 
 class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerProviderStateMixin {
+  late AnimationController _questionAnimationController;
+  late Animation<double> _questionFadeAnimation;
+  SpeechProfileProvider? _speechProvider;
+
   @override
   void initState() {
-    WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
+    super.initState();
+    _questionAnimationController = AnimationController(duration: const Duration(milliseconds: 500), vsync: this);
+    _questionFadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _questionAnimationController, curve: Curves.easeInOut));
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
       // Check if user has set primary language
       if (!context.read<HomeProvider>().hasSetPrimaryLanguage) {
         await LanguageSelectionDialog.show(context);
       }
     });
-    SharedPreferencesUtil().onboardingCompleted = true;
-    super.initState();
+    // Onboarding completion is now handled by the completion screen
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _speechProvider ??= context.read<SpeechProfileProvider>();
   }
 
   @override
   void dispose() {
-    // if (mounted) {
-    //   context.read<SpeechProfileProvider>().close();
-    // }
+    _speechProvider?.forceCompletionTimer?.cancel();
+    _speechProvider?.forceCompletionTimer = null;
+
+    _scrollController.dispose();
+    _questionAnimationController.dispose();
+
     super.dispose();
   }
 
   final ScrollController _scrollController = ScrollController();
 
   void scrollDown() async {
-    if (_scrollController.hasClients) {
-      await Future.delayed(const Duration(milliseconds: 250));
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-      );
+    if (!_scrollController.hasClients) return;
+    await Future.delayed(const Duration(milliseconds: 250));
+    if (!mounted || !_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
+  }
+
+  String _getLoadingText(BuildContext context, SpeechProfileLoadingState state) {
+    switch (state) {
+      case SpeechProfileLoadingState.uploading:
+        return context.l10n.uploadingVoiceProfile;
+      case SpeechProfileLoadingState.memorizing:
+        return context.l10n.memorizingYourVoice;
+      case SpeechProfileLoadingState.personalizing:
+        return context.l10n.personalizingExperience;
+      case SpeechProfileLoadingState.allSet:
+        return context.l10n.youreAllSet;
     }
   }
 
   @override
   Widget build(BuildContext context) {
     Future restartDeviceRecording() async {
-      debugPrint("restartDeviceRecording $mounted");
+      Logger.debug("restartDeviceRecording $mounted");
 
       // Restart device recording, clear transcripts
       if (mounted) {
         Provider.of<CaptureProvider>(context, listen: false).clearTranscripts();
-        Provider.of<CaptureProvider>(context, listen: false).streamDeviceRecording(
-          device: Provider.of<SpeechProfileProvider>(context, listen: false).deviceProvider?.connectedDevice,
-        );
+        final device = Provider.of<SpeechProfileProvider>(context, listen: false).deviceProvider?.connectedDevice;
+        if (device != null) {
+          Provider.of<CaptureProvider>(context, listen: false).streamDeviceRecording(device: device);
+        }
       }
     }
 
-    Future stopDeviceRecording() async {
-      debugPrint("stopDeviceRecording $mounted");
-
-      // Restart device recording, clear transcripts
+    Future stopAllRecording() async {
+      Logger.debug("stopAllRecording $mounted");
       if (mounted) {
-        await Provider.of<CaptureProvider>(context, listen: false).stopStreamDeviceRecording();
+        final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+        // Stop any active device recording
+        await captureProvider.stopStreamDeviceRecording();
       }
     }
 
     return PopScope(
       canPop: true,
       onPopInvoked: (didPop) async {
-        context.read<SpeechProfileProvider>().close();
+        final speechProvider = context.read<SpeechProfileProvider>();
+        speechProvider.close();
         restartDeviceRecording();
       },
       child: Consumer2<SpeechProfileProvider, CaptureProvider>(
@@ -91,22 +128,42 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
             showInfo: (info) {
               if (info == 'SCROLL_DOWN') {
                 scrollDown();
+              } else if (info == 'NEXT_QUESTION') {
+                if (!mounted) return;
+
+                _questionAnimationController
+                  ..reset()
+                  ..forward();
               }
             },
             showError: (error) {
-              if (error == 'MULTIPLE_SPEAKERS') {
+              if (error == 'SOCKET_INIT_FAILED') {
+                showDialog(
+                  context: context,
+                  builder: (c) => getDialog(
+                    context,
+                    () => Navigator.pop(context),
+                    () {},
+                    context.l10n.connectionError,
+                    context.l10n.connectionErrorDesc,
+                    okButtonText: context.l10n.ok,
+                    singleButton: true,
+                  ),
+                  barrierDismissible: false,
+                );
+              } else if (error == 'MULTIPLE_SPEAKERS') {
                 showDialog(
                   context: context,
                   builder: (c) => getDialog(
                     context,
                     () {
-                      provider.resetSegments();
+                      provider.close();
                       Navigator.pop(context);
                     },
                     () {},
-                    'Invalid recording detected',
-                    'It seems like there are multiple speakers in the recording. Please make sure you are in a quiet location and try again.',
-                    okButtonText: 'Try Again',
+                    context.l10n.invalidRecordingMultipleSpeakers,
+                    context.l10n.multipleSpeakersDesc,
+                    okButtonText: context.l10n.tryAgain,
                     singleButton: true,
                   ),
                   barrierDismissible: false,
@@ -121,9 +178,25 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
                       //  Navigator.pop(context);
                     },
                     () {},
-                    'Invalid recording detected',
-                    'There is not enough speech detected. Please speak more and try again.',
-                    okButtonText: 'Ok',
+                    context.l10n.invalidRecordingMultipleSpeakers,
+                    context.l10n.tooShortDesc,
+                    okButtonText: context.l10n.ok,
+                    singleButton: true,
+                  ),
+                  barrierDismissible: false,
+                );
+              } else if (error == 'UPLOAD_FAILED') {
+                showDialog(
+                  context: context,
+                  builder: (c) => getDialog(
+                    context,
+                    () {
+                      Navigator.pop(context);
+                    },
+                    () {},
+                    context.l10n.connectionError,
+                    context.l10n.connectionErrorDesc,
+                    okButtonText: context.l10n.ok,
                     singleButton: true,
                   ),
                   barrierDismissible: false,
@@ -139,9 +212,9 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
                     },
                     () {},
                     // TODO: improve this
-                    'Invalid recording detected',
-                    'Please make sure you speak for at least 5 seconds and not more than 90.',
-                    okButtonText: 'Ok',
+                    context.l10n.invalidRecordingMultipleSpeakers,
+                    context.l10n.invalidRecordingDesc,
+                    okButtonText: context.l10n.ok,
                     singleButton: true,
                   ),
                   barrierDismissible: false,
@@ -153,219 +226,286 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
                     context,
                     () {
                       Navigator.pop(context);
-                      //  Navigator.pop(context);
                     },
                     () {},
-                    'Are you there?',
-                    'We could not detect any speech. Please make sure to speak for at least 10 seconds and not more than 3 minutes.',
-                    okButtonText: 'Ok',
+                    context.l10n.areYouThere,
+                    context.l10n.noSpeechDesc,
+                    okButtonText: context.l10n.ok,
+                    singleButton: true,
+                  ),
+                  barrierDismissible: false,
+                );
+              } else if (error == 'SOCKET_DISCONNECTED' || error == 'SOCKET_ERROR') {
+                showDialog(
+                  context: context,
+                  builder: (c) => getDialog(
+                    context,
+                    () {
+                      provider.close();
+                      Navigator.pop(context);
+                    },
+                    () {},
+                    context.l10n.connectionLost,
+                    context.l10n.connectionLostDesc,
+                    okButtonText: context.l10n.tryAgain,
                     singleButton: true,
                   ),
                   barrierDismissible: false,
                 );
               }
             },
-            child: Container(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  const SizedBox(
-                    height: 10,
+            child: Column(
+              children: [
+                Expanded(child: Container()),
+                Container(
+                  width: double.infinity,
+                  padding: EdgeInsets.fromLTRB(32, 0, 32, MediaQuery.of(context).padding.bottom + 8),
+                  decoration: const BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
                   ),
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(40, !provider.startedRecording ? 20 : 0, 40, 20),
-                    child: !provider.startedRecording
-                        ? const Column(
-                            children: [
-                              Text(
-                                'Omi needs to learn your voice to recognize you',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 20,
-                                  height: 1.4,
-                                  fontWeight: FontWeight.w400,
-                                ),
-                              ),
-                              SizedBox(height: 14),
-                              //Text("Note: This only works in English", style: TextStyle(color: Colors.white)),
-                            ],
-                          )
-                        : LayoutBuilder(
-                            builder: (context, constraints) {
-                              return ShaderMask(
-                                shaderCallback: (bounds) {
-                                  if (provider.text.split(' ').length < 10) {
-                                    return const LinearGradient(colors: [Colors.white, Colors.white])
-                                        .createShader(bounds);
-                                  }
-                                  return const LinearGradient(
-                                    colors: [Colors.transparent, Colors.white],
-                                    stops: [0.0, 0.5],
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                  ).createShader(bounds);
-                                },
-                                blendMode: BlendMode.dstIn,
-                                child: SizedBox(
-                                  height: 100,
-                                  child: ListView(
-                                    controller: _scrollController,
-                                    shrinkWrap: true,
-                                    physics: const NeverScrollableScrollPhysics(),
-                                    children: [
-                                      Text(
-                                        provider.text,
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w400,
-                                          height: 1.5,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
+                  child: SafeArea(
+                    top: false,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(height: 32),
+
+                        // Title
+                        Text(
+                          provider.startedRecording && !provider.profileCompleted
+                              ? 'Answer with your voice:'
+                              : 'Please find a quiet place',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                            height: 1.2,
+                            fontFamily: 'Manrope',
                           ),
-                  ),
-                  !provider.startedRecording
-                      ? (provider.isInitialising
-                          ? const CircularProgressIndicator(
-                              color: Colors.white,
-                            )
-                          : Column(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                const SizedBox(height: 20),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-                                  decoration: BoxDecoration(
-                                    border: const GradientBoxBorder(
-                                      gradient: LinearGradient(colors: [
-                                        Color.fromARGB(127, 208, 208, 208),
-                                        Color.fromARGB(127, 188, 99, 121),
-                                        Color.fromARGB(127, 86, 101, 182),
-                                        Color.fromARGB(127, 126, 190, 236)
-                                      ]),
-                                      width: 2,
-                                    ),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: TextButton(
+                          textAlign: TextAlign.center,
+                        ),
+
+                        const SizedBox(height: 16),
+
+                        // Content area changes based on state
+                        if (!provider.startedRecording) ...[
+                          // Intro text
+                          Text(
+                            'Omi needs to learn your goals and your voice. Answer questions with your voice. You\'ll be able to modify it later.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.6),
+                              fontSize: 16,
+                              height: 1.5,
+                              fontFamily: 'Manrope',
+                            ),
+                          ),
+
+                          const SizedBox(height: 32),
+
+                          // Get Started button
+                          provider.isInitialising
+                              ? const CircularProgressIndicator(color: Colors.white)
+                              : SizedBox(
+                                  width: double.infinity,
+                                  height: 56,
+                                  child: ElevatedButton(
                                     onPressed: () async {
                                       // Check if user has set primary language, if not, show dialog
                                       if (!context.read<HomeProvider>().hasSetPrimaryLanguage) {
                                         await LanguageSelectionDialog.show(context);
                                       }
-                                      
-                                      await stopDeviceRecording();
-                                      await provider.initialise(finalizedCallback: restartDeviceRecording);
-                                      provider.forceCompletionTimer =
-                                          Timer(Duration(seconds: provider.maxDuration), () async {
-                                        provider.finalize();
-                                      });
-                                      provider.updateStartedRecording(true);
+
+                                      await stopAllRecording();
+
+                                      // Initialize speech profile with phone mic as input source
+                                      bool success = await provider.initialise(
+                                        usePhoneMic: true,
+                                        processConversationCallback: () {
+                                          Provider.of<CaptureProvider>(
+                                            context,
+                                            listen: false,
+                                          ).forceProcessingCurrentConversation();
+                                        },
+                                      );
+
+                                      if (!success) {
+                                        return;
+                                      }
+
+                                      provider.forceCompletionTimer = Timer(
+                                        Duration(seconds: provider.maxDuration),
+                                        () async {
+                                          provider.finalize();
+                                        },
+                                      );
+
+                                      if (!mounted) return;
+                                      _questionAnimationController.forward();
                                     },
-                                    child: const Text(
-                                      'Get Started',
-                                      style: TextStyle(color: Colors.white, fontSize: 16),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.white,
+                                      foregroundColor: Colors.black,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                                      elevation: 0,
                                     ),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                              ],
-                            ))
-                      : provider.profileCompleted
-                          ? Container(
-                              margin: const EdgeInsets.only(top: 40),
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-                              decoration: BoxDecoration(
-                                border: const GradientBoxBorder(
-                                  gradient: LinearGradient(colors: [
-                                    Color.fromARGB(127, 208, 208, 208),
-                                    Color.fromARGB(127, 188, 99, 121),
-                                    Color.fromARGB(127, 86, 101, 182),
-                                    Color.fromARGB(127, 126, 190, 236)
-                                  ]),
-                                  width: 2,
-                                ),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: TextButton(
-                                onPressed: () {
-                                  widget.goNext();
-                                },
-                                child: const Text(
-                                  "All done!",
-                                  style: TextStyle(color: Colors.white, fontSize: 16),
-                                ),
-                              ),
-                            )
-                          : provider.uploadingProfile
-                              ? Padding(
-                                  padding: const EdgeInsets.only(top: 40.0),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      const SizedBox(
-                                        height: 24,
-                                        width: 24,
-                                        child: Center(
-                                          child: CircularProgressIndicator(
-                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                          ),
-                                        ),
+                                    child: Text(
+                                      context.l10n.getStarted,
+                                      style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        fontFamily: 'Manrope',
                                       ),
-                                      const SizedBox(width: 24),
-                                      Text(provider.loadingText,
-                                          style: const TextStyle(color: Colors.white, fontSize: 18)),
-                                    ],
-                                  ),
-                                )
-                              : Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const SizedBox(height: 20),
-                                    provider.percentageCompleted > 0
-                                        ? const SizedBox()
-                                        : const Text(
-                                            "Introduce\nyourself",
-                                            style: TextStyle(color: Colors.white, fontSize: 24, height: 1.4),
-                                            textAlign: TextAlign.center,
-                                          ),
-                                    const SizedBox(height: 10),
-                                    SizedBox(
-                                        width: MediaQuery.sizeOf(context).width * 0.9,
-                                        child: ProgressBarWithPercentage(progressValue: provider.percentageCompleted)),
-                                    const SizedBox(height: 12),
-                                    Text(
-                                      provider.message,
-                                      style: TextStyle(color: Colors.grey.shade300, fontSize: 14, height: 1.4),
-                                      textAlign: TextAlign.center,
                                     ),
-                                  ],
+                                  ),
                                 ),
-                  (!provider.startedRecording)
-                      ? TextButton(
-                          onPressed: () {
-                            widget.onSkip();
-                          },
-                          child: const Text(
-                            'Skip for now',
-                            style: TextStyle(
-                              color: Colors.white,
-                              decoration: TextDecoration.underline,
-                              fontSize: 14,
-                              fontWeight: FontWeight.normal,
+
+                          // Skip for now
+                          TextButton(
+                            onPressed: () => widget.onSkip(),
+                            child: Text(
+                              context.l10n.skipForNow,
+                              style: const TextStyle(color: Colors.grey, fontSize: 16),
                             ),
                           ),
-                        )
-                      : const SizedBox(),
-                ],
-              ),
+                        ] else if (provider.profileCompleted) ...[
+                          // All Done state
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 56,
+                            child: ElevatedButton(
+                              onPressed: () => widget.goNext(),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: Colors.black,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                                elevation: 0,
+                              ),
+                              child: Text(
+                                context.l10n.allDone,
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w600,
+                                  fontFamily: 'Manrope',
+                                ),
+                              ),
+                            ),
+                          ),
+                        ] else if (provider.uploadingProfile) ...[
+                          // Uploading state
+                          const SizedBox(height: 16),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const SizedBox(
+                                height: 24,
+                                width: 24,
+                                child: Center(
+                                  child: CircularProgressIndicator(
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Text(
+                                _getLoadingText(context, provider.loadingState),
+                                style: const TextStyle(color: Colors.white, fontSize: 16, fontFamily: 'Manrope'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                        ] else ...[
+                          // Recording state - transcript + question + progress
+                          ShaderMask(
+                            shaderCallback: (bounds) {
+                              if (provider.text.split(' ').length < 10) {
+                                return const LinearGradient(colors: [Colors.white, Colors.white]).createShader(bounds);
+                              }
+                              return const LinearGradient(
+                                colors: [Colors.transparent, Colors.white],
+                                stops: [0.0, 0.5],
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                              ).createShader(bounds);
+                            },
+                            blendMode: BlendMode.dstIn,
+                            child: SizedBox(
+                              height: 80,
+                              child: ListView(
+                                controller: _scrollController,
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                children: [
+                                  Text(
+                                    provider.text,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.white.withValues(alpha: 0.6),
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      height: 1.5,
+                                      fontFamily: 'Manrope',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(height: 8),
+
+                          // Current question
+                          FadeTransition(
+                            opacity: _questionFadeAnimation,
+                            child: Text(
+                              provider.currentQuestion,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 24,
+                                height: 1.3,
+                                fontFamily: 'Manrope',
+                                fontWeight: FontWeight.w600,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+
+                          const SizedBox(height: 12),
+
+                          // Progress bar
+                          SizedBox(
+                            width: double.infinity,
+                            child: ProgressBarWithPercentage(progressValue: provider.questionProgress),
+                          ),
+
+                          const SizedBox(height: 8),
+
+                          Text(
+                            context.l10n.keepGoing,
+                            style: TextStyle(
+                              color: Colors.grey.shade400,
+                              fontSize: 14,
+                              height: 1.3,
+                              fontFamily: 'Manrope',
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+
+                          TextButton(
+                            onPressed: () => provider.skipCurrentQuestion(),
+                            child: Text(
+                              context.l10n.skipThisQuestion,
+                              style: const TextStyle(color: Colors.grey, fontSize: 14, fontFamily: 'Manrope'),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           );
         },

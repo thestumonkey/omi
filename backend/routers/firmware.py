@@ -8,6 +8,10 @@ from enum import Enum
 import ast
 
 from database.redis_db import get_generic_cache, set_generic_cache
+from utils.log_sanitizer import sanitize
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceModel(int, Enum):
@@ -15,9 +19,17 @@ class DeviceModel(int, Enum):
     OMI_DEVKIT_2 = 2
     OPEN_GLASS = 3
     OMI_CV1 = 4
+    OMI_GLASS = 5
 
 
 router = APIRouter()
+
+# Firmware release tag pattern — matches Omi_CV1_v3.0.15, Omi_DK2_v2.0.10, OmiGlass_v2.3.2, etc.
+FIRMWARE_TAG_PATTERN = re.compile(
+    r'^(?:Omi_CV1|Omi_DK2|OmiGlass|OpenGlass|Friend)_v[0-9]+(?:\.[0-9]+){1,2}$',
+    re.IGNORECASE,
+)
+MAX_PAGES = 20  # Safety cap to prevent runaway pagination
 
 
 # Device Model Number
@@ -25,6 +37,7 @@ router = APIRouter()
 # - DK1: Friend | Friend DevKit 1
 # - OpenGlass: OpenGlass
 # - Omi_CV1: Omi CV 1
+# - OMI_GLASS: OMI Glass
 def _get_device_by_model_number(device_model: str):
     if device_model in ['Omi DevKit 2']:
         return DeviceModel.OMI_DEVKIT_2
@@ -34,6 +47,8 @@ def _get_device_by_model_number(device_model: str):
         return DeviceModel.OPEN_GLASS
     if device_model in ['Omi CV 1']:
         return DeviceModel.OMI_CV1
+    if device_model in ['OMI Glass', 'OmiGlass']:
+        return DeviceModel.OMI_GLASS
     # TODO: remove
     if device_model in ['OMI_shell']:
         return DeviceModel.OMI_CV1
@@ -43,29 +58,64 @@ def _get_device_by_model_number(device_model: str):
     return None
 
 
-async def get_omi_github_releases(cache_key: str) -> Optional[List[Dict]]:
-    """Fetch releases from GitHub API with caching"""
+async def get_omi_github_releases(cache_key: str, tag_filter: Optional[re.Pattern] = None) -> Optional[List[Dict]]:
+    """Fetch releases from GitHub API with caching.
 
-    # Check cache first
+    When tag_filter is provided, paginates through all pages and returns only
+    releases whose tag_name matches the filter. Without tag_filter, returns
+    the first page of releases unfiltered (sufficient for desktop releases
+    which are always recent).
+    """
+
+    # Check cache first (use `is not None` so cached empty list is a hit)
     cached_releases = get_generic_cache(cache_key)
-    if cached_releases:
+    if cached_releases is not None:
         return cached_releases
 
-    # Make GitHub API request if not cached
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
+    }
+
+    collected = []
+    page = 1
+
     async with httpx.AsyncClient() as client:
-        url = "https://api.github.com/repos/BasedHardware/omi/releases?per_page=100"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        }
-        response = await client.get(url, headers=headers)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Failed to fetch latest release")
-        releases = response.json()
-        # Cache successful response for 30 minutes
-        set_generic_cache(cache_key, releases, ttl=1800)
-        return releases
+        while page <= MAX_PAGES:
+            url = f"https://api.github.com/repos/BasedHardware/omi/releases?per_page=100&page={page}"
+            response = await client.get(url, headers=headers)
+            if response.status_code != 200:
+                logger.error(
+                    "Error fetching GitHub releases page %d: %d %s", page, response.status_code, sanitize(response.text)
+                )
+                raise HTTPException(status_code=500, detail="Failed to fetch release information")
+
+            page_releases = response.json()
+            if not page_releases:
+                break
+
+            if tag_filter:
+                for release in page_releases:
+                    tag_name = release.get("tag_name", "")
+                    if tag_filter.match(tag_name):
+                        collected.append(release)
+            else:
+                collected.extend(page_releases)
+
+            # Without filter, single page is enough (desktop releases are recent)
+            if not tag_filter:
+                break
+
+            # Stop if this was the last page
+            if len(page_releases) < 100:
+                break
+
+            page += 1
+
+    # Cache for 5 minutes (even if empty, to avoid hammering GitHub)
+    set_generic_cache(cache_key, collected, ttl=300)
+    return collected
 
 
 def _parse_firmware_version(version_str: Optional[str]) -> Tuple[int, ...]:
@@ -105,29 +155,34 @@ async def get_latest_version(device_model: str, firmware_revision: str, hardware
         raise HTTPException(status_code=404, detail="Device not found")
 
     cache_key = "github_releases_omi"
-    releases = await get_omi_github_releases(cache_key)
+    releases = await get_omi_github_releases(cache_key, tag_filter=FIRMWARE_TAG_PATTERN)
     if not releases:
         raise HTTPException(status_code=404, detail="No releases found for the repository")
 
     current_device_firmware_tuple = _parse_firmware_version(firmware_revision)
 
     # Determine release prefix based on device model
-    release_prefix = "Friend" # Default for OMI_DEVKIT_1
+    release_prefix = "Friend"  # Default for OMI_DEVKIT_1
     if device == DeviceModel.OMI_DEVKIT_2:
         release_prefix = "Omi_DK2"
     elif device == DeviceModel.OPEN_GLASS:
         release_prefix = "OpenGlass"
     elif device == DeviceModel.OMI_CV1:
         release_prefix = "Omi_CV1"
+    elif device == DeviceModel.OMI_GLASS:
+        release_prefix = "OmiGlass"
 
     candidate_releases = []
     for release in releases:
+        tag_name = release.get("tag_name", "")
+
         if release.get("draft") or not release.get("published_at") or not release.get("tag_name"):
             continue
 
-        tag_name = release.get("tag_name", "")
         # Regex matches prefix_vX.Y or prefix_vX.Y.Z (ensures full match with ^ and $)
-        if not bool(re.match(f"^{release_prefix}_v[0-9]+(?:\\.[0-9]+){{1,2}}$", tag_name, re.IGNORECASE)):
+        regex_pattern = f"^{release_prefix}_v[0-9]+(?:\\.[0-9]+){{1,2}}$"
+        matches = bool(re.match(regex_pattern, tag_name, re.IGNORECASE))
+        if not matches:
             continue
 
         kv = extract_key_value_pairs(release.get("body"))
@@ -170,13 +225,23 @@ async def get_latest_version(device_model: str, firmware_revision: str, hardware
     # KEY_VALUE_END -->
     assets = release_data.get("assets", [])
     asset = None
-    for a in assets:
-        asset_name = a.get("name")
-        if isinstance(asset_name, str) and "ota" in asset_name.lower() and asset_name.endswith(".zip"):
-            asset = a
-            break
-    if not asset:
-        raise HTTPException(status_code=500, detail="No OTA zip found in the selected release")
+    # OmiGlass uses .bin firmware files, other devices use OTA .zip files
+    if device == DeviceModel.OMI_GLASS:
+        for a in assets:
+            asset_name = a.get("name")
+            if isinstance(asset_name, str) and asset_name.endswith(".bin"):
+                asset = a
+                break
+        if not asset:
+            raise HTTPException(status_code=500, detail="No firmware .bin file found in the selected release")
+    else:
+        for a in assets:
+            asset_name = a.get("name")
+            if isinstance(asset_name, str) and "ota" in asset_name.lower() and asset_name.endswith(".zip"):
+                asset = a
+                break
+        if not asset:
+            raise HTTPException(status_code=500, detail="No OTA zip found in the selected release")
 
     # Safely get values with defaults from the chosen latest_release's kv
     version = kv.get("release_firmware_version")

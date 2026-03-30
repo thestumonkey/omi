@@ -1,80 +1,114 @@
-<!-- This file is auto-generated from docs/docs/developer/sdk/python.mdx. Do not edit manually. -->
-# 🎧 Omi Python SDK 
+<!-- This file is auto-generated from docs/doc/developer/sdk/python.mdx. Do not edit manually. -->
+## Overview
 
-This SDK connects to an **Omi wearable device** over **Bluetooth**, decodes the **Opus-encoded audio**, and transcribes it in **real time using Deepgram**.
+A pip-installable Python SDK for connecting to Omi wearable devices over Bluetooth, decoding Opus-encoded audio, and transcribing it in real time using Deepgram.
+
+<CardGroup cols={3}>
+  <Card title="Bluetooth Connection" icon="bluetooth">
+    Connect to any Omi device
+  </Card>
+  <Card title="Opus Decoding" icon="waveform">
+    Decode Opus audio to PCM
+  </Card>
+  <Card title="Real-time Transcription" icon="microphone">
+    Deepgram-powered STT
+  </Card>
+</CardGroup>
 
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Clone the repo
+<Steps>
+  <Step title="Set Up Your Environment">
+    Get a free API key from [Deepgram](https://deepgram.com):
+
+    ```bash
+    export DEEPGRAM_API_KEY=your_actual_deepgram_key
+    ```
+  </Step>
+  <Step title="Find Your Omi Device">
+    Scan for nearby Bluetooth devices:
+
+    ```bash
+    omi-scan
+    ```
+
+    Look for a device named "Omi" and copy its MAC address:
+
+    ```
+    0. Omi [7F52EC55-50C9-D1B9-E8D7-19B83217C97D]
+    ```
+  </Step>
+  <Step title="Write Your Code">
+    ```python
+    import asyncio
+    import os
+    from omi import listen_to_omi, OmiOpusDecoder, transcribe
+    from asyncio import Queue
+
+    # Configuration
+    OMI_MAC = "YOUR_OMI_MAC_ADDRESS_HERE"  # From omi-scan
+    OMI_CHAR_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"  # Standard Omi audio UUID
+    DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+
+    async def main():
+        audio_queue = Queue()
+        decoder = OmiOpusDecoder()
+
+        def handle_audio(sender, data):
+            pcm_data = decoder.decode_packet(data)
+            if pcm_data:
+                audio_queue.put_nowait(pcm_data)
+
+        def handle_transcript(transcript):
+            print(f"Transcription: {transcript}")
+            # Save to file, send to API, etc.
+
+        # Start transcription and device connection
+        await asyncio.gather(
+            listen_to_omi(OMI_MAC, OMI_CHAR_UUID, handle_audio),
+            transcribe(audio_queue, DEEPGRAM_API_KEY, on_transcript=handle_transcript)
+        )
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+    ```
+  </Step>
+  <Step title="Run the Example">
+    ```bash
+    python examples/main.py
+    ```
+
+    The example will:
+    - Connect to your Omi device via Bluetooth
+    - Decode incoming Opus audio packets to PCM
+    - Transcribe audio in real-time using Deepgram
+    - Print transcriptions to the console
+  </Step>
+</Steps>
+
+
+## Development
+
+### Local Development Setup
 
 ```bash
 git clone https://github.com/BasedHardware/omi.git
-cd sdks/python
+cd omi/sdks/python
 
-### 2. Set up Python environment
+# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
+# Install in editable mode
+pip install -e .
 
-### 3. Install dependencies
-pip install -r requirements.txt
-
-
-### ⚙️ 4. Configuration Set your Deepgram API key
-
-# Get a free API key from https://deepgram.com, then run:
-export DEEPGRAM_API_KEY=your_actual_deepgram_key
-
-5. Find Omi’s MAC Address
-To connect to your specific Omi device, you need its Bluetooth MAC address.
-
-🔍 Scan for Nearby Bluetooth Devices
-Run this command:
-python -c "from omi.bluetooth import print_devices; print_devices()"
-Look for a device named Omi, like this:
-
-0. Omi [7F52EC55-50C9-D1B9-E8D7-19B83217C97D]
-Copy the MAC address inside the brackets and paste it into main.py:
-
-python
-Copy code
-OMI_MAC = "7F52EC55-50C9-D1B9-E8D7-19B83217C97D"
+# Install dev dependencies
+pip install -e ".[dev]"
+```
 
 
-### 6. Confirm Omi Audio Characteristic (Optional)
-You can verify the audio characteristic UUID by running:
+## License
 
-python omi/discover_characteristics.py
-You should see something like:
+MIT License — this is an unofficial SDK built by the community.
 
-
-Characteristic UUID: 19B10001-E8F2-537E-4F6C-D104768A1214
-This UUID is already used in the code by default.
-
-🏃 Run the SDK
-Once configured, start the main script:
-python main.py
-✅ You should see:
-Connected to Deepgram WebSocket
-Connected to [Omi MAC Address]
-DATA FROM OMI: ...
-Transcript: hello world
-
-
-### 🧩 Troubleshooting
-✅ Make sure Omi is powered on and near your computer
-
-✅ You must be using Python 3.10+
-
-✅ If you see extra_headers error from websockets, fix it with:
-
-
-pip install websockets==11.0.3
-
-
-### 🪪 License
-MIT License — this is an unofficial SDK built by the community, not affiliated with Omi.
-
-### 🙌 Credits
-Built by [Your Name] using Omi hardware and Deepgram’s transcription engine.

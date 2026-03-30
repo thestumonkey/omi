@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:omi/backend/preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import 'package:omi/backend/preferences.dart';
 
 class MarkdownViewer extends StatefulWidget {
   final String markdown;
@@ -16,10 +18,7 @@ class _MarkdownViewerState extends State<MarkdownViewer> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        title: Text(widget.title),
-      ),
+      appBar: AppBar(backgroundColor: Theme.of(context).colorScheme.primary, title: Text(widget.title)),
       backgroundColor: Theme.of(context).colorScheme.primary,
       body: ListView(
         children: [
@@ -37,10 +36,7 @@ class _MarkdownViewerState extends State<MarkdownViewer> {
                   backgroundColor: Colors.transparent,
                   color: Colors.black,
                 ),
-                blockquoteDecoration: BoxDecoration(
-                  color: Colors.grey.shade800,
-                  borderRadius: BorderRadius.circular(4),
-                ),
+                blockquoteDecoration: BoxDecoration(color: Color(0xFF35343B), borderRadius: BorderRadius.circular(4)),
                 code: const TextStyle(
                   fontSize: 16,
                   height: 1.2,
@@ -69,7 +65,7 @@ class _MarkdownViewerState extends State<MarkdownViewer> {
                 }
               },
             ),
-          )
+          ),
         ],
       ),
     );

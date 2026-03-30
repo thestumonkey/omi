@@ -1,9 +1,19 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:collection/collection.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:uuid/uuid.dart';
+
+import 'package:omi/services/agent_chat_service.dart' show agentLog, initAgentLog;
+import 'package:omi/backend/http/api/agents.dart';
+import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
@@ -11,24 +21,37 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/providers/app_provider.dart';
+import 'package:omi/app_globals.dart';
+import 'package:omi/services/agent_chat_service.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:omi/utils/file.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:uuid/uuid.dart';
+import 'package:omi/utils/file.dart';
+import 'package:omi/utils/logger.dart';
 
 class MessageProvider extends ChangeNotifier {
+  MessageProvider();
+
   AppProvider? appProvider;
   List<ServerMessage> messages = [];
   bool _isNextMessageFromVoice = false;
+
+  final AgentChatService _agentChatService = AgentChatService();
+  Timer? _vmKeepaliveTimer;
+  static const _keepaliveInterval = Duration(minutes: 5);
 
   bool isLoadingMessages = false;
   bool hasCachedMessages = false;
   bool isClearingChat = false;
   bool showTypingIndicator = false;
   bool sendingMessage = false;
+  double aiStreamProgress = 1.0;
+  bool agentThinkingAfterText = false;
 
   String firstTimeLoadingText = '';
+
+  List<App> chatApps = [];
+  bool isLoadingChatApps = false;
 
   List<File> selectedFiles = [];
   List<String> selectedFileTypes = [];
@@ -38,6 +61,56 @@ class MessageProvider extends ChangeNotifier {
 
   void updateAppProvider(AppProvider p) {
     appProvider = p;
+  }
+
+  void startVmKeepalive() {
+    if (!SharedPreferencesUtil().claudeAgentEnabled) return;
+    stopVmKeepalive();
+    _vmKeepaliveTimer = Timer.periodic(_keepaliveInterval, (_) {
+      sendAgentKeepalive();
+    });
+  }
+
+  /// Pre-connect the agent WebSocket so it's ready when the user sends a message.
+  /// Call this when the chat page opens.
+  Future<void> preConnectAgent() async {
+    if (!SharedPreferencesUtil().claudeAgentEnabled) return;
+    if (_agentChatService.isConnected) return;
+    await _agentChatService.connect();
+  }
+
+  void stopVmKeepalive() {
+    _vmKeepaliveTimer?.cancel();
+    _vmKeepaliveTimer = null;
+  }
+
+  void setChatApps(List<App> apps) {
+    chatApps = apps;
+    notifyListeners();
+  }
+
+  void removeChatApp(String appId) {
+    chatApps.removeWhere((app) => app.id == appId);
+    notifyListeners();
+  }
+
+  Future<void> fetchChatApps() async {
+    if (isLoadingChatApps) return;
+
+    isLoadingChatApps = true;
+    notifyListeners();
+
+    try {
+      final result = await retrieveAppsSearch(installedApps: true, limit: 50);
+
+      chatApps = result.apps.where((app) => app.worksWithChat()).toList();
+    } catch (e) {
+      Logger.debug('Error fetching chat apps: $e');
+      chatApps = [];
+    } finally {
+      isLoadingChatApps = false;
+      notifyListeners();
+    }
   }
 
   void setNextMessageOriginIsVoice(bool isVoice) {
@@ -59,6 +132,42 @@ class MessageProvider extends ChangeNotifier {
     }
     setIsUploadingFiles();
     notifyListeners();
+  }
+
+  Future<void> addFiles(List<File> files) async {
+    if (selectedFiles.length + files.length > 4) {
+      AppSnackbar.showSnackbarError('You can only select up to 4 files');
+      return;
+    }
+
+    List<File> filesToAdd = [];
+    List<String> typesToAdd = [];
+
+    for (var file in files) {
+      String ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
+      if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext)) {
+        typesToAdd.add('image');
+      } else {
+        typesToAdd.add('file');
+      }
+      filesToAdd.add(file);
+    }
+
+    if (filesToAdd.isNotEmpty) {
+      selectedFiles.addAll(filesToAdd);
+      selectedFileTypes.addAll(typesToAdd);
+      try {
+        await uploadFiles(filesToAdd, appProvider?.selectedChatAppId);
+      } catch (e) {
+        Logger.debug('Failed to upload files: $e');
+        if (selectedFiles.length >= filesToAdd.length) {
+          selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
+          selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
+        }
+        AppSnackbar.showSnackbarError('File upload failed. Please try again.');
+      }
+      notifyListeners();
+    }
   }
 
   bool isFileUploading(String id) {
@@ -91,58 +200,116 @@ class MessageProvider extends ChangeNotifier {
   }
 
   void captureImage() async {
-    var res = await ImagePicker().pickImage(source: ImageSource.camera);
-    if (res != null) {
-      selectedFiles.add(File(res.path));
-      selectedFileTypes.add('image');
-      var index = selectedFiles.length - 1;
-      await uploadFiles([selectedFiles[index]], appProvider?.selectedChatAppId);
-      notifyListeners();
+    final l10n = globalNavigatorKey.currentContext?.l10n;
+    try {
+      var res = await ImagePicker().pickImage(source: ImageSource.camera);
+      if (res != null) {
+        selectedFiles.add(File(res.path));
+        selectedFileTypes.add('image');
+        var index = selectedFiles.length - 1;
+        await uploadFiles([selectedFiles[index]], appProvider?.selectedChatAppId);
+        notifyListeners();
+      }
+    } on PlatformException catch (e) {
+      if (e.code == 'camera_access_denied') {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera',
+        );
+      } else {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgCameraAccessError(e.message ?? e.code) ?? 'Error accessing camera: ${e.message ?? e.code}',
+        );
+      }
+    } catch (e) {
+      AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
     }
   }
 
   void selectImage() async {
+    final l10n = globalNavigatorKey.currentContext?.l10n;
     if (selectedFiles.length >= 4) {
-      AppSnackbar.showSnackbarError('You can only select up to 4 images');
+      AppSnackbar.showSnackbarError(l10n?.msgMaxImagesLimit ?? 'You can only select up to 4 images');
       return;
     }
-    List res = [];
-    if (4 - selectedFiles.length == 1) {
-      res = [await ImagePicker().pickImage(source: ImageSource.gallery)];
-    } else {
-      res = await ImagePicker().pickMultiImage(limit: 4 - selectedFiles.length);
-    }
-    if (res.isNotEmpty) {
+
+    try {
       List<File> files = [];
+
+      List res = [];
+      if (4 - selectedFiles.length == 1) {
+        var image = await ImagePicker().pickImage(source: ImageSource.gallery);
+        if (image != null) {
+          res = [image];
+        }
+      } else {
+        res = await ImagePicker().pickMultiImage(limit: 4 - selectedFiles.length);
+      }
+
       for (var r in res) {
         files.add(File(r.path));
       }
+
       if (files.isNotEmpty) {
         selectedFiles.addAll(files);
-        selectedFileTypes.addAll(res.map((e) => 'image'));
+        selectedFileTypes.addAll(files.map((e) => 'image'));
         await uploadFiles(files, appProvider?.selectedChatAppId);
       }
       notifyListeners();
+    } on PlatformException catch (e) {
+      Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
+      if (e.code == 'photo_access_denied') {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgPhotosPermissionDenied ?? 'Photos permission denied. Please allow access to photos to select images',
+        );
+      } else {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgSelectImagesError(e.message ?? e.code) ?? 'Error selecting images: ${e.message ?? e.code}',
+        );
+      }
+    } catch (e) {
+      Logger.debug('🖼️ General exception during image picking: $e');
+      AppSnackbar.showSnackbarError(l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.');
     }
   }
 
   void selectFile() async {
-    var res = await FilePicker.platform.pickFiles(
+    final l10n = globalNavigatorKey.currentContext?.l10n;
+    if (selectedFiles.length >= 4) {
+      AppSnackbar.showSnackbarError(l10n?.msgMaxFilesLimit ?? 'You can only select up to 4 files');
+      return;
+    }
+
+    try {
+      var res = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowMultiple: true,
-        allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp']);
-    if (res != null) {
-      List<File> files = [];
-      for (var r in res.files) {
-        files.add(File(r.path!));
-      }
-      if (files.isNotEmpty) {
-        selectedFiles.addAll(files);
-        selectedFileTypes.addAll(res.files.map((e) => 'file'));
-        await uploadFiles(files, appProvider?.selectedChatAppId);
-      }
+        allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp'],
+        dialogTitle: 'Select files',
+        withData: false,
+        withReadStream: false,
+      );
 
-      notifyListeners();
+      if (res != null && res.files.isNotEmpty) {
+        List<File> files = [];
+        for (var r in res.files) {
+          if (r.path != null && files.length < (4 - selectedFiles.length)) {
+            files.add(File(r.path!));
+          }
+        }
+
+        if (files.isNotEmpty) {
+          selectedFiles.addAll(files);
+          selectedFileTypes.addAll(files.map((e) => 'file'));
+          await uploadFiles(files, appProvider?.selectedChatAppId);
+        }
+        notifyListeners();
+      }
+    } on PlatformException catch (e) {
+      AppSnackbar.showSnackbarError(
+        l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}',
+      );
+    } catch (e) {
+      AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
     }
   }
 
@@ -164,7 +331,7 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> uploadFiles(List<File> files, String? appId) async {
+  Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
     if (files.isNotEmpty) {
       setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
       var res = await uploadFilesServer(files, appId: appId);
@@ -172,11 +339,15 @@ class MessageProvider extends ChangeNotifier {
         uploadedFiles.addAll(res);
       } else {
         clearSelectedFiles();
-        AppSnackbar.showSnackbarError('Failed to upload file, please try again later');
+        final l10n = globalNavigatorKey.currentContext?.l10n;
+        AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
       }
       setMultiUploadingFileStatus(files.map((e) => e.path).toList(), false);
       notifyListeners();
+      return res;
     }
+
+    return null;
   }
 
   void removeLocalMessage(String id) {
@@ -196,6 +367,7 @@ class MessageProvider extends ChangeNotifier {
       SharedPreferencesUtil().cachedMessages = messages;
       setHasCachedMessages(true);
     }
+    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     setLoadingMessages(false);
     notifyListeners();
   }
@@ -204,40 +376,43 @@ class MessageProvider extends ChangeNotifier {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
       messages = SharedPreferencesUtil().cachedMessages;
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
     notifyListeners();
   }
 
   Future<List<ServerMessage>> getMessagesFromServer({bool dropdownSelected = false}) async {
+    final l10n = globalNavigatorKey.currentContext?.l10n;
     if (!hasCachedMessages) {
-      firstTimeLoadingText = 'Reading your memories...';
+      firstTimeLoadingText = l10n?.msgReadingMemories ?? 'Reading your memories...';
       notifyListeners();
     }
     setLoadingMessages(true);
-    var mes = await getMessagesServer(
-      pluginId: appProvider?.selectedChatAppId,
-      dropdownSelected: dropdownSelected,
-    );
+    var mes = await getMessagesServer(appId: appProvider?.selectedChatAppId, dropdownSelected: dropdownSelected);
     if (!hasCachedMessages) {
-      firstTimeLoadingText = 'Learning from your memories...';
+      firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
       notifyListeners();
     }
     messages = mes;
+    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     setLoadingMessages(false);
     notifyListeners();
     return messages;
   }
 
-  Future setMessageNps(ServerMessage message, int value) async {
-    await setMessageResponseRating(message.id, value);
+  Future setMessageNps(ServerMessage message, int value, {String? reason}) async {
+    await setMessageResponseRating(message.id, value, reason: reason);
     message.askForNps = false;
+    // Update local message rating so it persists when scrolling
+    message.rating = value == 0 ? null : value;
     notifyListeners();
   }
 
   Future clearChat() async {
     setClearingChat(true);
-    var mes = await clearChatServer(pluginId: appProvider?.selectedChatAppId);
+    var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
     messages = mes;
+    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     setClearingChat(false);
     notifyListeners();
   }
@@ -248,6 +423,13 @@ class MessageProvider extends ChangeNotifier {
     if (appId == 'no_selected') {
       appId = null;
     }
+    // Use local file paths as thumbnails so images display immediately
+    List<MessageFile> localFiles = List.from(uploadedFiles);
+    for (int i = 0; i < localFiles.length && i < selectedFiles.length; i++) {
+      if (localFiles[i].mimeTypeToFileType() == 'image') {
+        localFiles[i].thumbnail = selectedFiles[i].path;
+      }
+    }
     var message = ServerMessage(
       const Uuid().v4(),
       DateTime.now(),
@@ -256,14 +438,14 @@ class MessageProvider extends ChangeNotifier {
       MessageType.text,
       appId,
       false,
-      List.from(uploadedFiles),
+      localFiles,
       fileIds,
       [],
     );
     if (messages.firstWhereOrNull((m) => m.id == message.id) != null) {
       return;
     }
-    messages.insert(0, message);
+    messages.add(message);
     notifyListeners();
   }
 
@@ -271,12 +453,15 @@ class MessageProvider extends ChangeNotifier {
     if (messages.firstWhereOrNull((m) => m.id == message.id) != null) {
       return;
     }
-    messages.insert(0, message);
+    messages.add(message);
     notifyListeners();
   }
 
-  Future sendVoiceMessageStreamToServer(List<List<int>> audioBytes,
-      {Function? onFirstChunkRecived, BleAudioCodec? codec}) async {
+  Future sendVoiceMessageStreamToServer(
+    List<List<int>> audioBytes, {
+    Function? onFirstChunkRecived,
+    BleAudioCodec? codec,
+  }) async {
     var file = await FileUtils.saveAudioBytesToTempFile(
       audioBytes,
       DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
@@ -291,20 +476,24 @@ class MessageProvider extends ChangeNotifier {
     App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
     bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-    MixpanelManager().chatVoiceInputUsed(
-      chatTargetId: chatTargetId,
-      isPersonaChat: isPersonaChat,
-    );
+    MixpanelManager().chatVoiceInputUsed(chatTargetId: chatTargetId, isPersonaChat: isPersonaChat);
 
     setShowTypingIndicator(true);
     var message = ServerMessage.empty();
-    messages.insert(0, message);
+    messages.add(message);
+    var aiIndex = messages.length - 1;
     notifyListeners();
 
     try {
       bool firstChunkRecieved = false;
       await for (var chunk in sendVoiceMessageStreamServer([file])) {
-        if (!firstChunkRecieved && [MessageChunkType.data, MessageChunkType.done].contains(chunk.type)) {
+        if (!firstChunkRecieved &&
+            [
+              MessageChunkType.message,
+              MessageChunkType.data,
+              MessageChunkType.done,
+              MessageChunkType.think,
+            ].contains(chunk.type)) {
           firstChunkRecieved = true;
           if (onFirstChunkRecived != null) {
             onFirstChunkRecived();
@@ -325,13 +514,14 @@ class MessageProvider extends ChangeNotifier {
 
         if (chunk.type == MessageChunkType.done) {
           message = chunk.message!;
-          messages[0] = message;
+          messages[aiIndex] = message;
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.message) {
-          messages.insert(1, chunk.message!);
+          messages.insert(aiIndex, chunk.message!);
+          aiIndex++;
           notifyListeners();
           continue;
         }
@@ -351,6 +541,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future sendMessageStreamToServer(String text) async {
+    aiStreamProgress = 0.0;
     setShowTypingIndicator(true);
     var currentAppId = appProvider?.selectedChatAppId;
     if (currentAppId == 'no_selected') {
@@ -371,45 +562,325 @@ class MessageProvider extends ChangeNotifier {
     );
     _isNextMessageFromVoice = false;
 
+    // Route through agent VM if Claude Agent is enabled
+    if (SharedPreferencesUtil().claudeAgentEnabled) {
+      agentLog('[MessageProvider] claudeAgentEnabled=true, routing through agent VM');
+      await _sendMessageViaAgent(text, currentAppId);
+      return;
+    }
+
+    await initAgentLog();
+    agentLog(
+      '[MessageProvider] sending via /v2/messages — appId=$currentAppId, text="${text.length > 80 ? text.substring(0, 80) : text}"',
+    );
+
     var message = ServerMessage.empty(appId: currentAppId);
-    messages.insert(0, message);
+    messages.add(message);
+    final aiIndex = messages.length - 1;
     notifyListeners();
     List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
     clearSelectedFiles();
     clearUploadedFiles();
+    String textBuffer = '';
+    Timer? timer;
+    int chunkCount = 0;
+
+    void flushBuffer() {
+      if (textBuffer.isNotEmpty) {
+        message.text += textBuffer;
+        textBuffer = '';
+        aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
+        HapticFeedback.lightImpact();
+        notifyListeners();
+      }
+    }
+
     try {
       await for (var chunk in sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds)) {
+        chunkCount++;
         if (chunk.type == MessageChunkType.think) {
+          flushBuffer();
+          agentLog('[MessageProvider] think: ${chunk.text.length > 100 ? chunk.text.substring(0, 100) : chunk.text}');
           message.thinkings.add(chunk.text);
+          if (message.text.isNotEmpty) {
+            agentThinkingAfterText = true;
+          }
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.data) {
-          message.text += chunk.text;
-          notifyListeners();
+          if (chunkCount <= 3) agentLog('[MessageProvider] first data chunk received');
+          if (agentThinkingAfterText) {
+            agentThinkingAfterText = false;
+            notifyListeners();
+          }
+          textBuffer += chunk.text;
+          timer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+            flushBuffer();
+          });
           continue;
         }
 
+        timer?.cancel();
+        timer = null;
+        flushBuffer();
+
         if (chunk.type == MessageChunkType.done) {
+          agentLog('[MessageProvider] done — $chunkCount chunks, final text ${message.text.length} chars');
           message = chunk.message!;
-          messages[0] = message;
+          messages[aiIndex] = message;
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.error) {
+          agentLog('[MessageProvider] error: ${chunk.text}');
           message.text = chunk.text;
           notifyListeners();
           continue;
         }
       }
     } catch (e) {
+      agentLog('[MessageProvider] exception: $e');
       message.text = ServerMessageChunk.failedMessage().text;
       notifyListeners();
+    } finally {
+      timer?.cancel();
+      flushBuffer();
+      agentLog('[MessageProvider] stream complete — $chunkCount chunks total');
+      aiStreamProgress = 1.0;
+      setShowTypingIndicator(false);
+      setSendingMessage(false);
+    }
+  }
+
+  Future _sendMessageViaAgent(String text, String? appId) async {
+    var message = ServerMessage.empty(appId: appId);
+    messages.add(message);
+    final aiIndex = messages.length - 1;
+    notifyListeners();
+    clearSelectedFiles();
+    clearUploadedFiles();
+    String textBuffer = '';
+    Timer? timer;
+
+    void flushBuffer() {
+      if (textBuffer.isNotEmpty) {
+        message.text += textBuffer;
+        textBuffer = '';
+        aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
+        HapticFeedback.lightImpact();
+        notifyListeners();
+      }
     }
 
-    setShowTypingIndicator(false);
+    Timer? silenceTimer;
+    Timer? rotateTimer;
+    int rotateIndex = 0;
+
+    try {
+      // Reuse existing connection if available, otherwise connect
+      if (!_agentChatService.isConnected) {
+        final connected = await _agentChatService.connect();
+        if (!connected) {
+          await Future.delayed(const Duration(seconds: 1));
+          final retried = await _agentChatService.connect();
+          if (!retried) {
+            message.text = 'Failed to connect to agent. Check that your desktop is running.';
+            notifyListeners();
+            setShowTypingIndicator(false);
+            setSendingMessage(false);
+            return;
+          }
+        }
+      }
+
+      // History is injected server-side by the agent-proxy from Firestore
+      final prompt = text;
+
+      const rotateMessages = [
+        'Querying your data',
+        'Analyzing activity',
+        'Processing results',
+        'Pulling context',
+        'Searching records',
+      ];
+
+      void startSilenceTimer() {
+        silenceTimer?.cancel();
+        rotateTimer?.cancel();
+        if (message.text.isNotEmpty || textBuffer.isNotEmpty) {
+          silenceTimer = Timer(const Duration(seconds: 2), () {
+            flushBuffer();
+            agentThinkingAfterText = true;
+            rotateIndex = 0;
+            message.thinkings.add(rotateMessages[rotateIndex]);
+            notifyListeners();
+            rotateTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+              rotateIndex = (rotateIndex + 1) % rotateMessages.length;
+              if (message.thinkings.isNotEmpty) {
+                message.thinkings[message.thinkings.length - 1] = rotateMessages[rotateIndex];
+              }
+              notifyListeners();
+            });
+          });
+        }
+      }
+
+      bool gotContent = false;
+      await for (var event in _agentChatService.sendQuery(prompt)) {
+        switch (event.type) {
+          case AgentChatEventType.textDelta:
+            gotContent = true;
+            silenceTimer?.cancel();
+            rotateTimer?.cancel();
+            if (agentThinkingAfterText) {
+              textBuffer += '\n\n';
+              agentThinkingAfterText = false;
+              notifyListeners();
+            }
+            textBuffer += event.text;
+            timer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+              flushBuffer();
+            });
+            startSilenceTimer();
+            break;
+          case AgentChatEventType.toolActivity:
+            // Show tool activity as thinking
+            silenceTimer?.cancel();
+            rotateTimer?.cancel();
+            flushBuffer();
+            if (message.text.isNotEmpty) {
+              agentThinkingAfterText = true;
+            }
+            if (event.text.isNotEmpty) {
+              message.thinkings.add(event.text);
+            }
+            notifyListeners();
+            break;
+          case AgentChatEventType.result:
+            silenceTimer?.cancel();
+            rotateTimer?.cancel();
+            timer?.cancel();
+            timer = null;
+            flushBuffer();
+            if (event.text.isNotEmpty && message.text.isEmpty) {
+              message.text = event.text;
+            }
+            notifyListeners();
+            break;
+          case AgentChatEventType.status:
+            // Show VM startup status as thinking indicator
+            silenceTimer?.cancel();
+            rotateTimer?.cancel();
+            flushBuffer();
+            if (event.text.isNotEmpty) {
+              message.thinkings.add(event.text);
+            }
+            notifyListeners();
+            break;
+          case AgentChatEventType.error:
+            silenceTimer?.cancel();
+            rotateTimer?.cancel();
+            timer?.cancel();
+            timer = null;
+            flushBuffer();
+            message.text = message.text.isEmpty ? 'Agent error: ${event.text}' : message.text;
+            notifyListeners();
+            break;
+        }
+      }
+
+      // Auto-reconnect + retry: if we got no real content and connection died (timeout),
+      // reconnect once and retry the query
+      if (!gotContent && !_agentChatService.isConnected) {
+        agentLog('[RETRY] No content + disconnected — attempting reconnect');
+        message.text = '';
+        message.thinkings.add('Reconnecting...');
+        notifyListeners();
+        final reconnected = await _agentChatService.reconnect();
+        if (reconnected) {
+          agentLog('[RETRY] Reconnected — retrying query');
+          await for (var event in _agentChatService.sendQuery(prompt)) {
+            switch (event.type) {
+              case AgentChatEventType.textDelta:
+                silenceTimer?.cancel();
+                rotateTimer?.cancel();
+                if (agentThinkingAfterText) {
+                  textBuffer += '\n\n';
+                  agentThinkingAfterText = false;
+                  notifyListeners();
+                }
+                textBuffer += event.text;
+                timer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+                  flushBuffer();
+                });
+                startSilenceTimer();
+                break;
+              case AgentChatEventType.toolActivity:
+                silenceTimer?.cancel();
+                rotateTimer?.cancel();
+                flushBuffer();
+                if (message.text.isNotEmpty) {
+                  agentThinkingAfterText = true;
+                }
+                if (event.text.isNotEmpty) {
+                  message.thinkings.add(event.text);
+                }
+                notifyListeners();
+                break;
+              case AgentChatEventType.result:
+                silenceTimer?.cancel();
+                rotateTimer?.cancel();
+                timer?.cancel();
+                timer = null;
+                flushBuffer();
+                if (event.text.isNotEmpty && message.text.isEmpty) {
+                  message.text = event.text;
+                }
+                notifyListeners();
+                break;
+              case AgentChatEventType.status:
+                silenceTimer?.cancel();
+                rotateTimer?.cancel();
+                flushBuffer();
+                if (event.text.isNotEmpty) {
+                  message.thinkings.add(event.text);
+                }
+                notifyListeners();
+                break;
+              case AgentChatEventType.error:
+                silenceTimer?.cancel();
+                rotateTimer?.cancel();
+                timer?.cancel();
+                timer = null;
+                flushBuffer();
+                message.text = message.text.isEmpty ? 'Agent error: ${event.text}' : message.text;
+                notifyListeners();
+                break;
+            }
+          }
+        } else {
+          agentLog('[RETRY] Reconnect failed');
+          message.text = 'Failed to reconnect to agent.';
+          notifyListeners();
+        }
+      }
+    } catch (e) {
+      Logger.error('Agent chat error: $e');
+      message.text = message.text.isEmpty ? 'Failed to get response from agent.' : message.text;
+      notifyListeners();
+    } finally {
+      silenceTimer?.cancel();
+      rotateTimer?.cancel();
+      timer?.cancel();
+      flushBuffer();
+      agentThinkingAfterText = false;
+      aiStreamProgress = 1.0;
+      setShowTypingIndicator(false);
+      setSendingMessage(false);
+    }
   }
 
   Future sendInitialAppMessage(App? app) async {

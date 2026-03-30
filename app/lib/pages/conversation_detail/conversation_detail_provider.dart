@@ -1,7 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
+import 'package:collection/collection.dart';
 import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
+
+import 'package:omi/backend/http/api/apps.dart';
+import 'package:omi/backend/http/api/audio.dart';
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
@@ -12,8 +17,8 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:instabug_flutter/instabug_flutter.dart';
-import 'package:tuple/tuple.dart';
+import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 
 class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixin {
   AppProvider? appProvider;
@@ -21,8 +26,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   // late ServerConversation memory;
 
-  int conversationIdx = 0;
   DateTime selectedDate = DateTime.now();
+  String? _cachedConversationId;
 
   bool isLoading = false;
   bool loadingReprocessConversation = false;
@@ -30,7 +35,20 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   App? selectedAppForReprocessing;
 
   final scaffoldKey = GlobalKey<ScaffoldState>();
+
+  // Cache enabled conversation apps and suggested apps
+  final List<App> _cachedEnabledConversationApps = [];
+  final List<App> _cachedSuggestedApps = [];
+  // Track locally added apps (e.g., from quick template creator) to preserve during refetch
+  final Set<String> _locallyAddedAppIds = {};
+
   List<App> get appsList => appProvider?.apps ?? [];
+
+  /// Returns cached enabled conversation apps
+  List<App> get cachedEnabledConversationApps => _cachedEnabledConversationApps;
+
+  /// Returns cached suggested apps for current conversation
+  List<App> get cachedSuggestedApps => _cachedSuggestedApps;
 
   Structured get structured {
     return conversation.structured;
@@ -38,18 +56,28 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   ServerConversation? _cachedConversation;
   ServerConversation get conversation {
-    if (conversationProvider == null ||
-        !conversationProvider!.groupedConversations.containsKey(selectedDate) ||
-        conversationProvider!.groupedConversations[selectedDate] == null ||
-        conversationProvider!.groupedConversations[selectedDate]!.length <= conversationIdx) {
-      // Return cached conversation if available, otherwise create an empty one
-      if (_cachedConversation == null) {
-        throw StateError("No conversation available");
+    final list = conversationProvider?.groupedConversations[selectedDate];
+    final id = _cachedConversationId;
+
+    ServerConversation? result;
+
+    if (list != null && list.isNotEmpty) {
+      if (id != null) {
+        result = list.firstWhereOrNull((c) => c.id == id);
       }
-      return _cachedConversation!;
+      result ??= list.first;
+      _cachedConversationId = result.id;
     }
-    _cachedConversation = conversationProvider!.groupedConversations[selectedDate]![conversationIdx];
-    return _cachedConversation!;
+
+    result ??= _cachedConversation;
+    if (result != null &&
+        result.createdAt.year == selectedDate.year &&
+        result.createdAt.month == selectedDate.month &&
+        result.createdAt.day == selectedDate.day) {
+      return _cachedConversation = result;
+    }
+
+    throw StateError("No valid conversation found");
   }
 
   List<bool> appResponseExpanded = [];
@@ -62,12 +90,6 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   bool canDisplaySeconds = true;
 
   bool hasAudioRecording = false;
-
-  List<ConversationPhoto> photos = [];
-  List<Tuple2<String, String>> photosData = [];
-
-  bool displayDevToolsInSheet = false;
-  bool displayShareOptionsInSheet = false;
 
   bool editSegmentLoading = false;
 
@@ -83,28 +105,25 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     notifyListeners();
   }
 
-  Future populatePhotosData() async {
-    if (photos.isEmpty) return;
-    // photosData = await compute<List<MemoryPhoto>, List<Tuple2<String, String>>>(
-    //   (photos) => photos.map((e) => Tuple2(e.base64, e.description)).toList(),
-    //   photos,
-    // );
-    photosData = photos.map((e) => Tuple2(e.base64, e.description)).toList();
+  Future<void> saveEditingSegmentText(int segmentIndex, String newText) async {
+    final segment = conversation.transcriptSegments[segmentIndex];
+    final oldText = segment.text;
+
+    if (newText.trim().isEmpty || newText.trim() == oldText) return;
+
+    // Optimistic update
+    segment.text = newText.trim();
     notifyListeners();
+
+    final success = await updateConversationSegmentText(conversation.id, segment.id, newText.trim());
+    if (!success && !_isDisposed) {
+      conversation.transcriptSegments[segmentIndex].text = oldText;
+      notifyListeners();
+    }
   }
 
   void toggleIsTranscriptExpanded() {
     isTranscriptExpanded = !isTranscriptExpanded;
-    notifyListeners();
-  }
-
-  void toggleDevToolsInSheet(bool value) {
-    displayDevToolsInSheet = value;
-    notifyListeners();
-  }
-
-  void toggleShareOptionsInSheet(bool value) {
-    displayShareOptionsInSheet = value;
     notifyListeners();
   }
 
@@ -142,11 +161,18 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     notifyListeners();
   }
 
-  void updateConversation(int memIdx, DateTime date) {
-    conversationIdx = memIdx;
-    selectedDate = date;
-    appResponseExpanded = List.filled(conversation.appResults.length, false);
-    notifyListeners();
+  void updateConversation(String conversationId, DateTime date) {
+    final list = conversationProvider?.groupedConversations[date];
+    if (list != null) {
+      final conv = list.firstWhereOrNull((c) => c.id == conversationId);
+      if (conv != null) {
+        selectedDate = date;
+        _cachedConversationId = conv.id;
+        _cachedConversation = conv;
+        appResponseExpanded = List.filled(conv.appResults.length, false);
+        notifyListeners();
+      }
+    }
   }
 
   void updateEventState(bool state, int i) {
@@ -220,20 +246,25 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       }
     });
 
-    photos = [];
     canDisplaySeconds = TranscriptSegment.canDisplaySeconds(conversation.transcriptSegments);
-    if (conversation.source == ConversationSource.openglass) {
-      await getConversationPhotos(conversation.id).then((value) async {
-        photos = value;
-        await populatePhotosData();
-      });
+
+    loadPreferredSummarizationApp();
+
+    fetchAndCacheEnabledConversationApps();
+
+    // Pre-cache audio files in background
+    if (conversation.hasAudio()) {
+      precacheConversationAudio(conversation.id);
     }
+
     if (!conversation.discarded) {
       getHasConversationSummaryRating(conversation.id).then((value) {
+        if (_isDisposed) return;
         hasConversationSummaryRatingSet = value;
         notifyListeners();
         if (!hasConversationSummaryRatingSet) {
           _ratingTimer = Timer(const Duration(seconds: 15), () {
+            if (_isDisposed) return;
             setConversationSummaryRating(conversation.id, -1); // set -1 to indicate is was shown
             showRatingUI = true;
             notifyListeners();
@@ -247,11 +278,12 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   Future<bool> reprocessConversation({String? appId}) async {
-    debugPrint('_reProcessConversation with appId: $appId');
+    Logger.debug('_reProcessConversation with appId: $appId');
     updateReprocessConversationLoadingState(true);
     updateReprocessConversationId(conversation.id);
     try {
       var updatedConversation = await reProcessConversationServer(conversation.id, appId: appId);
+      if (_isDisposed) return false;
       MixpanelManager().reProcessConversation(conversation);
       updateReprocessConversationLoadingState(false);
       updateReprocessConversationId('');
@@ -265,6 +297,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       conversationProvider!.updateConversation(updatedConversation);
       SharedPreferencesUtil().modifiedConversationDetails = updatedConversation;
 
+      // Update the cached conversation to ensure we have the latest data
+      _cachedConversation = updatedConversation;
+
       // Check if the summarized app is in the apps list
       AppResponse? summaryApp = getSummarizedApp();
       if (summaryApp != null && summaryApp.appId != null && appProvider != null) {
@@ -272,6 +307,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
         bool appExists = appProvider!.apps.any((app) => app.id == appId);
         if (!appExists) {
           await appProvider!.getApps();
+          if (_isDisposed) return false;
         }
       }
       notifyInfo('REPROCESS_SUCCESS');
@@ -280,10 +316,14 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     } catch (err, stacktrace) {
       print(err);
       var conversationReporting = MixpanelManager().getConversationEventProperties(conversation);
-      CrashReporting.reportHandledCrash(err, stacktrace, level: NonFatalExceptionLevel.critical, userAttributes: {
-        'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
-        'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
-      });
+      await PlatformManager.instance.crashReporter.reportCrash(
+        err,
+        stacktrace,
+        userAttributes: {
+          'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
+          'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
+        },
+      );
       notifyError('REPROCESS_FAILED');
       updateReprocessConversationLoadingState(false);
       updateReprocessConversationId('');
@@ -292,10 +332,12 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
   }
 
-  void unassignConversationTranscriptSegment(String conversationId, int segmentIdx) {
+  void unassignConversationTranscriptSegment(String conversationId, String segmentId) {
+    final segmentIdx = conversation.transcriptSegments.indexWhere((s) => s.id == segmentId);
+    if (segmentIdx == -1) return;
     conversation.transcriptSegments[segmentIdx].isUser = false;
     conversation.transcriptSegments[segmentIdx].personId = null;
-    assignConversationTranscriptSegment(conversationId, segmentIdx);
+    assignBulkConversationTranscriptSegments(conversationId, [segmentId]);
     notifyListeners();
   }
 
@@ -305,11 +347,238 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     if (conversation.appResults.isNotEmpty) {
       return conversation.appResults[0];
     }
+    // If no appResults but we have structured overview, create a fake AppResponse
+    if (conversation.structured.overview.isNotEmpty) {
+      return AppResponse(conversation.structured.overview, appId: null);
+    }
     return null;
   }
 
-  void setPreferredSummarizationApp(String appId) {
-    setPreferredSummarizationAppServer(appId);
+  /// Returns the list of suggested summarization apps for this conversation
+  List<String> getSuggestedApps() {
+    return conversation.suggestedSummarizationApps;
+  }
+
+  /// Returns the list of suggested apps that are available in the current apps list
+  List<App> getAvailableSuggestedApps() {
+    final suggestedAppIds = getSuggestedApps();
+    if (suggestedAppIds.isEmpty || appProvider == null) return [];
+
+    return appProvider!.apps
+        .where((app) => suggestedAppIds.contains(app.id) && app.worksWithMemories() && app.enabled)
+        .toList();
+  }
+
+  /// Returns the list of suggested apps from the API (includes unavailable apps)
+  Future<List<App>> getSuggestedAppsFromAPI() async {
+    try {
+      return await getConversationSuggestedApps(conversation.id);
+    } catch (e) {
+      Logger.debug('Error fetching suggested apps: $e');
+      return [];
+    }
+  }
+
+  /// Returns the list of enabled apps that support conversations from the API
+  Future<List<App>> getEnabledConversationAppsFromAPI() async {
+    try {
+      final result = await retrieveAppsSearch(installedApps: true, limit: 100);
+      return result.apps.where((app) => app.worksWithMemories() && app.enabled).toList();
+    } catch (e) {
+      Logger.debug('Error fetching enabled conversation apps: $e');
+      return [];
+    }
+  }
+
+  /// Fetches and caches enabled conversation apps
+  /// Preserves locally added apps that may not yet be returned by the API
+  Future<void> fetchAndCacheEnabledConversationApps() async {
+    try {
+      final apps = await getEnabledConversationAppsFromAPI();
+      if (_isDisposed) return;
+
+      // Preserve locally added apps that aren't in the API response yet
+      final locallyAddedApps = _cachedEnabledConversationApps
+          .where((app) => _locallyAddedAppIds.contains(app.id))
+          .toList();
+
+      _cachedEnabledConversationApps.clear();
+      _cachedEnabledConversationApps.addAll(apps);
+
+      // Add back locally added apps if they weren't returned by the API
+      for (final localApp in locallyAddedApps) {
+        if (!apps.any((app) => app.id == localApp.id)) {
+          _cachedEnabledConversationApps.add(localApp);
+        } else {
+          // If API returned the app, remove from locally tracked set
+          _locallyAddedAppIds.remove(localApp.id);
+        }
+      }
+
+      notifyListeners();
+    } catch (e) {
+      Logger.debug('Error fetching and caching enabled conversation apps: $e');
+    }
+  }
+
+  /// Fetches and caches suggested apps for the current conversation
+  Future<void> fetchAndCacheSuggestedApps() async {
+    try {
+      final apps = await getSuggestedAppsFromAPI();
+      if (_isDisposed) return;
+      _cachedSuggestedApps.clear();
+      _cachedSuggestedApps.addAll(apps);
+      notifyListeners();
+    } catch (e) {
+      Logger.debug('Error fetching and caching suggested apps: $e');
+    }
+  }
+
+  /// Finds an app by ID from cached apps
+  App? findAppById(String? appId) {
+    if (appId == null) return null;
+
+    final enabledApp = _cachedEnabledConversationApps.firstWhereOrNull((app) => app.id == appId);
+    if (enabledApp != null) return enabledApp;
+
+    final suggestedApp = _cachedSuggestedApps.firstWhereOrNull((app) => app.id == appId);
+    if (suggestedApp != null) return suggestedApp;
+
+    return null;
+  }
+
+  /// Enables an app and updates the cached enabled apps list
+  /// Returns true if successful, false otherwise
+  Future<bool> enableApp(App app) async {
+    try {
+      // Make the server call to enable the app
+      final success = await enableAppServer(app.id);
+      if (_isDisposed) return false;
+
+      if (success) {
+        // Update SharedPreferences
+        SharedPreferencesUtil().enableApp(app.id);
+
+        // Update the app's enabled state
+        app.enabled = true;
+
+        // Add to cached enabled apps if not already there
+        final existingIndex = _cachedEnabledConversationApps.indexWhere((a) => a.id == app.id);
+        if (existingIndex == -1) {
+          _cachedEnabledConversationApps.add(app);
+        } else {
+          _cachedEnabledConversationApps[existingIndex] = app;
+        }
+
+        notifyListeners();
+      }
+
+      return success;
+    } catch (e) {
+      Logger.debug('Error enabling app ${app.id}: $e');
+      return false;
+    }
+  }
+
+  /// Adds an app to the cached enabled conversation apps list
+  /// Used when a new app is created and installed from the quick template creator
+  void addToEnabledConversationApps(App app) {
+    final existingIndex = _cachedEnabledConversationApps.indexWhere((a) => a.id == app.id);
+    if (existingIndex == -1) {
+      _cachedEnabledConversationApps.add(app);
+    } else {
+      _cachedEnabledConversationApps[existingIndex] = app;
+    }
+    // Track this as a locally added app so it's preserved during refetch
+    _locallyAddedAppIds.add(app.id);
     notifyListeners();
+  }
+
+  /// Checks if an app is in the suggested apps list
+  bool isAppSuggested(String appId) {
+    return getSuggestedApps().contains(appId);
+  }
+
+  /// Checks if a suggested app is available/enabled for the user
+  bool isSuggestedAppAvailable(String appId) {
+    if (appProvider == null) return false;
+    return appProvider!.apps.any((app) => app.id == appId && app.worksWithMemories() && app.enabled);
+  }
+
+  void setCachedConversation(ServerConversation conversation) {
+    _cachedConversation = conversation;
+    _cachedConversationId = conversation.id;
+    notifyListeners();
+  }
+
+  Future<void> refreshConversation() async {
+    try {
+      final updatedConversation = await getConversationById(conversation.id);
+      if (_isDisposed) return;
+      if (updatedConversation != null) {
+        _cachedConversation = updatedConversation;
+        conversationProvider?.updateConversation(updatedConversation);
+        notifyListeners();
+      }
+    } catch (e) {
+      Logger.debug('Error refreshing conversation: $e');
+    }
+  }
+
+  void updateFolderIdLocally(String? newFolderId) {
+    if (_cachedConversation != null) {
+      _cachedConversation!.folderId = newFolderId;
+      conversationProvider?.updateConversation(_cachedConversation!);
+      notifyListeners();
+    }
+  }
+
+  void updateVisibilityLocally(ConversationVisibility newVisibility) {
+    if (_cachedConversation != null) {
+      _cachedConversation!.visibility = newVisibility;
+      conversationProvider?.updateConversation(_cachedConversation!);
+      notifyListeners();
+    }
+  }
+
+  String? _preferredSummarizationAppId;
+
+  String? get preferredSummarizationAppId => _preferredSummarizationAppId;
+
+  void setPreferredSummarizationApp(String appId) {
+    _preferredSummarizationAppId = appId;
+    setPreferredSummarizationAppServer(appId);
+    SharedPreferencesUtil().preferredSummarizationAppId = appId;
+    notifyListeners();
+  }
+
+  void loadPreferredSummarizationApp() {
+    _preferredSummarizationAppId = SharedPreferencesUtil().preferredSummarizationAppId;
+  }
+
+  void trackLastUsedSummarizationApp(String appId) {
+    SharedPreferencesUtil().lastUsedSummarizationAppId = appId;
+    notifyListeners();
+  }
+
+  String? getLastUsedSummarizationAppId() {
+    final lastUsedId = SharedPreferencesUtil().lastUsedSummarizationAppId;
+    return lastUsedId.isEmpty ? null : lastUsedId;
+  }
+
+  App? getLastUsedSummarizationApp() {
+    final lastUsedId = getLastUsedSummarizationAppId();
+    if (lastUsedId == null || appProvider == null) return null;
+
+    return appProvider!.apps.firstWhereOrNull((app) => app.id == lastUsedId && app.worksWithMemories() && app.enabled);
+  }
+
+  bool _isDisposed = false;
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    _ratingTimer?.cancel();
+    super.dispose();
   }
 }

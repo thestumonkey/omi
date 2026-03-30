@@ -5,20 +5,21 @@
 # Prerequisites (stable versions, use these or higher):
 #
 # Common for all developers:
-# - Flutter SDK (v3.24.1)
+# - Flutter SDK (v3.35.3)
 # - Opus Codec: https://opus-codec.org
 #
 # For iOS Developers:
-# - Xcode (v15.2)
-# - CocoaPods (v1.14.3)
+# - Xcode (v16.4)
+# - CocoaPods (v1.16.2)
 #
 # For Android Developers:
-# - Android Studio (Iguana | 2023.2.1 Patch 2)
-# - Android SDK Platform (API 34)
-# - JDK (v17)
+# - Android Studio (Iguana | 2024.3)
+# - Android SDK Platform (API 35)
+# - JDK (v21)
 # - Gradle (v8.10)
-# - NDK (27.0.12077973)
-# Usages: 
+# - NDK (28.2.13676358)
+#
+# Usages:
 # - $bash setup.sh ios
 # - $bash setup.sh android
 
@@ -28,26 +29,48 @@ echo "👋 Yo folks! Welcome to the OMI Mobile Project - We're hiring! Join us o
 echo "Prerequisites (stable versions, use these or higher):"
 echo ""
 echo "Common for all developers:"
-echo "- Flutter SDK (v3.24.1)"
+echo "- Flutter SDK (v3.35.3)"
 echo "- Opus Codec: https://opus-codec.org"
 echo ""
 echo "For iOS Developers:"
-echo "- Xcode (v15.2)"
-echo "- CocoaPods (v1.14.3)"
+echo "- Xcode (v16.4)"
+echo "- CocoaPods (v1.16.2)"
 echo ""
 echo "For Android Developers:"
-echo "- Android Studio (Iguana | 2023.2.1 Patch 2)"
-echo "- Android SDK Platform (API 34)"
-echo "- JDK (v17)"
+echo "- Android Studio (Iguana | 2024.3)"
+echo "- Android SDK Platform (API 36)"
+echo "- JDK (v21)"
 echo "- Gradle (v8.10)"
-echo "- NDK (27.0.12077973)"
+echo "- NDK (28.2.13676358)"
+echo ""
 echo "Usages:"
 echo "- bash setup.sh ios"
 echo "- bash setup.sh android"
 echo ""
 
 
-API_BASE_URL=https://backend-dt5lrfkkoa-uc.a.run.app/
+API_BASE_URL=https://api.omiapi.com/
+
+######################################
+# Generate device suffix from hostname
+######################################
+function generate_device_suffix() {
+  # Use hostname or a hash of it as suffix
+  HOSTNAME=$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+  echo "${HOSTNAME}"
+}
+
+######################################
+# Generate custom configs for iOS
+######################################
+function generate_ios_custom_config() {
+  bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter \
+
+  # Custom bundle identifier
+  SUFFIX=$(generate_device_suffix)
+  CUSTOM_BUNDLE="com.friend-app-with-wearable.ios12-${SUFFIX}"
+  echo APP_BUNDLE_IDENTIFIER=${CUSTOM_BUNDLE} >> "ios/Flutter/Custom.xcconfig"
+}
 
 ######################################
 # Setup Firebase with prebuilt configs
@@ -105,7 +128,7 @@ function setup_provisioning_profile() {
         echo "Installing fastlane..."
         brew install fastlane
     fi
-    
+
     MATCH_PASSWORD=omi fastlane match development --readonly \
         --app_identifier com.friend-app-with-wearable.ios12.development \
         --git_url "git@github.com:BasedHardware/omi-community-certs.git"
@@ -117,6 +140,8 @@ function setup_provisioning_profile() {
 #################
 function setup_app_env() {
   echo API_BASE_URL=$API_BASE_URL > .dev.env
+  echo USE_WEB_AUTH=true >> .dev.env
+  echo USE_AUTH_CUSTOM_TOKEN=true >> .dev.env
 }
 
 # #######################
@@ -129,39 +154,35 @@ function setup_keystore_android() {
 # #####
 # Build
 # #####
-function build() {
+function run_build_android() {
   flutter pub get \
-    && dart run build_runner build
+    && dart run build_runner build \
+    && flutter run --flavor dev
 }
 
 # #########
 # Build iOS
 # #########
-function build_ios() {
+function run_build_ios() {
   flutter pub get \
     && pushd ios && pod install --repo-update && popd \
-    && dart run build_runner build
+    && dart run build_runner build \
+    && flutter run --flavor dev
 }
 
-# #######
-# Run dev
-# #######
-function run_dev() {
-  flutter run --flavor dev
-}
 
 case "${1}" in
   ios)
-    setup_firebase \
+      setup_firebase \
+      && generate_ios_custom_config \
       && setup_app_env \
-      && setup_provisioning_profile \
-      && build_ios
+      && run_build_ios
     ;;
   android)
     setup_keystore_android \
       && setup_firebase \
       && setup_app_env \
-      && build
+      && run_build_android
     ;;
   *)
     error "Unexpected platform '${1}'"

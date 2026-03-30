@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+
 import 'package:flutter_markdown/flutter_markdown.dart';
+
+import 'package:omi/utils/l10n_extensions.dart';
 
 class ExpandableTextWidget extends StatefulWidget {
   final String text;
@@ -7,8 +10,8 @@ class ExpandableTextWidget extends StatefulWidget {
   final Function toggleExpand;
   final TextStyle style;
   final int maxLines;
-  final String expandText;
-  final String collapseText;
+  final String? expandText;
+  final String? collapseText;
   final Color linkColor;
 
   const ExpandableTextWidget({
@@ -16,8 +19,8 @@ class ExpandableTextWidget extends StatefulWidget {
     required this.text,
     required this.style,
     this.maxLines = 3,
-    this.expandText = 'show more ↓',
-    this.collapseText = 'show less ↑',
+    this.expandText,
+    this.collapseText,
     this.linkColor = Colors.deepPurple,
     required this.isExpanded,
     required this.toggleExpand,
@@ -30,12 +33,11 @@ class ExpandableTextWidget extends StatefulWidget {
 class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
   @override
   Widget build(BuildContext context) {
+    final expandLabel = widget.expandText ?? context.l10n.showMore;
+    final collapseLabel = widget.collapseText ?? context.l10n.showLess;
+
     final span = TextSpan(text: widget.text, style: widget.style);
-    final tp = TextPainter(
-      text: span,
-      maxLines: widget.maxLines,
-      textDirection: TextDirection.ltr,
-    );
+    final tp = TextPainter(text: span, maxLines: widget.maxLines, textDirection: TextDirection.ltr);
     var width = MediaQuery.of(context).size.width;
     tp.layout(maxWidth: width);
     final isOverflowing = tp.didExceedMaxLines;
@@ -50,14 +52,8 @@ class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
             styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
               a: widget.style,
               p: widget.style,
-              blockquote: widget.style.copyWith(
-                backgroundColor: Colors.transparent,
-                color: Colors.black,
-              ),
-              blockquoteDecoration: BoxDecoration(
-                color: Colors.grey.shade800,
-                borderRadius: BorderRadius.circular(4),
-              ),
+              blockquote: widget.style.copyWith(backgroundColor: Colors.transparent, color: Colors.black),
+              blockquoteDecoration: BoxDecoration(color: Color(0xFF35343B), borderRadius: BorderRadius.circular(4)),
               code: widget.style.copyWith(
                 backgroundColor: Colors.transparent,
                 decoration: TextDecoration.none,
@@ -68,8 +64,8 @@ class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
             data: widget.isExpanded
                 ? widget.text
                 : widget.text.length > maxChars
-                    ? widget.text.substring(0, maxChars)
-                    : widget.text,
+                ? widget.text.substring(0, maxChars)
+                : widget.text,
           ),
           // Text(
           //   widget.text,
@@ -83,7 +79,7 @@ class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
               child: Padding(
                 padding: const EdgeInsets.only(top: 4.0),
                 child: Text(
-                  widget.isExpanded ? widget.collapseText : widget.expandText,
+                  widget.isExpanded ? collapseLabel : expandLabel,
                   style: TextStyle(
                     color: Colors.deepPurple,
                     fontWeight: FontWeight.w500,

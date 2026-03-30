@@ -1,17 +1,25 @@
 import 'dart:io';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' hide Category;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:collection/collection.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/providers/app_provider.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:image_picker/image_picker.dart';
 
 class AddAppProvider extends ChangeNotifier {
   AppProvider? appProvider;
@@ -30,13 +38,15 @@ class AddAppProvider extends ChangeNotifier {
   String? appCategory;
   List<Map<String, dynamic>> actions = [];
 
-// Trigger Event
+  // Trigger Event
   String? triggerEvent;
   TextEditingController webhookUrlController = TextEditingController();
   TextEditingController setupCompletedController = TextEditingController();
   TextEditingController instructionsController = TextEditingController();
   TextEditingController authUrlController = TextEditingController();
   TextEditingController appHomeUrlController = TextEditingController();
+  TextEditingController chatToolsManifestUrlController = TextEditingController();
+  TextEditingController sourceCodeUrlController = TextEditingController();
 
   // Pricing
   TextEditingController priceController = TextEditingController();
@@ -78,7 +88,7 @@ class AddAppProvider extends ChangeNotifier {
     appProvider = provider;
   }
 
-  Future init() async {
+  Future init({bool presetForConversationAnalysis = false, bool presetExternalIntegration = false}) async {
     setIsLoading(true);
     if (categories.isEmpty) {
       await getCategories();
@@ -89,6 +99,34 @@ class AddAppProvider extends ChangeNotifier {
     if (paymentPlans.isEmpty) {
       await getPaymentPlans();
     }
+
+    // Preset values for conversation analysis template
+    if (presetForConversationAnalysis) {
+      // Set category to conversation-analysis
+      setAppCategory('conversation-analysis');
+
+      // Add memories capability
+      final memoriesCapability = capabilities.firstWhereOrNull((cap) => cap.id == 'memories');
+      if (memoriesCapability != null && !selectedCapabilities.contains(memoriesCapability)) {
+        selectedCapabilities.add(memoriesCapability);
+      }
+
+      // Set a helpful default name and description
+      appNameController.text = 'My Conversation Analyzer';
+      appDescriptionController.text = 'A custom app to analyze and summarize conversations based on my specific needs.';
+
+      checkValidity();
+    }
+
+    // Preset external integration capability
+    if (presetExternalIntegration) {
+      final externalIntegrationCapability = capabilities.firstWhereOrNull((cap) => cap.id == 'external_integration');
+      if (externalIntegrationCapability != null && !selectedCapabilities.contains(externalIntegrationCapability)) {
+        selectedCapabilities.add(externalIntegrationCapability);
+      }
+      checkValidity();
+    }
+
     setIsLoading(false);
   }
 
@@ -144,6 +182,7 @@ class AddAppProvider extends ChangeNotifier {
       setupCompletedController.text = app.externalIntegration!.setupCompletedUrl ?? '';
       instructionsController.text = app.externalIntegration!.setupInstructionsFilePath ?? '';
       appHomeUrlController.text = app.externalIntegration!.appHomeUrl ?? '';
+      chatToolsManifestUrlController.text = app.externalIntegration!.chatToolsManifestUrl ?? '';
       if (app.externalIntegration!.authSteps.isNotEmpty) {
         authUrlController.text = app.externalIntegration!.authSteps.first.url;
       }
@@ -152,11 +191,12 @@ class AddAppProvider extends ChangeNotifier {
       actions = [];
       if (app.externalIntegration!.actions != null) {
         for (var action in app.externalIntegration!.actions!) {
-          actions.add({
-            'action': action.action,
-          });
+          actions.add({'action': action.action});
         }
       }
+    }
+    if (app.sourceCodeUrl != null) {
+      sourceCodeUrlController.text = app.sourceCodeUrl!;
     }
     if (app.chatPrompt != null) {
       chatPromptController.text = app.chatPrompt!.decodeString;
@@ -166,12 +206,14 @@ class AddAppProvider extends ChangeNotifier {
     }
     if (app.proactiveNotification != null) {
       selectedScopes = app.getNotificationScopesFromIds(
-          capabilities.firstWhere((element) => element.id == 'proactive_notification').notificationScopes);
+        capabilities.firstWhere((element) => element.id == 'proactive_notification').notificationScopes,
+      );
     }
 
     // Set existing thumbnails
     thumbnailUrls = app.thumbnailUrls;
     thumbnailIds = app.thumbnailIds;
+
     isValid = false;
     setIsLoading(false);
     notifyListeners();
@@ -190,6 +232,8 @@ class AddAppProvider extends ChangeNotifier {
     instructionsController.clear();
     authUrlController.clear();
     appHomeUrlController.clear();
+    chatToolsManifestUrlController.clear();
+    sourceCodeUrlController.clear();
     priceController.clear();
     selectePaymentPlan = null;
     termsAgreed = false;
@@ -208,9 +252,7 @@ class AddAppProvider extends ChangeNotifier {
   void addSpecificAction(String actionTypeId) {
     // Check if this action type already exists
     if (!actions.any((action) => action['action'] == actionTypeId)) {
-      actions.add({
-        'action': actionTypeId,
-      });
+      actions.add({'action': actionTypeId});
       checkValidity();
       notifyListeners();
     }
@@ -343,7 +385,7 @@ class AddAppProvider extends ChangeNotifier {
   }
 
   bool isFormValid() {
-    if (capabilitySelected() && (imageFile != null || imageUrl != null) && appCategory != null && termsAgreed) {
+    if (capabilitySelected() && (imageFile != null || imageUrl != null) && appCategory != null) {
       if (metadataKey.currentState != null && metadataKey.currentState!.validate()) {
         bool isValid = false;
         for (var capability in selectedCapabilities) {
@@ -406,58 +448,62 @@ class AddAppProvider extends ChangeNotifier {
       }
       if (selectedCapabilities.length == 1 && selectedCapabilities.first.id == 'proactive_notification') {
         if (selectedScopes.isEmpty) {
-          AppSnackbar.showSnackbarError('Please select one more core capability for your app to proceed');
+          AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCoreCapability);
           return false;
         }
       }
       if (isPaid && (priceController.text.isEmpty || selectePaymentPlan == null)) {
-        AppSnackbar.showSnackbarError('Please select a payment plan and enter a price for your app');
-        return false;
-      }
-      if (!termsAgreed) {
-        AppSnackbar.showSnackbarError('Please agree to the terms and conditions to proceed');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectPaymentPlan);
         return false;
       }
       if (!capabilitySelected()) {
-        AppSnackbar.showSnackbarError('Please select at least one capability for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCapability);
         return false;
       }
       if (imageFile == null && imageUrl == null) {
-        AppSnackbar.showSnackbarError('Please select a logo for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectLogo);
         return false;
       }
       for (var capability in selectedCapabilities) {
         if (capability.title == 'chat') {
           if (chatPromptController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a chat prompt for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterChatPrompt);
             return false;
           }
         }
         if (capability.title == 'memories') {
           if (conversationPromptController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a conversation prompt for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterConversationPrompt);
             return false;
           }
         }
         if (capability.title == 'external_integration') {
           if (triggerEvent == null) {
-            AppSnackbar.showSnackbarError('Please select a trigger event for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectTriggerEvent);
             return false;
           }
           if (webhookUrlController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a webhook URL for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterWebhookUrl);
             return false;
           }
           // Setup completed URL is optional, so we don't validate it here
         }
       }
       if (appCategory == null) {
-        AppSnackbar.showSnackbarError('Please select a category for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCategory);
+        return false;
+      }
+      // Require source code URL for external integration or proactive notification apps
+      bool needsSourceCode = selectedCapabilities.any(
+        (cap) => cap.id == 'external_integration' || cap.id == 'proactive_notification',
+      );
+      if (needsSourceCode && sourceCodeUrlController.text.trim().isEmpty) {
+        AppSnackbar.showSnackbarError('GitHub repository URL is required for this app type');
         return false;
       }
       return true;
     } else {
-      AppSnackbar.showSnackbarError('Please fill in all the required fields correctly');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppFillRequiredFields);
       return false;
     }
   }
@@ -478,7 +524,9 @@ class AddAppProvider extends ChangeNotifier {
       'price': priceController.text.isNotEmpty ? double.parse(priceController.text) : 0.0,
       'payment_plan': selectePaymentPlan,
       'thumbnails': thumbnailIds,
+      'source_code_url': sourceCodeUrlController.text.trim().isNotEmpty ? sourceCodeUrlController.text.trim() : null,
     };
+
     for (var capability in selectedCapabilities) {
       if (capability.id == 'external_integration') {
         data['external_integration'] = {
@@ -487,6 +535,7 @@ class AddAppProvider extends ChangeNotifier {
           'setup_completed_url': setupCompletedController.text.trim(),
           'setup_instructions_file_path': instructionsController.text.trim(),
           'app_home_url': appHomeUrlController.text.trim(),
+          'chat_tools_manifest_url': chatToolsManifestUrlController.text.trim(),
           'auth_steps': [],
         };
         if (authUrlController.text.isNotEmpty) {
@@ -521,15 +570,43 @@ class AddAppProvider extends ChangeNotifier {
       await appProvider!.getApps();
       var app = await getAppDetailsServer(updateAppId!);
       appProvider!.updateLocalApp(App.fromJson(app!));
-      AppSnackbar.showSnackbarSuccess('App updated successfully 🚀');
+      AppSnackbar.showSnackbarSuccess(globalNavigatorKey.currentContext!.l10n.addAppUpdatedSuccess);
       clear();
       success = true;
     } else {
-      AppSnackbar.showSnackbarError('Failed to update app. Please try again later');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppUpdateFailed);
       success = false;
     }
     checkValidity();
     setIsUpdating(false);
+    return success;
+  }
+
+  bool isRefreshingManifest = false;
+
+  void setIsRefreshingManifest(bool value) {
+    isRefreshingManifest = value;
+    notifyListeners();
+  }
+
+  Future<bool> refreshManifest() async {
+    if (updateAppId == null) {
+      AppSnackbar.showSnackbarError('App ID not found');
+      return false;
+    }
+
+    setIsRefreshingManifest(true);
+    var success = await refreshAppManifestServer(updateAppId!);
+    if (success) {
+      var app = await getAppDetailsServer(updateAppId!);
+      if (app != null) {
+        appProvider!.updateLocalApp(App.fromJson(app));
+        AppSnackbar.showSnackbarSuccess('Manifest refreshed successfully');
+      }
+    } else {
+      AppSnackbar.showSnackbarError('Failed to refresh manifest');
+    }
+    setIsRefreshingManifest(false);
     return success;
   }
 
@@ -548,7 +625,9 @@ class AddAppProvider extends ChangeNotifier {
       'price': priceController.text.isNotEmpty ? double.parse(priceController.text) : 0.0,
       'payment_plan': selectePaymentPlan,
       'thumbnails': thumbnailIds,
+      'source_code_url': sourceCodeUrlController.text.trim().isNotEmpty ? sourceCodeUrlController.text.trim() : null,
     };
+
     for (var capability in selectedCapabilities) {
       if (capability.id == 'external_integration') {
         data['external_integration'] = {
@@ -557,6 +636,7 @@ class AddAppProvider extends ChangeNotifier {
           'setup_completed_url': setupCompletedController.text.trim(),
           'setup_instructions_file_path': instructionsController.text.trim(),
           'app_home_url': appHomeUrlController.text.trim(),
+          'chat_tools_manifest_url': chatToolsManifestUrlController.text.trim(),
           'auth_steps': [],
         };
         if (authUrlController.text.isNotEmpty) {
@@ -588,7 +668,7 @@ class AddAppProvider extends ChangeNotifier {
     String? appId;
     var res = await submitAppServer(imageFile!, data);
     if (res.$1) {
-      AppSnackbar.showSnackbarSuccess('App submitted successfully 🚀');
+      AppSnackbar.showSnackbarSuccess(globalNavigatorKey.currentContext!.l10n.addAppSubmittedSuccess);
       await appProvider!.getApps();
       clear();
       appId = res.$3;
@@ -600,29 +680,148 @@ class AddAppProvider extends ChangeNotifier {
     return appId;
   }
 
-  Future<void> pickThumbnail() async {
-    ImagePicker imagePicker = ImagePicker();
+  Future pickImage() async {
     try {
-      var file = await imagePicker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 85,
-      );
-      if (file != null) {
+      Logger.debug('🖼️ Attempting to pick image from gallery...');
+
+      if (kIsWeb) {
+        Logger.debug('🖼️ Using file_picker for web platform');
+        try {
+          FilePickerResult? result = await FilePicker.platform.pickFiles(
+            type: FileType.custom,
+            allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
+            allowMultiple: false,
+            dialogTitle: 'Select an image file',
+            withData: false,
+            withReadStream: false,
+          );
+
+          if (result != null && result.files.isNotEmpty && result.files.single.path != null) {
+            Logger.debug('🖼️ Image picked successfully via file_picker: ${result.files.single.path}');
+            imageFile = File(result.files.single.path!);
+            Logger.debug('🖼️ Image file set, notifying listeners...');
+          } else {
+            Logger.debug('🖼️ No image selected by user via file_picker');
+          }
+        } on PlatformException catch (e) {
+          Logger.debug('🖼️ FilePicker PlatformException: ${e.code} - ${e.message}');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorOpeningFilePicker(e.message ?? e.code),
+          );
+        } catch (e) {
+          Logger.debug('🖼️ FilePicker general error: $e');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImage(e.toString()),
+          );
+        }
+      } else {
+        Logger.debug('🖼️ Using image_picker for mobile platform');
+        ImagePicker imagePicker = ImagePicker();
+        var file = await imagePicker.pickImage(source: ImageSource.gallery);
+        if (file != null) {
+          Logger.debug('🖼️ Image picked successfully via image_picker: ${file.path}');
+          imageFile = File(file.path);
+          Logger.debug('🖼️ Image file set, notifying listeners...');
+        } else {
+          Logger.debug('🖼️ No image selected by user via image_picker');
+        }
+      }
+
+      notifyListeners();
+    } on PlatformException catch (e) {
+      Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
+      if (e.code == 'photo_access_denied') {
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
+      } else {
+        AppSnackbar.showSnackbarError(
+          globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImage(e.message ?? e.code),
+        );
+      }
+    } catch (e) {
+      Logger.debug('🖼️ General exception during image picking: $e');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImageRetry);
+    }
+    checkValidity();
+    notifyListeners();
+  }
+
+  Future<void> pickThumbnail() async {
+    try {
+      Logger.debug('🖼️ Attempting to pick thumbnail from gallery...');
+
+      File? thumbnailFile;
+
+      if (kIsWeb) {
+        Logger.debug('🖼️ Using file_picker for web platform (thumbnail)');
+        try {
+          FilePickerResult? result = await FilePicker.platform.pickFiles(
+            type: FileType.custom,
+            allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
+            allowMultiple: false,
+            dialogTitle: 'Select a thumbnail image',
+            withData: false,
+            withReadStream: false,
+          );
+
+          if (result != null && result.files.isNotEmpty && result.files.single.path != null) {
+            Logger.debug('🖼️ Thumbnail picked successfully via file_picker: ${result.files.single.path}');
+            thumbnailFile = File(result.files.single.path!);
+          } else {
+            Logger.debug('🖼️ No thumbnail selected by user via file_picker');
+            return;
+          }
+        } on PlatformException catch (e) {
+          Logger.debug('🖼️ FilePicker PlatformException (thumbnail): ${e.code} - ${e.message}');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorOpeningFilePicker(e.message ?? e.code),
+          );
+          return;
+        } catch (e) {
+          Logger.debug('🖼️ FilePicker general error (thumbnail): $e');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnail(e.toString()),
+          );
+          return;
+        }
+      } else {
+        Logger.debug('🖼️ Using image_picker for mobile platform (thumbnail)');
+        ImagePicker imagePicker = ImagePicker();
+        var file = await imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+        if (file != null) {
+          Logger.debug('🖼️ Thumbnail picked successfully via image_picker: ${file.path}');
+          thumbnailFile = File(file.path);
+        } else {
+          Logger.debug('🖼️ No thumbnail selected by user via image_picker');
+          return;
+        }
+      }
+
+      if (thumbnailFile != null) {
         setIsUploadingThumbnail(true);
-        var thumbnailFile = File(file.path);
 
         // Upload thumbnail
+        Logger.debug('🖼️ Uploading thumbnail...');
         var result = await uploadAppThumbnail(thumbnailFile);
         if (result.isNotEmpty) {
           thumbnailUrls.add(result['thumbnail_url']!);
           thumbnailIds.add(result['thumbnail_id']!);
+          Logger.debug('🖼️ Thumbnail uploaded successfully');
         }
         setIsUploadingThumbnail(false);
       }
     } on PlatformException catch (e) {
+      Logger.debug('🖼️ PlatformException during thumbnail picking: ${e.code} - ${e.message}');
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
+      } else {
+        AppSnackbar.showSnackbarError(
+          globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnail(e.message ?? e.code),
+        );
       }
+      setIsUploadingThumbnail(false);
+    } catch (e) {
+      Logger.debug('🖼️ General exception during thumbnail picking: $e');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnailRetry);
       setIsUploadingThumbnail(false);
     }
     checkValidity();
@@ -641,38 +840,41 @@ class AddAppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future pickImage() async {
-    ImagePicker imagePicker = ImagePicker();
-    try {
-      var file = await imagePicker.pickImage(source: ImageSource.gallery);
-      if (file != null) {
-        imageFile = File(file.path);
-      }
-      notifyListeners();
-    } on PlatformException catch (e) {
-      if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
-      }
-    }
-    checkValidity();
-    notifyListeners();
-  }
-
   Future updateImage() async {
-    ImagePicker imagePicker = ImagePicker();
     try {
-      var file = await imagePicker.pickImage(source: ImageSource.gallery);
-      if (file != null) {
-        imageFile = File(file.path);
-        if (imageUrl != null) {
-          await CachedNetworkImage.evictFromCache(imageUrl!, cacheKey: imageUrl);
+      if (kIsWeb) {
+        FilePickerResult? result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
+          allowMultiple: false,
+          dialogTitle: 'Select an image file',
+          withData: false,
+          withReadStream: false,
+        );
+
+        if (result != null && result.files.isNotEmpty && result.files.single.path != null) {
+          imageFile = File(result.files.single.path!);
+          if (imageUrl != null) {
+            await CachedNetworkImage.evictFromCache(imageUrl!, cacheKey: imageUrl);
+          }
+          imageUrl = null;
         }
-        imageUrl = null;
+      } else {
+        ImagePicker imagePicker = ImagePicker();
+        var file = await imagePicker.pickImage(source: ImageSource.gallery);
+        if (file != null) {
+          imageFile = File(file.path);
+          if (imageUrl != null) {
+            await CachedNetworkImage.evictFromCache(imageUrl!, cacheKey: imageUrl);
+          }
+          imageUrl = null;
+        }
       }
+
       notifyListeners();
     } on PlatformException catch (e) {
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
       }
     }
     checkValidity();
@@ -684,9 +886,9 @@ class AddAppProvider extends ChangeNotifier {
       selectedCapabilities.remove(capability);
     } else {
       if (selectedCapabilities.length == 1 && selectedCapabilities.first.id == 'persona') {
-        AppSnackbar.showSnackbarError('Other capabilities cannot be selected with Persona');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppCapabilityConflictWithPersona);
       } else if (selectedCapabilities.isNotEmpty && capability.id == 'persona') {
-        AppSnackbar.showSnackbarError('Persona cannot be selected with other capabilities');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPersonaConflictWithCapabilities);
       } else {
         selectedCapabilities.add(capability);
       }

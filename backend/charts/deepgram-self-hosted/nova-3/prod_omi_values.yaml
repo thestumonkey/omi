@@ -41,33 +41,33 @@ scaling:
     api:
       metrics:
         # -- Scale the API deployment to this Engine-to-Api pod ratio
-        engineToApiRatio: 1
+        engineToApiRatio: 3
 
     engine:
       # -- Minimum number of Engine replicas.
-      minReplicas: 5
+      minReplicas: 1
       # -- Maximum number of Engine replicas.
-      maxReplicas: 20
+      maxReplicas: 10
       metrics:
         speechToText:
           batch:
             requestsPerPod: # Discuss a reasonable value with your Deepgram Account Representative
           streaming:
-            requestsPerPod: 
+            requestsPerPod: 60
         textToSpeech:
           batch:
             requestsPerPod: # Discuss a reasonable value with your Deepgram Account Representative
         # Discuss a reasoanble value with your Deepgram Account Representative
         # Must also set engine.concurrencyLimit.activeRequests if using request ratio for autoscaling
         requestCapacityRatio:
-        custom:
-        - type: External
-          external:
-            metric:
-              name: engine_avg_gpu_utilization
-            target:
-              type: Value
-              value: 60
+        # custom:
+        # - type: External
+        #   external:
+        #     metric:
+        #       name: engine_avg_gpu_utilization
+        #     target:
+        #       type: Value
+        #       value: 60
       behavior:
         scaleUp:
           stabilizationWindowSeconds: 60  # Wait 1 minute before scaling up
@@ -75,7 +75,7 @@ scaling:
 api:
   image:
     path: us-central1-docker.pkg.dev/based-hardware/deepgram/self-hosted-api
-    tag: release-250505
+    tag: release-251210
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -108,7 +108,7 @@ api:
 engine:
   image:
     path: us-central1-docker.pkg.dev/based-hardware/deepgram/self-hosted-engine
-    tag: release-250505
+    tag: release-251210
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -138,13 +138,19 @@ engine:
         gpd:
           enabled: true
           # Replace with your Google disk handle
-          volumeHandle: "projects/based-hardware/zones/us-central1-a/disks/prod-omi-deepgram-model-storage"
+          volumeHandle: "projects/based-hardware/zones/us-central1-a/disks/prod-omi-deepgram-model-storage-20251213"
+  startupProbe:
+    # -- periodSeconds defines how often to execute the probe.
+    periodSeconds: 10
+    # -- failureThreshold defines how many unsuccessful startup probe attempts
+    # are allowed before the container will be marked as Failed
+    failureThreshold: 100
 
 licenseProxy:
   enabled: true
   image:
     path: us-central1-docker.pkg.dev/based-hardware/deepgram/self-hosted-license-proxy
-    tag: release-250505
+    tag: release-251210
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -168,7 +174,7 @@ gpu-operator:
 
 kube-prometheus-stack:
   grafana:
-    enabled: true
+    enabled: false
     ingress:
       enabled: true
       annotations:
@@ -189,6 +195,7 @@ kube-prometheus-stack:
       finalizers:
         - kubernetes.io/pvc-protection
   prometheus:
+    enabled: false
     prometheusSpec:
       additionalScrapeConfigs:
         - job_name: "dg_engine_metrics"
@@ -225,13 +232,19 @@ kube-prometheus-stack:
             action: replace
             target_label: kubernetes_node
 
+  prometheusOperator:
+    enabled: false
+
+  kubeStateMetrics:
+    enabled: false
+
 prometheus-adapter:
   # -- Normally, this chart will be installed if `scaling.auto.enabled` is true. However, if you wish
   # to manage the Prometheus adapter in your cluster on your own and not as part of the Deepgram Helm chart,
   # you can force it to not be installed by setting this to `false`.
-  includeDependency:
+  includeDependency: false
   prometheus:
-    url: http://dg-prometheus-stack-prometheus.{{ .Release.Namespace }}.svc
+    url: http://prod-omi-kube-prometheus-s-prometheus.prod-omi-monitoring.svc
   rules:
     default: false
     external:

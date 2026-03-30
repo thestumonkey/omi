@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:omi/gen/assets.gen.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/chat/page.dart';
 import 'package:omi/pages/home/widgets/chat_apps_dropdown_widget.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
@@ -12,12 +15,9 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/other/temp.dart';
-import 'package:provider/provider.dart';
 
 class CloneChatPage extends StatefulWidget {
-  const CloneChatPage({
-    super.key,
-  });
+  const CloneChatPage({super.key});
 
   @override
   State<CloneChatPage> createState() => CloneChatPageState();
@@ -32,7 +32,7 @@ class CloneChatPageState extends State<CloneChatPage> {
       if (provider.userPersona != null) {
         App selectedApp = provider.userPersona!;
 
-        if (!mounted){
+        if (!mounted) {
           return;
         }
 
@@ -47,6 +47,8 @@ class CloneChatPageState extends State<CloneChatPage> {
 
         var messageProvider = Provider.of<MessageProvider>(context, listen: false);
         await messageProvider.refreshMessages();
+        // Fetch enabled chat apps
+        messageProvider.fetchChatApps();
         if (messageProvider.messages.isEmpty) {
           messageProvider.sendInitialAppMessage(selectedApp);
         }
@@ -74,11 +76,7 @@ class CloneChatPageState extends State<CloneChatPage> {
                     : ChatAppsDropdownWidget(mode: ChatMode.chat_clone),
                 IconButton(
                   padding: const EdgeInsets.all(8.0),
-                  icon: SvgPicture.asset(
-                    Assets.images.icPersonaProfile.path,
-                    width: 28,
-                    height: 28,
-                  ),
+                  icon: SvgPicture.asset(Assets.images.icPersonaProfile, width: 28, height: 28),
                   onPressed: () {
                     personaProvider.setRouting(PersonaProfileRouting.no_device);
                     routeToPage(context, const PersonaProfilePage(), replace: true);
@@ -88,11 +86,7 @@ class CloneChatPageState extends State<CloneChatPage> {
             ),
           ),
           body: personaProvider.isLoading || personaProvider.userPersona == null
-              ? const Center(
-                  child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation(Colors.white),
-                  ),
-                )
+              ? const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(Colors.white)))
               : GestureDetector(
                   onTap: () {
                     // Hide keyboard when tapping outside

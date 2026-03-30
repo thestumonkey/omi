@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
+
+import 'package:omi/backend/http/api/agents.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/providers/base_provider.dart';
+import 'package:omi/services/agent_chat_service.dart';
+import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/validators.dart';
 
@@ -25,9 +31,21 @@ class DeveloperModeProvider extends BaseProvider {
   bool loadingExportMemories = false;
   bool loadingImportMemories = false;
 
-  bool localSyncEnabled = false;
   bool followUpQuestionEnabled = false;
   bool transcriptionDiagnosticEnabled = false;
+  bool autoCreateSpeakersEnabled = false;
+  bool showGoalTrackerEnabled = true; // Default to true
+  bool showDailyScoreEnabled = true;
+  bool showTasksEnabled = true;
+  bool dailyReflectionEnabled = true;
+
+  // VAD Gate (experimental)
+  bool vadGateEnabled = false;
+
+  // Claude Agent (experimental)
+  bool claudeAgentEnabled = false;
+  bool claudeAgentLoading = false;
+  final AgentChatService agentChatService = AgentChatService();
 
   void onConversationEventsToggled(bool value) {
     conversationEventsToggled = value;
@@ -91,13 +109,19 @@ class DeveloperModeProvider extends BaseProvider {
 
   Future initialize() async {
     setIsLoading(true);
-    localSyncEnabled = SharedPreferencesUtil().localSyncEnabled;
     webhookOnConversationCreated.text = SharedPreferencesUtil().webhookOnConversationCreated;
     webhookOnTranscriptReceived.text = SharedPreferencesUtil().webhookOnTranscriptReceived;
     webhookAudioBytes.text = SharedPreferencesUtil().webhookAudioBytes;
     webhookAudioBytesDelay.text = SharedPreferencesUtil().webhookAudioBytesDelay;
     followUpQuestionEnabled = SharedPreferencesUtil().devModeJoanFollowUpEnabled;
     transcriptionDiagnosticEnabled = SharedPreferencesUtil().transcriptionDiagnosticEnabled;
+    autoCreateSpeakersEnabled = SharedPreferencesUtil().autoCreateSpeakersEnabled;
+    showGoalTrackerEnabled = SharedPreferencesUtil().showGoalTrackerEnabled;
+    showDailyScoreEnabled = SharedPreferencesUtil().showDailyScoreEnabled;
+    showTasksEnabled = SharedPreferencesUtil().showTasksEnabled;
+    dailyReflectionEnabled = SharedPreferencesUtil().dailyReflectionEnabled;
+    vadGateEnabled = SharedPreferencesUtil().vadGateEnabled;
+    claudeAgentEnabled = SharedPreferencesUtil().claudeAgentEnabled;
     conversationEventsToggled = SharedPreferencesUtil().conversationEventsToggled;
     transcriptsToggled = SharedPreferencesUtil().transcriptsToggled;
     audioBytesToggled = SharedPreferencesUtil().audioBytesToggled;
@@ -141,7 +165,9 @@ class DeveloperModeProvider extends BaseProvider {
     final prefs = SharedPreferencesUtil();
 
     if (webhookAudioBytes.text.isNotEmpty && !isValidUrl(webhookAudioBytes.text)) {
-      AppSnackbar.showSnackbarError('Invalid audio bytes webhook URL');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.devModeInvalidAudioBytesWebhookUrl ?? 'Invalid audio bytes webhook URL',
+      );
       setIsLoading(false);
       return;
     }
@@ -149,17 +175,25 @@ class DeveloperModeProvider extends BaseProvider {
       webhookAudioBytesDelay.text = '5';
     }
     if (webhookOnTranscriptReceived.text.isNotEmpty && !isValidUrl(webhookOnTranscriptReceived.text)) {
-      AppSnackbar.showSnackbarError('Invalid realtime transcript webhook URL');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.devModeInvalidRealtimeTranscriptWebhookUrl ??
+            'Invalid realtime transcript webhook URL',
+      );
       setIsLoading(false);
       return;
     }
     if (webhookOnConversationCreated.text.isNotEmpty && !isValidUrl(webhookOnConversationCreated.text)) {
-      AppSnackbar.showSnackbarError('Invalid conversation created webhook URL');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.devModeInvalidConversationCreatedWebhookUrl ??
+            'Invalid conversation created webhook URL',
+      );
       setIsLoading(false);
       return;
     }
     if (webhookDaySummary.text.isNotEmpty && !isValidUrl(webhookDaySummary.text)) {
-      AppSnackbar.showSnackbarError('Invalid day summary webhook URL');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.devModeInvalidDaySummaryWebhookUrl ?? 'Invalid day summary webhook URL',
+      );
       setIsLoading(false);
       return;
     }
@@ -189,9 +223,12 @@ class DeveloperModeProvider extends BaseProvider {
       Logger.error('Error occurred while updating endpoints: $e');
     }
     // Experimental
-    prefs.localSyncEnabled = localSyncEnabled;
     prefs.devModeJoanFollowUpEnabled = followUpQuestionEnabled;
     prefs.transcriptionDiagnosticEnabled = transcriptionDiagnosticEnabled;
+    prefs.autoCreateSpeakersEnabled = autoCreateSpeakersEnabled;
+    prefs.showGoalTrackerEnabled = showGoalTrackerEnabled;
+    prefs.showDailyScoreEnabled = showDailyScoreEnabled;
+    prefs.showTasksEnabled = showTasksEnabled;
 
     MixpanelManager().settingsSaved(
       hasWebhookConversationCreated: conversationEventsToggled,
@@ -199,16 +236,11 @@ class DeveloperModeProvider extends BaseProvider {
     );
     setIsLoading(false);
     notifyListeners();
-    AppSnackbar.showSnackbar('Settings saved!');
+    AppSnackbar.showSnackbar(globalNavigatorKey.currentContext?.l10n.devModeSettingsSaved ?? 'Settings saved!');
   }
 
   void setIsLoading(bool value) {
     savingSettingsLoading = value;
-    notifyListeners();
-  }
-
-  void onLocalSyncEnabledChanged(var value) {
-    localSyncEnabled = value;
     notifyListeners();
   }
 
@@ -219,6 +251,89 @@ class DeveloperModeProvider extends BaseProvider {
 
   void onTranscriptionDiagnosticChanged(var value) {
     transcriptionDiagnosticEnabled = value;
+    notifyListeners();
+  }
+
+  void onAutoCreateSpeakersChanged(var value) {
+    autoCreateSpeakersEnabled = value;
+    notifyListeners();
+  }
+
+  void onShowGoalTrackerChanged(var value) {
+    showGoalTrackerEnabled = value;
+    SharedPreferencesUtil().showGoalTrackerEnabled = value; // Save immediately
+    notifyListeners();
+  }
+
+  void onShowDailyScoreChanged(var value) {
+    showDailyScoreEnabled = value;
+    SharedPreferencesUtil().showDailyScoreEnabled = value;
+    notifyListeners();
+  }
+
+  void onShowTasksChanged(var value) {
+    showTasksEnabled = value;
+    SharedPreferencesUtil().showTasksEnabled = value;
+    notifyListeners();
+  }
+
+  void onDailyReflectionChanged(var value) {
+    dailyReflectionEnabled = value;
+    SharedPreferencesUtil().dailyReflectionEnabled = value; // Save immediately
+
+    // Schedule or cancel the notification based on the setting
+    if (value) {
+      DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+    } else {
+      DailyReflectionNotification.cancelNotification();
+    }
+
+    notifyListeners();
+  }
+
+  void onVadGateChanged(bool value) {
+    vadGateEnabled = value;
+    SharedPreferencesUtil().vadGateEnabled = value;
+    notifyListeners();
+  }
+
+  Future<void> onClaudeAgentChanged(bool value) async {
+    await initAgentLog();
+    agentLog('onClaudeAgentChanged($value)');
+
+    if (value) {
+      claudeAgentLoading = true;
+      notifyListeners();
+
+      try {
+        agentLog('Calling getAgentVmStatus()...');
+        final vmInfo = await getAgentVmStatus();
+        agentLog('getAgentVmStatus() returned: hasVm=${vmInfo?.hasVm}, status=${vmInfo?.status}');
+        if (vmInfo == null || !vmInfo.hasVm) {
+          agentLog('No VM found, aborting enable');
+          AppSnackbar.showSnackbarError('Requires OMI Desktop with agent enabled');
+          claudeAgentLoading = false;
+          notifyListeners();
+          return;
+        }
+
+        claudeAgentEnabled = true;
+        SharedPreferencesUtil().claudeAgentEnabled = true;
+        agentLog('Claude agent ENABLED successfully');
+      } catch (e) {
+        agentLog('ERROR in onClaudeAgentChanged: $e');
+        Logger.error('Failed to check agent VM status: $e');
+        AppSnackbar.showSnackbarError('Failed to check agent VM status');
+      }
+
+      claudeAgentLoading = false;
+    } else {
+      claudeAgentEnabled = false;
+      SharedPreferencesUtil().claudeAgentEnabled = false;
+      await agentChatService.disconnect();
+      agentLog('Claude agent DISABLED');
+    }
+
     notifyListeners();
   }
 }

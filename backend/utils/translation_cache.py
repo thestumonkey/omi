@@ -1,45 +1,83 @@
-import re
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional
+
+from utils.translation import detect_language
+
+
+def _normalize_base_language(language: Optional[str]) -> Optional[str]:
+    if not language:
+        return None
+    return language.split('-')[0].lower()
+
+
+def should_persist_translation(
+    source_text: str, translated_text: str, detected_lang: Optional[str], target_language: Optional[str]
+) -> bool:
+    """
+    Persist only when translation materially changes text.
+
+    This prevents no-op "translations" (for example English->English) from
+    creating a translation badge in the UI.
+    """
+    normalized_source = " ".join(source_text.split())
+    normalized_translated = " ".join((translated_text or "").split())
+    if normalized_source != normalized_translated:
+        return True
+
+    detected_base = _normalize_base_language(detected_lang)
+    target_base = _normalize_base_language(target_language)
+    # Explicit no-op when API confirms source is already in target language.
+    if detected_base and target_base and detected_base == target_base:
+        return False
+
+    # Conservative default for unchanged text: don't persist no-op translation.
+    return False
 
 
 class TranscriptSegmentLanguageCache:
     """
-    A class to manage language detection caching for transcript segments.
-
-    This cache stores information about whether a segment's text is in the target language
-    and tracks text changes to optimize language detection.
+    Tracks per-segment language detection state using free local detection only.
+    Once a segment is detected as non-target-language, it stays that way
+    (the segment will be translated).
     """
 
     def __init__(self):
-        """Initialize an empty language detection cache."""
-        # Cache structure: {segment_id: (text, is_target_language)}
-        # is_target_language can be:
-        # - True: text is in target language
-        # - False: text is not in target language
-        # - None: language has not been detected yet
-        self.cache: Dict[str, Tuple[str, Optional[bool]]] = {}
+        self.cache: Dict[str, Optional[bool]] = {}
 
-    @staticmethod
-    def get_text_difference(new_text: str, old_text: str) -> str:
-        if not old_text:
-            return new_text
+    def is_in_target_language(self, segment_id: str, text: str, target_language: str) -> bool:
+        was_in_target_language = self.cache.get(segment_id, None)
+        if was_in_target_language is False:
+            return False
 
-        # Simple approach: if new text starts with old text, return the difference
-        if new_text.startswith(old_text):
-            return new_text[len(old_text):].strip()
+        if not text:
+            return was_in_target_language is not False
 
-        # If not a simple continuation, return the full new text
-        return new_text
+        # Use free local langdetect only (no paid API calls)
+        # target_language should already be base-normalized (e.g. "en" not "en-US")
+        detected_lang = detect_language(text, remove_non_lexical=True, hint_language=target_language)
+        if detected_lang and detected_lang != target_language:
+            self.cache[segment_id] = False
+            return False
 
-    def get_language_result(self, segment_id: str, text: str, target_language: str) -> Tuple[Optional[bool], Optional[str]]:
-        if segment_id not in self.cache:
-            return None, text
+        if detected_lang and detected_lang == target_language:
+            self.cache[segment_id] = True
+            return True
 
-        cached_text, is_target_language = self.cache[segment_id]
-        return is_target_language, self.get_text_difference(text, cached_text)
+        # Detection inconclusive (None) — don't assume target language, let translate API decide
+        # Don't cache unknown state; segment will be sent to translate API which detects for free
+        return False
 
-    def update_cache(self, segment_id: str, text: str, is_target_language: Optional[bool]) -> None:
-        self.cache[segment_id] = (text, is_target_language)
+    def update_from_translate_response(self, segment_id: str, detected_lang: str, target_language: str):
+        """Update cache using detected_language_code from translate API response (free).
+        target_language should be base-normalized (e.g. "en" not "en-US").
+        """
+        # Normalize detected_lang to base tag for comparison
+        detected_base = _normalize_base_language(detected_lang)
+        target_base = _normalize_base_language(target_language)
+        if detected_base and target_base and detected_base == target_base:
+            self.cache[segment_id] = True
+        elif detected_base:
+            self.cache[segment_id] = False
 
     def delete_cache(self, segment_id: str) -> None:
-        del self.cache[segment_id]
+        if segment_id in self.cache:
+            del self.cache[segment_id]

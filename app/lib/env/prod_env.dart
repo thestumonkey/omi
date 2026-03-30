@@ -13,10 +13,6 @@ final class ProdEnv implements EnvFields {
   final String? openAIAPIKey = _ProdEnv.openAIAPIKey;
 
   @override
-  @EnviedField(varName: 'INSTABUG_API_KEY', obfuscate: true)
-  final String? instabugApiKey = _ProdEnv.instabugApiKey;
-
-  @override
   @EnviedField(varName: 'MIXPANEL_PROJECT_TOKEN', obfuscate: true)
   final String? mixpanelProjectToken = _ProdEnv.mixpanelProjectToken;
 
@@ -45,6 +41,22 @@ final class ProdEnv implements EnvFields {
   final String? intercomAndroidApiKey = _ProdEnv.intercomAndroidApiKey;
 
   @override
-  @EnviedField(varName: 'POSTHOG_API_KEY', obfuscate: true)
-  final String? posthogApiKey = _ProdEnv.posthogApiKey;
+  @EnviedField(varName: 'GOOGLE_CLIENT_ID', obfuscate: true)
+  final String? googleClientId = _ProdEnv.googleClientId;
+
+  @override
+  @EnviedField(varName: 'GOOGLE_CLIENT_SECRET', obfuscate: true)
+  final String? googleClientSecret = _ProdEnv.googleClientSecret;
+
+  @override
+  @EnviedField(varName: 'USE_WEB_AUTH', obfuscate: false, defaultValue: false)
+  final bool? useWebAuth = _ProdEnv.useWebAuth;
+
+  @override
+  @EnviedField(varName: 'USE_AUTH_CUSTOM_TOKEN', obfuscate: false, defaultValue: false)
+  final bool? useAuthCustomToken = _ProdEnv.useAuthCustomToken;
+
+  @override
+  @EnviedField(varName: 'STAGING_API_URL', obfuscate: true)
+  final String? stagingApiUrl = _ProdEnv.stagingApiUrl;
 }

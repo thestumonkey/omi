@@ -3,22 +3,25 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/gen/pigeon_communicator.g.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/providers/base_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/services.dart';
-import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/analytics_manager.dart';
 import 'package:omi/utils/audio/foreground.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:omi/utils/bluetooth/bluetooth_adapter.dart';
+import 'package:omi/utils/logger.dart';
 
 class OnboardingProvider extends BaseProvider with MessageNotifierMixin implements IDeviceServiceSubsciption {
   DeviceProvider? deviceProvider;
@@ -26,11 +29,11 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   bool isConnected = false;
   int batteryPercentage = -1;
   String deviceName = '';
+  DeviceType? deviceType;
   String deviceId = '';
   String? connectingToDeviceId;
   List<BtDevice> deviceList = [];
   late Timer _didNotMakeItTimer;
-  Timer? _findDevicesTimer;
   bool enableInstructions = false;
   Map<String, BtDevice> foundDevicesMap = {};
 
@@ -39,36 +42,14 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   bool hasLocationPermission = false;
   bool hasNotificationPermission = false;
   bool hasBackgroundPermission = false; // Android only
+  bool hasMicrophonePermission = false;
   bool isLoading = false;
 
-  // Method channel for macOS permissions
-  static const MethodChannel _screenCaptureChannel = MethodChannel('screenCapturePlatform');
-
   Future updatePermissions() async {
-    if (Platform.isMacOS) {
-      try {
-        // Use macOS-specific permission checking
-        String bluetoothStatus = await _screenCaptureChannel.invokeMethod('checkBluetoothPermission');
-        hasBluetoothPermission = bluetoothStatus == 'granted';
-
-        String locationStatus = await _screenCaptureChannel.invokeMethod('checkLocationPermission');
-        hasLocationPermission = locationStatus == 'granted';
-
-        // Use macOS-specific notification permission checking
-        String notificationStatus = await _screenCaptureChannel.invokeMethod('checkNotificationPermission');
-        hasNotificationPermission = notificationStatus == 'granted' || notificationStatus == 'provisional';
-      } catch (e) {
-        debugPrint('Error updating permissions on macOS: $e');
-        // Fallback to standard permission checking
-        hasBluetoothPermission = await Permission.bluetooth.isGranted;
-        hasLocationPermission = await Permission.location.isGranted;
-        hasNotificationPermission = await Permission.notification.isGranted;
-      }
-    } else {
-      hasBluetoothPermission = await Permission.bluetooth.isGranted;
-      hasLocationPermission = await Permission.location.isGranted;
-      hasNotificationPermission = await Permission.notification.isGranted;
-    }
+    hasBluetoothPermission = await Permission.bluetooth.isGranted;
+    hasLocationPermission = await Permission.location.isGranted;
+    hasNotificationPermission = await Permission.notification.isGranted;
+    hasMicrophonePermission = await Permission.microphone.isGranted;
 
     SharedPreferencesUtil().notificationsEnabled = hasNotificationPermission;
     SharedPreferencesUtil().locationEnabled = hasLocationPermission;
@@ -105,44 +86,22 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     notifyListeners();
   }
 
+  void updateMicrophonePermission(bool value) {
+    hasMicrophonePermission = value;
+    notifyListeners();
+  }
+
   Future askForBluetoothPermissions() async {
     FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
 
-    if (Platform.isMacOS) {
-      try {
-        // Use macOS-specific permission handling
-        String bluetoothStatus = await _screenCaptureChannel.invokeMethod('checkBluetoothPermission');
-        if (bluetoothStatus == 'granted') {
-          updateBluetoothPermission(true);
-          return;
-        }
-
-        if (bluetoothStatus == 'undetermined') {
-          bool granted = await _screenCaptureChannel.invokeMethod('requestBluetoothPermission');
-          updateBluetoothPermission(granted);
-          if (!granted) {
-            AppSnackbar.showSnackbarError('Bluetooth permission is required to connect to your device.');
-          }
-        } else if (bluetoothStatus == 'denied' || bluetoothStatus == 'restricted') {
-          updateBluetoothPermission(false);
-          AppSnackbar.showSnackbarError('Bluetooth permission denied. Please grant permission in System Preferences.');
-        } else {
-          updateBluetoothPermission(false);
-          AppSnackbar.showSnackbarError(
-              'Bluetooth permission status: $bluetoothStatus. Please check System Preferences.');
-        }
-      } catch (e) {
-        debugPrint('Error checking/requesting Bluetooth permission on macOS: $e');
-        AppSnackbar.showSnackbarError('Failed to check Bluetooth permission: $e');
-        updateBluetoothPermission(false);
-      }
-    } else if (Platform.isIOS) {
+    if (Platform.isIOS) {
       PermissionStatus bleStatus = await Permission.bluetooth.request();
-      debugPrint('bleStatus: $bleStatus');
+      Logger.debug('bleStatus: $bleStatus');
       updateBluetoothPermission(bleStatus.isGranted);
     } else {
       if (Platform.isAndroid) {
-        if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
+        if (!(await BluetoothAdapter.isSupported) ||
+            FlutterBluePlus.adapterStateNow != BluetoothAdapterStateHelper.on) {
           try {
             await FlutterBluePlus.turnOn();
           } catch (e) {
@@ -163,36 +122,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future askForNotificationPermissions() async {
-    if (Platform.isMacOS) {
-      try {
-        // Use macOS-specific permission handling
-        String notificationStatus = await _screenCaptureChannel.invokeMethod('checkNotificationPermission');
-        debugPrint('notificationStatus: $notificationStatus');
-        if (notificationStatus == 'granted') {
-          updateNotificationPermission(true);
-          return;
-        }
-
-        if (notificationStatus == 'undetermined') {
-          bool granted = await _screenCaptureChannel.invokeMethod('requestNotificationPermission');
-          updateNotificationPermission(granted);
-        } else if (notificationStatus == 'denied') {
-          updateNotificationPermission(false);
-        } else if (notificationStatus == 'provisional') {
-          updateNotificationPermission(true); // Provisional permissions are still functional
-          debugPrint('Notification permission is provisional - notifications will be delivered quietly');
-        } else {
-          updateNotificationPermission(false);
-        }
-      } catch (e) {
-        debugPrint('Error checking/requesting Notification permission on macOS: $e');
-        updateNotificationPermission(false);
-      }
-    } else {
-      // Existing logic for iOS/Android
-      var isAllowed = await NotificationService.instance.requestNotificationPermissions();
-      updateNotificationPermission(isAllowed);
-    }
+    var isAllowed = await NotificationService.instance.requestNotificationPermissions();
+    updateNotificationPermission(isAllowed);
     notifyListeners();
   }
 
@@ -204,65 +135,27 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future<(bool, PermissionStatus)> askForLocationPermissions() async {
-    if (Platform.isMacOS) {
-      try {
-        // Use macOS-specific permission handling
-        String locationStatus = await _screenCaptureChannel.invokeMethod('checkLocationPermission');
-        debugPrint('locationStatus: $locationStatus');
-        if (locationStatus == 'granted') {
-          updateLocationPermission(true);
-          return (true, PermissionStatus.granted);
-        }
-
-        if (locationStatus == 'undetermined') {
-          bool granted = await _screenCaptureChannel.invokeMethod('requestLocationPermission');
-          updateLocationPermission(granted);
-          debugPrint('undetermined location permission granted: $granted');
-          return (true, granted ? PermissionStatus.granted : PermissionStatus.denied);
-        } else if (locationStatus == 'denied' || locationStatus == 'restricted') {
-          updateLocationPermission(false);
-          return (true, PermissionStatus.permanentlyDenied);
-        } else {
-          updateLocationPermission(false);
-          return (true, PermissionStatus.denied);
-        }
-      } catch (e) {
-        debugPrint('Error checking/requesting Location permission on macOS: $e');
-        updateLocationPermission(false);
-        return (false, PermissionStatus.denied);
-      }
+    if (await Permission.location.serviceStatus.isDisabled) {
+      Logger.debug('Location service is disabled');
+      return (false, PermissionStatus.permanentlyDenied);
     } else {
-      // Existing logic for iOS/Android
-      if (await Permission.location.serviceStatus.isDisabled) {
-        debugPrint('Location service is disabled');
-        return (false, PermissionStatus.permanentlyDenied);
-      } else {
-        var res = await Permission.locationWhenInUse.request();
-        return (true, res);
-      }
+      var res = await Permission.locationWhenInUse.request();
+      return (true, res);
     }
   }
 
   Future<bool> alwaysAllowLocation() async {
-    if (Platform.isMacOS) {
-      // On macOS, the location permission request already handles the full permission
-      // Just check the current status
-      try {
-        String locationStatus = await _screenCaptureChannel.invokeMethod('checkLocationPermission');
-        bool granted = locationStatus == 'granted';
-        updateLocationPermission(granted);
-        return granted;
-      } catch (e) {
-        debugPrint('Error checking location permission on macOS: $e');
-        updateLocationPermission(false);
-        return false;
-      }
-    } else {
-      PermissionStatus locationStatus = await Permission.locationAlways.request();
-      debugPrint('alwaysAllowLocation permission status: $locationStatus');
-      updateLocationPermission(locationStatus.isGranted);
-      return locationStatus.isGranted;
-    }
+    PermissionStatus locationStatus = await Permission.locationAlways.request();
+    Logger.debug('alwaysAllowLocation permission status: $locationStatus');
+    updateLocationPermission(locationStatus.isGranted);
+    return locationStatus.isGranted;
+  }
+
+  Future askForMicrophonePermissions() async {
+    PermissionStatus micStatus = await Permission.microphone.request();
+    Logger.debug('micStatus: $micStatus');
+    updateMicrophonePermission(micStatus.isGranted);
+    return micStatus.isGranted;
   }
   //----------------- Onboarding Permissions -----------------
 
@@ -271,32 +164,36 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   // Method to handle taps on devices
-  Future<void> handleTap({
-    required BtDevice device,
-    required bool isFromOnboarding,
-    VoidCallback? goNext,
-  }) async {
-    if (device.name.toLowerCase() == 'openglass' || device.type == DeviceType.openglass) {
-      // notifyInfo('OPENGLASS_NOT_SUPPORTED');
-      AppSnackbar.showSnackbarError(
-          'OpenGlass is not supported at the moment. Support will be added in a future update');
-      return;
-    }
+  Future<void> handleTap({required BtDevice device, required bool isFromOnboarding, VoidCallback? goNext}) async {
     try {
-      if (isClicked) return; // if any item is clicked, don't do anything
-      isClicked = true; // Prevent further clicks
-      connectingToDeviceId = device.id; // Mark this device as being connected to
+      if (isClicked) return;
+      isClicked = true;
+
+      connectingToDeviceId = device.id;
       notifyListeners();
-      var c = await ServiceManager.instance().device.ensureConnection(device.id, force: true);
-      debugPrint('Connected to device: ${device.name}');
+
+      // On Android, associate via CompanionDeviceManager BEFORE GATT connection.
+      // Device must still be advertising for the system chooser to find it.
+      // Stop our scan first so CompanionDeviceManager's scan doesn't conflict.
+      if (Platform.isAndroid) {
+        try {
+          BleHostApi().stopScan();
+          final associatedAddress = await BleHostApi().requestCompanionDeviceAssociation(device.id);
+          Logger.debug('CompanionDeviceManager association result: $associatedAddress');
+        } catch (e) {
+          Logger.debug('CompanionDeviceManager association failed (non-fatal): $e');
+        }
+      }
+
+      await ServiceManager.instance().device.ensureConnection(device.id, force: true);
+      Logger.debug('Connected to device: ${device.name}');
       deviceId = device.id;
-      //  device = await device.getDeviceInfo(c);
       await SharedPreferencesUtil().btDeviceSet(device);
       deviceName = device.name;
+      deviceType = device.type;
       var cDevice = await _getConnectedDevice(deviceId);
       if (cDevice != null) {
         deviceProvider!.setConnectedDevice(cDevice);
-        // SharedPreferencesUtil().btDevice = cDevice;
         SharedPreferencesUtil().deviceName = cDevice.name;
         deviceProvider!.setIsConnected(true);
       }
@@ -304,13 +201,13 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       var connectedDevice = deviceProvider!.connectedDevice;
       batteryPercentage = deviceProvider!.batteryLevel;
       isConnected = true;
-      isClicked = false; // Allow clicks again after finishing the operation
+      isClicked = false;
       connectingToDeviceId = null; // Reset the connecting device
       notifyListeners();
-      stopScanDevices();
       await Future.delayed(const Duration(seconds: 2));
       SharedPreferencesUtil().btDevice = connectedDevice!;
       SharedPreferencesUtil().deviceName = connectedDevice.name;
+
       foundDevicesMap.clear();
       deviceList.clear();
       if (isFromOnboarding) {
@@ -319,7 +216,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         notifyInfo('DEVICE_CONNECTED');
       }
     } catch (e) {
-      debugPrint('Error connecting to device: $e');
+      Logger.debug('Error connecting to device: $e');
       foundDevicesMap.remove(device.id);
       deviceList.removeWhere((element) => element.id == device.id);
       isClicked = false; // Allow clicks again after finishing the operation
@@ -335,21 +232,26 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     batteryPercentage = -1;
     isConnected = false;
     deviceName = '';
+    deviceType = null;
     deviceId = '';
     notifyListeners();
   }
 
-  void stopScanDevices() {
-    _findDevicesTimer?.cancel();
+  // TODO: thinh, use connection directly
+  Future<BtDevice?> _getConnectedDevice(String deviceId) async {
+    if (deviceId.isEmpty) {
+      return null;
+    }
+    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+    return connection?.device;
   }
 
-  Future<void> scanDevices({
-    required VoidCallback onShowDialog,
-  }) async {
+  Future<void> scanDevices({required VoidCallback onShowDialog}) async {
     if (SharedPreferencesUtil().btDevice.id.isEmpty) {
       // it means the device has been unpaired
       deviceAlreadyUnpaired();
     }
+
     // check if bluetooth is enabled on both platforms
     if (!hasBluetoothPermission) {
       await askForBluetoothPermissions();
@@ -364,30 +266,11 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     });
 
     ServiceManager.instance().device.subscribe(this, this);
-
-    _findDevicesTimer?.cancel();
-    _findDevicesTimer = Timer.periodic(const Duration(seconds: 4), (t) async {
-      if (deviceProvider?.isConnected ?? false) {
-        t.cancel();
-        return;
-      }
-
-      ServiceManager.instance().device.discover();
-    });
-  }
-
-  // TODO: thinh, use connection directly
-  Future<BtDevice?> _getConnectedDevice(String deviceId) async {
-    if (deviceId.isEmpty) {
-      return null;
-    }
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    return connection?.device;
+    await deviceProvider?.initiateConnection("Onboarding");
   }
 
   @override
   void dispose() {
-    _findDevicesTimer?.cancel();
     _didNotMakeItTimer.cancel();
     ServiceManager.instance().device.unsubscribe(this);
     super.dispose();
@@ -408,11 +291,13 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       // If it's a new device, add it to the map. If it already exists, this will just update the entry.
       updatedDevicesMap[device.id] = device;
     }
+
     // Remove devices that are no longer found
     foundDevicesMap.keys.where((id) => !updatedDevicesMap.containsKey(id)).toList().forEach(foundDevicesMap.remove);
 
     // Merge the new devices into the current map to maintain order
     foundDevicesMap.addAll(updatedDevicesMap);
+
     // Convert the values of the map back to a list
     List<BtDevice> orderedDevices = foundDevicesMap.values.toList();
     if (orderedDevices.isNotEmpty) {

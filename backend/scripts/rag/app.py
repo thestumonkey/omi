@@ -18,6 +18,7 @@ if project_root not in sys.path:
 
 from current import *
 from _shared import *
+from database.auth import get_user_name
 from models.chat import Message
 from models.conversation import Conversation
 from models.transcript_segment import TranscriptSegment
@@ -74,7 +75,7 @@ def save_state():
         'messages': st.session_state.messages,
         'visualizations': st.session_state.visualizations,
         'contexts': st.session_state.contexts,
-        'memories': st.session_state.memories
+        'memories': st.session_state.memories,
     }
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, cls=CustomEncoder)
@@ -102,13 +103,7 @@ def get_messages(limit: int = 10) -> List[Message]:
 
 
 def send_message(text: str):
-    human_message = Message(
-        id=str(uuid.uuid4()),
-        text=text,
-        created_at=datetime.utcnow(),
-        sender='human',
-        type='text'
-    )
+    human_message = Message(id=str(uuid.uuid4()), text=text, created_at=datetime.utcnow(), sender='human', type='text')
     add_message(human_message)
 
     # Retrieve context and generate response
@@ -136,13 +131,7 @@ def send_message(text: str):
     st.session_state.contexts[ai_message_id] = context_str
     st.session_state.memories[ai_message_id] = memories
 
-    ai_message = Message(
-        id=ai_message_id,
-        text=response,
-        created_at=datetime.utcnow(),
-        sender='ai',
-        type='text'
-    )
+    ai_message = Message(id=ai_message_id, text=response, created_at=datetime.utcnow(), sender='ai', type='text')
     add_message(ai_message)
     save_state()
 
@@ -157,7 +146,8 @@ def clear_state():
 
 
 # Custom CSS (remove table-related styles)
-st.markdown("""
+st.markdown(
+    """
 <style>
     .block-container {
         padding-top: 1rem;
@@ -193,7 +183,9 @@ st.markdown("""
         word-wrap: break-word;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Streamlit UI
 st.title("RAG Chat with Embedding Visualization")
@@ -225,8 +217,9 @@ for message in get_messages():
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown("**Raw Transcript Segments**")
-                        transcript = TranscriptSegment.segments_as_string(memory.transcript_segments).replace(
-                            '\n\n', '\n')
+                        transcript = TranscriptSegment.segments_as_string(
+                            memory.transcript_segments, user_name=get_user_name(uid, use_default=False)
+                        ).replace('\n\n', '\n')
                         lines = transcript.count('\n')
                         ten_lines = transcript.split('\n')[:10]
                         st.text('\n'.join(ten_lines))

@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
+
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/animated_loading_button.dart';
-import 'package:provider/provider.dart';
 
 class AddReviewWidget extends StatefulWidget {
   final App app;
@@ -74,11 +78,13 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16.0),
-      margin: const EdgeInsets.only(left: 8.0, right: 8.0, top: 12, bottom: 6),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade900,
-        borderRadius: BorderRadius.circular(16.0),
+      margin: EdgeInsets.only(
+        left: MediaQuery.of(context).size.width * 0.05,
+        right: MediaQuery.of(context).size.width * 0.05,
+        top: 12,
+        bottom: 6,
       ),
+      decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(16.0)),
       child: Column(
         children: [
           Row(
@@ -86,8 +92,10 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
             children: [
               Padding(
                 padding: const EdgeInsets.only(left: 6.0),
-                child: Text(widget.app.userReview?.score == null ? 'Rate and Review this App' : 'Your Review',
-                    style: const TextStyle(color: Colors.white, fontSize: 16)),
+                child: Text(
+                  widget.app.userReview?.score == null ? context.l10n.rateAndReviewThisApp : context.l10n.yourReview,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
               ),
             ],
           ),
@@ -101,7 +109,20 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
               allowHalfRating: true,
               itemCount: 5,
               itemSize: MediaQuery.sizeOf(context).width < 400 ? 28 : 34,
-              itemPadding: const EdgeInsets.symmetric(horizontal: 18),
+              itemPadding: EdgeInsets.symmetric(
+                horizontal: () {
+                  final screenWidth = MediaQuery.sizeOf(context).width;
+                  final itemSize = MediaQuery.sizeOf(context).width < 400 ? 28.0 : 34.0;
+                  final containerPadding = screenWidth * 0.1; // 5% on each side
+                  final cardPadding = 16.0 * 2; // Container padding
+                  final availableWidth =
+                      screenWidth - containerPadding - cardPadding - 8.0; // Minus Padding widget padding
+                  final totalStarWidth = itemSize * 5;
+                  final remainingSpace = availableWidth - totalStarWidth;
+                  final dynamicPadding = remainingSpace / 10; // 4 spaces between stars + some buffer
+                  return dynamicPadding.clamp(8.0, 24.0); // Clamp between reasonable values
+                }(),
+              ),
               itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.deepPurple),
               maxRating: 5.0,
               onRatingUpdate: (rating) {
@@ -112,18 +133,16 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
               },
             ),
           ),
-          const SizedBox(
-            height: 20,
-          ),
+          const SizedBox(height: 20),
           ClipRRect(
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 300),
               height: showReviewField
                   ? (showButton
-                      ? (MediaQuery.sizeOf(context).height < 680
-                          ? MediaQuery.sizeOf(context).height * 0.28
-                          : MediaQuery.sizeOf(context).height * 0.2)
-                      : MediaQuery.sizeOf(context).height * 0.132)
+                        ? (MediaQuery.sizeOf(context).height < 680
+                              ? MediaQuery.sizeOf(context).height * 0.28
+                              : MediaQuery.sizeOf(context).height * 0.2)
+                        : MediaQuery.sizeOf(context).height * 0.132)
                   : 0,
               child: !showReviewField
                   ? null
@@ -149,7 +168,7 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                                 }
                               },
                               decoration: InputDecoration(
-                                hintText: 'Write a review (optional)',
+                                hintText: context.l10n.writeReviewOptional,
                                 hintStyle: const TextStyle(color: Colors.grey),
                                 border: const OutlineInputBorder(
                                   borderRadius: BorderRadius.all(Radius.circular(8)),
@@ -168,25 +187,27 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                               maxLines: 3,
                             ),
                           ),
-                          const SizedBox(
-                            height: 20,
-                          ),
+                          const SizedBox(height: 20),
                           showButton
                               ? AnimatedLoadingButton(
                                   loaderColor: Colors.black,
-                                  text: widget.app.userReview != null ? 'Update Review' : 'Submit Review',
+                                  text: widget.app.userReview != null
+                                      ? context.l10n.updateReview
+                                      : context.l10n.submitReview,
                                   textStyle: const TextStyle(color: Colors.black, fontSize: 16),
                                   onPressed: () async {
                                     FocusScope.of(context).unfocus();
                                     if (rating == widget.app.userReview?.score &&
                                         reviewController.text == widget.app.userReview?.review) {
-                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                        content: Text("No changes in review to update."),
-                                      ));
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(SnackBar(content: Text(context.l10n.noChangesInReview)));
                                       return;
                                     }
-                                    final connectivityProvider =
-                                        Provider.of<ConnectivityProvider>(context, listen: false);
+                                    final connectivityProvider = Provider.of<ConnectivityProvider>(
+                                      context,
+                                      listen: false,
+                                    );
                                     if (connectivityProvider.isConnected) {
                                       bool isSuccessful = false;
                                       var rev = AppReview(
@@ -207,9 +228,9 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                                       }
                                       if (isSuccessful) {
                                         updateShowButton(false);
-                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                          content: Text("Review added successfully 🚀"),
-                                        ));
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(SnackBar(content: Text(context.l10n.reviewAddedSuccessfully)));
                                         bool hadReview = widget.app.userReview != null;
                                         if (!hadReview) widget.app.ratingCount += 1;
                                         widget.app.userReview = AppReview(
@@ -223,17 +244,25 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                                         appsList[index] = widget.app;
                                         SharedPreferencesUtil().appsList = appsList;
                                         MixpanelManager().appRated(widget.app.id.toString(), rating);
-                                        debugPrint('Refreshed apps list.');
+
+                                        // Track review added
+                                        MixpanelManager().appDetailReviewAdded(
+                                          appId: widget.app.id,
+                                          rating: rating.toInt(),
+                                          hasComment: reviewController.text.trim().isNotEmpty,
+                                        );
+
+                                        Logger.debug('Refreshed apps list.');
                                         setState(() {});
                                       } else {
-                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                          content: Text("Failed to review the app. Please try again later."),
-                                        ));
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(SnackBar(content: Text(context.l10n.failedToSubmitReview)));
                                       }
                                     } else {
-                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                        content: Text("Can't rate app without internet connection."),
-                                      ));
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(SnackBar(content: Text(context.l10n.cantRateWithoutInternet)));
                                     }
                                   },
                                   color: Colors.white,

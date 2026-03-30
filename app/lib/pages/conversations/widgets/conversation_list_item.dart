@@ -1,20 +1,27 @@
 import 'dart:async';
+import 'dart:ui';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
-import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
+import 'package:omi/pages/settings/usage_page.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
-import 'package:omi/widgets/confirmation_dialog.dart';
+import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:provider/provider.dart';
 
 class ConversationListItem extends StatefulWidget {
   final bool isFromOnboarding;
@@ -62,125 +69,428 @@ class _ConversationListItemState extends State<ConversationListItem> {
       });
     }
 
-    Structured structured = widget.conversation.structured;
-    return Consumer<ConversationProvider>(builder: (context, provider, child) {
-      return GestureDetector(
-        onTap: () async {
-          MixpanelManager().conversationListItemClicked(widget.conversation, widget.conversationIdx);
-          context.read<ConversationDetailProvider>().updateConversation(widget.conversationIdx, widget.date);
-          String startingTitle = context.read<ConversationDetailProvider>().conversation.structured.title;
-          provider.onConversationTap(widget.conversationIdx);
+    return Consumer<ConversationProvider>(
+      builder: (context, provider, child) {
+        final isSelectionMode = provider.isSelectionModeActive;
+        final isSelected = provider.isConversationSelected(widget.conversation.id);
+        final isMerging = provider.isConversationMerging(widget.conversation.id);
+        final isEligible = provider.isConversationEligibleForMerge(widget.conversation.id);
 
-          await routeToPage(
-            context,
-            ConversationDetailPage(conversation: widget.conversation, isFromOnboarding: widget.isFromOnboarding),
-          );
-          if (mounted) {
-            String newTitle = context.read<ConversationDetailProvider>().conversation.structured.title;
-            if (startingTitle != newTitle) {
-              widget.conversation.structured.title = newTitle;
-              provider.upsertConversation(widget.conversation);
+        return GestureDetector(
+          onTap: () async {
+            // If in selection mode, toggle selection only if eligible
+            if (isSelectionMode) {
+              if (!isEligible) {
+                // Show feedback that this conversation cannot be merged
+                HapticFeedback.lightImpact();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(context.l10n.conversationCannotBeMerged),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+                return;
+              }
+              HapticFeedback.selectionClick();
+              provider.toggleConversationSelection(widget.conversation.id);
+              return;
             }
-          }
-        },
-        child: Padding(
-          padding: EdgeInsets.only(top: 12, left: widget.isFromOnboarding ? 0 : 16, right: widget.isFromOnboarding ? 0 : 16),
-          child: Container(
-            width: double.maxFinite,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade900,
-              borderRadius: BorderRadius.circular(16.0),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16.0),
-              child: Dismissible(
-                key: UniqueKey(),
-                direction: DismissDirection.endToStart,
-                background: Container(
-                  alignment: Alignment.centerRight,
-                  padding: const EdgeInsets.only(right: 20.0),
-                  color: Colors.red,
-                  child: const Icon(Icons.delete, color: Colors.white),
+
+            if (widget.conversation.isLocked) {
+              MixpanelManager().paywallOpened('Conversation List Item');
+              routeToPage(context, const UsagePage(showUpgradeDialog: true));
+              return;
+            }
+            // Calculate time difference
+            int hoursSinceConversation = DateTime.now().difference(widget.conversation.createdAt).inHours;
+
+            // Check if user is searching
+            String searchQuery = provider.previousQuery;
+            if (searchQuery.isNotEmpty) {
+              // Track conversation opened from search
+              MixpanelManager().conversationOpenedFromSearch(
+                conversation: widget.conversation,
+                searchQuery: searchQuery,
+                conversationIndexInResults: widget.conversationIdx,
+              );
+            } else {
+              // Track normal conversation list item click with time difference
+              MixpanelManager().conversationListItemClickedWithTimeDifference(
+                conversation: widget.conversation,
+                conversationIndex: widget.conversationIdx,
+                hoursSinceConversation: hoursSinceConversation,
+              );
+            }
+
+            context.read<ConversationDetailProvider>().updateConversation(widget.conversation.id, widget.date);
+            String startingTitle = context.read<ConversationDetailProvider>().conversation.structured.title;
+            provider.onConversationTap(widget.conversation.id);
+
+            var result = await routeToPage(
+              context,
+              ConversationDetailPage(conversation: widget.conversation, isFromOnboarding: widget.isFromOnboarding),
+            );
+            if (mounted) {
+              // Don't upsert if the conversation was deleted while on the detail page
+              if (result is Map && result['deleted'] == true) return;
+              bool stillExists = provider.conversations.any((c) => c.id == widget.conversation.id);
+              if (stillExists) {
+                String newTitle = context.read<ConversationDetailProvider>().conversation.structured.title;
+                if (startingTitle != newTitle) {
+                  widget.conversation.structured.title = newTitle;
+                  provider.upsertConversation(widget.conversation);
+                }
+              }
+            }
+          },
+          onLongPress: () {
+            // Enter selection mode on long press
+            if (!isSelectionMode && !isMerging) {
+              HapticFeedback.mediumImpact();
+              provider.enterSelectionMode();
+              provider.toggleConversationSelection(widget.conversation.id);
+            }
+          },
+          child: Stack(
+            children: [
+              Padding(
+                padding: EdgeInsets.only(
+                  top: 12,
+                  left: widget.isFromOnboarding ? 0 : 16,
+                  right: widget.isFromOnboarding ? 0 : 16,
                 ),
-                confirmDismiss: (direction) {
-                  bool showDeleteConfirmation = SharedPreferencesUtil().showConversationDeleteConfirmation;
-                  if (!showDeleteConfirmation) return Future.value(true);
-                  final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
-                  if (connectivityProvider.isConnected) {
-                    return showDialog(
-                        context: context,
-                        builder: (context) {
-                          return StatefulBuilder(
-                            builder: (context, setState) {
-                              return ConfirmationDialog(
-                                title: "Delete Conversation?",
-                                description: "Are you sure you want to delete this conversation? This action cannot be undone.",
-                                checkboxValue: !showDeleteConfirmation,
-                                checkboxText: "Don't ask me again",
-                                onCheckboxChanged: (value) {
-                                  setState(() {
-                                    showDeleteConfirmation = !value;
-                                  });
-                                },
-                                onCancel: () => Navigator.of(context).pop(),
-                                onConfirm: () {
-                                  SharedPreferencesUtil().showConversationDeleteConfirmation = showDeleteConfirmation;
-                                  return Navigator.pop(context, true);
-                                },
-                              );
-                            },
-                          );
-                        });
-                  } else {
-                    return showDialog(
-                      builder: (c) => getDialog(context, () => Navigator.pop(context), () => Navigator.pop(context), 'Unable to Delete Conversation', 'Please check your internet connection and try again.', singleButton: true, okButtonText: 'OK'),
-                      context: context,
-                    );
-                  }
-                },
-                onDismissed: (direction) async {
-                  var conversation = widget.conversation;
-                  var conversationIdx = widget.conversationIdx;
-                  provider.deleteConversationLocally(conversation, conversationIdx, widget.date);
-                },
-                child: Padding(
-                  padding: const EdgeInsetsDirectional.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.max,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _getConversationHeader(),
-                      const SizedBox(height: 16),
-                      widget.conversation.discarded
-                          ? const SizedBox.shrink()
-                          : Text(
-                              structured.title.decodeString,
-                              style: Theme.of(context).textTheme.titleLarge,
-                              maxLines: 1,
-                            ),
-                      widget.conversation.discarded ? const SizedBox.shrink() : const SizedBox(height: 8),
-                      widget.conversation.discarded
-                          ? const SizedBox.shrink()
-                          : Text(
-                              structured.overview.decodeString,
-                              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
-                              maxLines: 2,
-                            ),
-                      widget.conversation.discarded
-                          ? Text(
-                              widget.conversation.getTranscript(maxCount: 100),
-                              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
-                            )
-                          : const SizedBox(height: 8),
-                    ],
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 200),
+                  opacity: (isSelectionMode && !isEligible) ? 0.6 : 1.0,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    width: double.maxFinite,
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? Colors.deepPurple.withValues(alpha: 0.3)
+                          : (isSelectionMode && !isEligible)
+                          ? Colors.grey.shade800
+                          : const Color(0xFF1F1F25),
+                      borderRadius: BorderRadius.circular(24.0),
+                      border: isSelected
+                          ? Border.all(color: Colors.deepPurple, width: 2)
+                          : (isSelectionMode && !isEligible)
+                          ? Border.all(color: Colors.grey.shade600, width: 1)
+                          : null,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24.0),
+                      child: Dismissible(
+                        key: UniqueKey(),
+                        direction: isSelectionMode || isMerging ? DismissDirection.none : DismissDirection.endToStart,
+                        background: Container(
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20.0),
+                          color: Colors.red,
+                          child: const Icon(Icons.delete, color: Colors.white),
+                        ),
+                        confirmDismiss: (direction) async {
+                          HapticFeedback.mediumImpact();
+                          bool showDeleteConfirmation = SharedPreferencesUtil().showConversationDeleteConfirmation;
+
+                          if (!showDeleteConfirmation) return Future.value(true);
+
+                          final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
+
+                          if (connectivityProvider.isConnected) {
+                            bool dontShow = false;
+                            return await showDialog<bool>(
+                              context: context,
+                              builder: (ctx) {
+                                return StatefulBuilder(
+                                  builder: (context, setState) {
+                                    final checkbox = GestureDetector(
+                                      onTap: () => setState(() => dontShow = !dontShow),
+                                      child: Row(
+                                        children: [
+                                          SizedBox(
+                                            width: 24,
+                                            height: 24,
+                                            child: Checkbox(
+                                              value: dontShow,
+                                              onChanged: (v) => setState(() => dontShow = v ?? false),
+                                              activeColor: Colors.deepPurple,
+                                              checkColor: Colors.white,
+                                              side: const BorderSide(color: Colors.white54),
+                                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Flexible(
+                                            child: Text(
+                                              context.l10n.dontShowAgain,
+                                              style: const TextStyle(fontSize: 14),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    final content = Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(context.l10n.deleteConversationMessage),
+                                        const SizedBox(height: 16),
+                                        PlatformService.isApple
+                                            ? Material(color: Colors.transparent, child: checkbox)
+                                            : checkbox,
+                                      ],
+                                    );
+                                    final actions = [
+                                      TextButton(
+                                        onPressed: () => Navigator.of(ctx).pop(false),
+                                        child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white)),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          if (dontShow) {
+                                            SharedPreferencesUtil().showConversationDeleteConfirmation = false;
+                                          }
+                                          Navigator.of(ctx).pop(true);
+                                        },
+                                        child: Text(context.l10n.confirm, style: const TextStyle(color: Colors.red)),
+                                      ),
+                                    ];
+                                    if (PlatformService.isApple) {
+                                      return CupertinoAlertDialog(
+                                        title: Text(context.l10n.deleteConversationTitle),
+                                        content: content,
+                                        actions: actions,
+                                      );
+                                    }
+                                    return AlertDialog(
+                                      title: Text(context.l10n.deleteConversationTitle),
+                                      content: content,
+                                      actions: actions,
+                                    );
+                                  },
+                                );
+                              },
+                            );
+                          } else {
+                            return showDialog(
+                              builder: (c) => getDialog(
+                                context,
+                                () => Navigator.pop(context),
+                                () => Navigator.pop(context),
+                                context.l10n.unableToDeleteConversation,
+                                context.l10n.pleaseCheckInternetConnectionAndTryAgain,
+                                singleButton: true,
+                                okButtonText: context.l10n.ok,
+                              ),
+                              context: context,
+                            );
+                          }
+                        },
+                        onDismissed: (direction) async {
+                          var conversation = widget.conversation;
+                          var conversationIdx = widget.conversationIdx;
+                          MixpanelManager().conversationSwipedToDelete(conversation);
+                          provider.deleteConversationLocally(conversation, conversationIdx, widget.date);
+                        },
+                        child: Padding(
+                          padding: PlatformService.isMobile
+                              ? const EdgeInsetsDirectional.symmetric(horizontal: 16, vertical: 20)
+                              : const EdgeInsetsDirectional.all(16),
+                          child: PlatformService.isMobile
+                              ? _buildMobileLayout(context)
+                              : Column(
+                                  mainAxisSize: MainAxisSize.max,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _getConversationHeader(),
+                                    const SizedBox(height: 16),
+                                    _buildConversationBody(context),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
+              // Merging overlay covering the full card
+              if (isMerging)
+                Positioned.fill(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      top: 12,
+                      left: widget.isFromOnboarding ? 0 : 16,
+                      right: widget.isFromOnboarding ? 0 : 16,
+                    ),
+                    child: _buildMergingOverlay(),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMobileLayout(BuildContext context) {
+    return Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Emoji + Title row
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!widget.conversation.discarded)
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(color: const Color(0xFF35343B), borderRadius: BorderRadius.circular(12)),
+                    alignment: Alignment.center,
+                    child: Text(
+                      widget.conversation.structured.getEmoji(),
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                if (!widget.conversation.discarded) const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.conversation.discarded
+                            ? widget.conversation.getTranscript(maxCount: 100)
+                            : widget.conversation.structured.title.decodeString,
+                        style: Theme.of(context).textTheme.titleMedium,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      // Duration and time below title (or New status)
+                      isNew
+                          ? Row(
+                              children: [
+                                ConversationNewStatusIndicator(text: context.l10n.conversationNewIndicator),
+                                const Spacer(),
+                                if (widget.conversation.starred)
+                                  const Padding(
+                                    padding: EdgeInsets.only(right: 4.0),
+                                    child: FaIcon(FontAwesomeIcons.solidStar, size: 12, color: Colors.amber),
+                                  ),
+                              ],
+                            )
+                          : Row(
+                              children: [
+                                Text(
+                                  dateTimeFormat(
+                                    'h:mm a',
+                                    widget.conversation.startedAt ?? widget.conversation.createdAt,
+                                    locale: Localizations.localeOf(context).languageCode,
+                                  ),
+                                  style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                                  maxLines: 1,
+                                ),
+                                if (_getConversationDuration(context).isNotEmpty) ...[
+                                  const Text(' • ', style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14)),
+                                  Text(
+                                    _getConversationDuration(context),
+                                    style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                                    maxLines: 1,
+                                  ),
+                                ],
+                                const Spacer(),
+                                if (widget.conversation.starred)
+                                  const Padding(
+                                    padding: EdgeInsets.only(right: 4.0),
+                                    child: FaIcon(FontAwesomeIcons.solidStar, size: 12, color: Colors.amber),
+                                  ),
+                              ],
+                            ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        if (widget.conversation.isLocked) _buildLockedOverlay(),
+      ],
+    );
+  }
+
+  Widget _buildMergingOverlay() {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.6),
+        borderRadius: const BorderRadius.all(Radius.circular(24)),
+      ),
+      child: const MergingIndicator(),
+    );
+  }
+
+  Widget _buildConversationBody(BuildContext context) {
+    if (widget.conversation.discarded) {
+      return Stack(
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.conversation.photos.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Icon(Icons.photo_library, color: Colors.grey.shade400, size: 18),
+                    const SizedBox(width: 12),
+                    Text(
+                      context.l10n.conversationPhotosCount(widget.conversation.photos.length),
+                      style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+              ],
+              Text(
+                widget.conversation.getTranscript(maxCount: 100),
+                style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
+              ),
+            ],
+          ),
+          if (widget.conversation.isLocked) _buildLockedOverlay(),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(widget.conversation.structured.title.decodeString, style: Theme.of(context).textTheme.titleLarge),
+      ],
+    );
+  }
+
+  Widget _buildLockedOverlay() {
+    return Positioned.fill(
+      child: ClipRRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 2.0, sigmaY: 2.0),
+          child: Container(
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.01),
+              borderRadius: const BorderRadius.all(Radius.circular(8)),
+            ),
+            child: Text(
+              context.l10n.upgradeToUnlimited,
+              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
             ),
           ),
         ),
-      );
-    });
+      ),
+    );
   }
 
   _getConversationHeader() {
@@ -200,7 +510,8 @@ class _ConversationListItemState extends State<ConversationListItem> {
                     widget.conversation.structured.getEmoji(),
                     style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w500),
                   ),
-                if (widget.conversation.structured.category.isNotEmpty && !widget.conversation.discarded) const SizedBox(width: 8),
+                if (widget.conversation.structured.category.isNotEmpty && !widget.conversation.discarded)
+                  const SizedBox(width: 8),
                 if (widget.conversation.structured.category.isNotEmpty)
                   Flexible(
                     child: Container(
@@ -211,7 +522,9 @@ class _ConversationListItemState extends State<ConversationListItem> {
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       child: Text(
                         widget.conversation.getTag(),
-                        style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: widget.conversation.getTagTextColor()),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodyMedium!.copyWith(color: widget.conversation.getTagTextColor()),
                         overflow: TextOverflow.ellipsis,
                         maxLines: 1,
                       ),
@@ -223,37 +536,43 @@ class _ConversationListItemState extends State<ConversationListItem> {
 
           const SizedBox(width: 12),
 
-          // 🕒 Timestamp + Duration or New
+          // 🕒 Timestamp + Duration or New + Starred
           FittedBox(
             fit: BoxFit.scaleDown,
             child: isNew
-                ? const ConversationNewStatusIndicator(text: "New 🚀")
+                ? ConversationNewStatusIndicator(text: context.l10n.conversationNewIndicator)
                 : Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
                         dateTimeFormat(
-                          'MMM d, h:mm a',
+                          'h:mm a',
                           widget.conversation.startedAt ?? widget.conversation.createdAt,
+                          locale: Localizations.localeOf(context).languageCode,
                         ),
-                        style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                        style: const TextStyle(color: Color(0xFF6A6B71), fontSize: 14),
                         maxLines: 1,
                       ),
-                      if (widget.conversation.transcriptSegments.isNotEmpty && _getConversationDuration().isNotEmpty)
+                      if (_getConversationDuration(context).isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(left: 8.0),
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                              color: Colors.grey.shade800,
+                              color: const Color(0xFF35343B),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
-                              _getConversationDuration(),
-                              style: TextStyle(color: Colors.grey.shade300, fontSize: 11),
+                              _getConversationDuration(context),
+                              style: const TextStyle(color: Colors.white, fontSize: 11),
                               maxLines: 1,
                             ),
                           ),
+                        ),
+                      if (widget.conversation.starred)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 8.0),
+                          child: FaIcon(FontAwesomeIcons.solidStar, size: 12, color: Colors.amber),
                         ),
                     ],
                   ),
@@ -263,14 +582,11 @@ class _ConversationListItemState extends State<ConversationListItem> {
     );
   }
 
-  String _getConversationDuration() {
-    if (widget.conversation.transcriptSegments.isEmpty) return '';
-
-    // Get the total duration in seconds
+  String _getConversationDuration(BuildContext context) {
     int durationSeconds = widget.conversation.getDurationInSeconds();
     if (durationSeconds <= 0) return '';
 
-    return secondsToCompactDuration(durationSeconds);
+    return secondsToCompactDuration(durationSeconds, context);
   }
 }
 
@@ -283,7 +599,8 @@ class ConversationNewStatusIndicator extends StatefulWidget {
   State<ConversationNewStatusIndicator> createState() => _ConversationNewStatusIndicatorState();
 }
 
-class _ConversationNewStatusIndicatorState extends State<ConversationNewStatusIndicator> with SingleTickerProviderStateMixin {
+class _ConversationNewStatusIndicatorState extends State<ConversationNewStatusIndicator>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _opacityAnim;
 
@@ -305,9 +622,53 @@ class _ConversationNewStatusIndicatorState extends State<ConversationNewStatusIn
 
   @override
   Widget build(BuildContext context) {
+    return FadeTransition(opacity: _opacityAnim, child: Text(widget.text));
+  }
+}
+
+/// Animated merging indicator that pulses to show conversations are being merged
+class MergingIndicator extends StatefulWidget {
+  const MergingIndicator({super.key});
+
+  @override
+  State<MergingIndicator> createState() => _MergingIndicatorState();
+}
+
+class _MergingIndicatorState extends State<MergingIndicator> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _opacityAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(duration: const Duration(milliseconds: 1200), vsync: this)..repeat(reverse: true);
+    _opacityAnim = Tween<double>(
+      begin: 1.0,
+      end: 0.4,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return FadeTransition(
       opacity: _opacityAnim,
-      child: Text(widget.text),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.merge_rounded, color: Colors.white, size: 18),
+          const SizedBox(width: 8),
+          Text(
+            context.l10n.mergingStatus,
+            style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -2,15 +2,19 @@ import base64
 import json
 import os
 from typing import List, Union, Optional
+from datetime import datetime, timedelta, timezone
 
 import redis
+import logging
+
+logger = logging.getLogger(__name__)
 
 r = redis.Redis(
     host=os.getenv('REDIS_DB_HOST'),
     port=int(os.getenv('REDIS_DB_PORT')) if os.getenv('REDIS_DB_PORT') is not None else 6379,
     username='default',
     password=os.getenv('REDIS_DB_PASSWORD'),
-    health_check_interval=30
+    health_check_interval=30,
 )
 
 
@@ -19,7 +23,7 @@ def try_catch_decorator(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            print(f'Error calling {func.__name__}', e)
+            logger.error(f'Error calling {func.__name__} {e}')
             return None
 
     return wrapper
@@ -55,6 +59,7 @@ def delete_generic_cache(path: str):
 # ********************* APP BY ID **********************
 # ******************************************************
 
+
 def set_app_cache_by_id(app_id: str, app: dict):
     r.set(f'apps:{app_id}', json.dumps(app, default=str), ex=60 * 10)  # 10 minutes cached
 
@@ -72,6 +77,7 @@ def delete_app_cache_by_id(app_id: str):
 # ******************************************************
 # ********************** PERSONA ***********************
 # ******************************************************
+
 
 def is_username_taken(username: str) -> bool:
     """Check if username is taken by checking if it exists in the username:uid mapping"""
@@ -209,12 +215,29 @@ def get_user_paid_app(app_id: str, uid: str) -> str:
     return val.decode()
 
 
+def set_user_app_subscription_customer_id(app_id: str, uid: str, customer_id: str):
+    """Store the Stripe customer ID for a user's app subscription"""
+    r.set(f'users:{uid}:app_subs:{app_id}:customer_id', customer_id)
+
+
+def get_user_app_subscription_customer_id(app_id: str, uid: str) -> str:
+    """Get the Stripe customer ID for a user's app subscription"""
+    val = r.get(f'users:{uid}:app_subs:{app_id}:customer_id')
+    if not val:
+        return None
+    return val.decode()
+
+
 def enable_app(uid: str, app_id: str):
     r.sadd(f'users:{uid}:enabled_plugins', app_id)
 
 
 def disable_app(uid: str, app_id: str):
     r.srem(f'users:{uid}:enabled_plugins', app_id)
+
+
+def is_app_enabled(uid: str, app_id: str) -> bool:
+    return r.sismember(f'users:{uid}:enabled_plugins', app_id)
 
 
 def get_enabled_apps(uid: str):
@@ -239,10 +262,7 @@ def get_apps_reviews(app_ids: list) -> dict:
     reviews = r.mget(keys)
     if reviews is None:
         return {}
-    return {
-        app_id: eval(review) if review else {}
-        for app_id, review in zip(app_ids, reviews)
-    }
+    return {app_id: eval(review) if review else {} for app_id, review in zip(app_ids, reviews)}
 
 
 def set_app_installs_count(app_id: str, count: int):
@@ -272,22 +292,7 @@ def get_apps_installs_count(app_ids: list) -> dict:
     counts = r.mget(keys)
     if counts is None:
         return {}
-    return {
-        app_id: int(count) if count else 0
-        for app_id, count in zip(app_ids, counts)
-    }
-
-
-def set_user_has_soniox_speech_profile(uid: str):
-    r.set(f'users:{uid}:has_soniox_speech_profile', '1')
-
-
-def get_user_has_soniox_speech_profile(uid: str) -> bool:
-    return r.exists(f'users:{uid}:has_soniox_speech_profile')
-
-
-def remove_user_soniox_speech_profile(uid: str):
-    r.delete(f'users:{uid}:has_soniox_speech_profile')
+    return {app_id: int(count) if count else 0 for app_id, count in zip(app_ids, counts)}
 
 
 def cache_user_name(uid: str, name: str, ttl: int = 60 * 60 * 24 * 7):
@@ -385,7 +390,7 @@ def get_public_conversations() -> List[str]:
     return [x.decode() for x in val]
 
 
-def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 150):
+def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300):
     r.set(f'users:{uid}:in_progress_memory_id', conversation_id)
     r.expire(f'users:{uid}:in_progress_memory_id', ttl)
 
@@ -399,6 +404,25 @@ def get_in_progress_conversation_id(uid: str) -> str:
     if not conversation_id:
         return ''
     return conversation_id.decode()
+
+
+def set_conversation_meeting_id(conversation_id: str, meeting_id: str, ttl: int = 86400):
+    """Store the meeting_id for a conversation. TTL defaults to 24 hours."""
+    r.set(f'conversation:{conversation_id}:meeting_id', meeting_id)
+    r.expire(f'conversation:{conversation_id}:meeting_id', ttl)
+
+
+def get_conversation_meeting_id(conversation_id: str) -> Optional[str]:
+    """Retrieve the meeting_id associated with a conversation."""
+    meeting_id = r.get(f'conversation:{conversation_id}:meeting_id')
+    if not meeting_id:
+        return None
+    return meeting_id.decode()
+
+
+def remove_conversation_meeting_id(conversation_id: str):
+    """Remove the meeting_id association for a conversation."""
+    r.delete(f'conversation:{conversation_id}:meeting_id')
 
 
 def set_user_webhook_db(uid: str, wtype: str, url: str):
@@ -427,8 +451,15 @@ def get_user_webhook_db(uid: str, wtype: str) -> str:
     return url.decode()
 
 
-def get_filter_category_items(uid: str, category: str) -> List[str]:
-    val = r.smembers(f'users:{uid}:filters:{category}')
+def get_filter_category_items(uid: str, category: str, limit: Optional[int] = None) -> List[str]:
+    key = f'users:{uid}:filters:{category}'
+    if limit:
+        # Get random sample if limit specified
+        val = r.srandmember(key, limit)
+    else:
+        # Get all items (existing behavior)
+        val = r.smembers(key)
+
     if not val:
         return []
     return [x.decode() for x in val]
@@ -456,10 +487,6 @@ def save_migrated_retrieval_conversation_id(conversation_id: str):
     r.expire('migrated_retrieval_memory_ids', 60 * 60 * 24 * 7)
 
 
-def has_migrated_retrieval_conversation_id(conversation_id: str) -> bool:
-    return r.sismember('migrated_retrieval_memory_ids', conversation_id)
-
-
 def set_proactive_noti_sent_at(uid: str, app_id: str, ts: int, ttl: int = 30):
     r.set(f'{uid}:{app_id}:proactive_noti_sent_at', ts, ex=ttl)
 
@@ -475,6 +502,29 @@ def get_proactive_noti_sent_at_ttl(uid: str, app_id: str):
     return r.ttl(f'{uid}:{app_id}:proactive_noti_sent_at')
 
 
+@try_catch_decorator
+def incr_daily_notification_count(uid: str) -> int:
+    """Atomically increment the daily mentor notification count for a user. Returns new count."""
+    from datetime import datetime, timezone
+
+    key = f'{uid}:daily_noti_count:{datetime.now(timezone.utc).strftime("%Y-%m-%d")}'
+    count = r.incr(key)
+    r.expire(key, 90000)  # 25 hours TTL
+    return count
+
+
+@try_catch_decorator
+def get_daily_notification_count(uid: str) -> int:
+    """Get the current daily mentor notification count for a user."""
+    from datetime import datetime, timezone
+
+    key = f'{uid}:daily_noti_count:{datetime.now(timezone.utc).strftime("%Y-%m-%d")}'
+    val = r.get(key)
+    if not val:
+        return 0
+    return int(val)
+
+
 def set_user_preferred_app(uid: str, app_id: str):
     """Stores the user's preferred app ID."""
     key = f'user:{uid}:preferred_app'
@@ -486,3 +536,392 @@ def get_user_preferred_app(uid: str) -> Optional[str]:
     key = f'user:{uid}:preferred_app'
     app_id = r.get(key)
     return app_id.decode() if app_id else None
+
+
+@try_catch_decorator
+def set_user_data_protection_level(uid: str, level: str):
+    """Caches the user's data protection level."""
+    key = f'user:{uid}:data_protection_level'
+    r.set(key, level)
+
+
+@try_catch_decorator
+def get_user_data_protection_level(uid: str) -> Optional[str]:
+    """Retrieves the user's cached data protection level."""
+    key = f'user:{uid}:data_protection_level'
+    level = r.get(key)
+    return level.decode() if level else None
+
+
+# ******************************************************
+# ******************* MCP API KEYS *********************
+# ******************************************************
+
+
+@try_catch_decorator
+def cache_mcp_api_key(hashed_key: str, user_id: str, ttl: int = 3600):
+    """Caches the user_id for a given hashed MCP API key."""
+    r.set(f'mcp_api_key:{hashed_key}', user_id, ex=ttl)
+
+
+@try_catch_decorator
+def get_cached_mcp_api_key_user_id(hashed_key: str) -> Optional[str]:
+    """Retrieves the user_id for a given hashed MCP API key from cache."""
+    user_id = r.get(f'mcp_api_key:{hashed_key}')
+    return user_id.decode() if user_id else None
+
+
+@try_catch_decorator
+def delete_cached_mcp_api_key(hashed_key: str):
+    """Deletes a cached MCP API key."""
+    r.delete(f'mcp_api_key:{hashed_key}')
+
+
+# ******************************************************
+# ****************** DEV API KEYS **********************
+# ******************************************************
+
+
+def cache_dev_api_key(hashed_key: str, user_id: str, scopes: Optional[List[str]] = None, ttl: int = 3600):
+    """Caches the user_id and scopes for a given hashed Developer API key."""
+    cache_data = {"user_id": user_id, "scopes": scopes}
+    r.set(f'dev_api_key:{hashed_key}', json.dumps(cache_data), ex=ttl)
+
+
+@try_catch_decorator
+def get_cached_dev_api_key_user_id(hashed_key: str) -> Optional[str]:
+    """Retrieves the user_id for a given hashed Developer API key from cache."""
+    cached = r.get(f'dev_api_key:{hashed_key}')
+    if not cached:
+        return None
+    data = json.loads(cached.decode())
+    return data.get("user_id")
+
+
+@try_catch_decorator
+def get_cached_dev_api_key_data(hashed_key: str) -> Optional[dict]:
+    """Retrieves the user_id and scopes for a given hashed Developer API key from cache."""
+    cached = r.get(f'dev_api_key:{hashed_key}')
+    if not cached:
+        return None
+    return json.loads(cached.decode())
+
+
+@try_catch_decorator
+def delete_cached_dev_api_key(hashed_key: str):
+    """Deletes a cached Developer API key."""
+    r.delete(f'dev_api_key:{hashed_key}')
+
+
+# ******************************************************
+# **************** DATA MIGRATION STATUS ***************
+# ******************************************************
+
+
+def set_migration_status(uid: str, status: str, processed: int = None, total: int = None, error: str = None):
+    key = f"migration_status:{uid}"
+    data = {"status": status}
+    if processed is not None:
+        data["processed"] = processed
+    if total is not None:
+        data["total"] = total
+    if error is not None:
+        data["error"] = error
+
+    r.set(key, json.dumps(data), ex=3600)  # Expire after 1 hour
+
+
+def get_migration_status(uid: str) -> dict:
+    key = f"migration_status:{uid}"
+    data = r.get(key)
+    if data:
+        status_data = json.loads(data)
+        # If complete or failed, keep the status for a short time so the UI can fetch it.
+        if status_data.get('status') in ['complete', 'failed']:
+            r.expire(key, 60)  # Keep it for 1 minute
+        return status_data
+    return {"status": "idle"}
+
+
+@try_catch_decorator
+def clear_migration_status(uid: str):
+    """Clear the migration status for a user."""
+    r.delete(f'migration_status:{uid}')
+
+
+# ******************************************************
+# ******************* AUTH SESSION *********************
+# ******************************************************
+
+
+@try_catch_decorator
+def set_auth_session(session_id: str, session_data: dict, ttl: int = 600):
+    """Store auth session data with expiration (default 10 minutes)"""
+    r.set(f'auth_session:{session_id}', json.dumps(session_data), ex=ttl)
+
+
+@try_catch_decorator
+def get_auth_session(session_id: str) -> dict:
+    """Retrieve auth session data"""
+    data = r.get(f'auth_session:{session_id}')
+    return json.loads(data.decode('utf-8')) if data else None
+
+
+@try_catch_decorator
+def set_auth_code(auth_code: str, firebase_token: str, ttl: int = 300):
+    """Store auth code with Firebase token (default 5 minutes)"""
+    r.set(f'auth_code:{auth_code}', firebase_token, ex=ttl)
+
+
+@try_catch_decorator
+def get_auth_code(auth_code: str) -> str:
+    """Retrieve Firebase token by auth code"""
+    token = r.get(f'auth_code:{auth_code}')
+    return token.decode('utf-8') if token else None
+
+
+@try_catch_decorator
+def delete_auth_code(auth_code: str):
+    """Delete used auth code"""
+    r.delete(f'auth_code:{auth_code}')
+
+
+# ******************************************************
+# ************** CREDIT LIMIT NOTIFICATIONS ************
+# ******************************************************
+
+
+def set_credit_limit_notification_sent(uid: str, ttl: int = 60 * 60 * 24):
+    """Cache that credit limit notification was sent to user (24 hours TTL by default)"""
+    r.set(f'users:{uid}:credit_limit_notification_sent', '1', ex=ttl)
+
+
+def has_credit_limit_notification_been_sent(uid: str) -> bool:
+    """Check if credit limit notification was already sent to user recently"""
+    return r.exists(f'users:{uid}:credit_limit_notification_sent')
+
+
+def set_silent_user_notification_sent(uid: str, ttl: int = 60 * 60 * 24):
+    """Cache that silent user notification was sent to user (24 hours TTL by default)"""
+    r.set(f'users:{uid}:silent_notification_sent', '1', ex=ttl)
+
+
+def has_silent_user_notification_been_sent(uid: str) -> bool:
+    """Check if silent user notification was already sent to user recently"""
+    return r.exists(f'users:{uid}:silent_notification_sent')
+
+
+# ******************************************************
+# ******* IMPORTANT CONVERSATION NOTIFICATIONS *********
+# ******************************************************
+
+
+def set_important_conversation_notification_sent(uid: str, conversation_id: str):
+    """Mark that important conversation notification was sent for this conversation (no expiry - one-time per conversation)"""
+    r.set(f'users:{uid}:important_conv_notif:{conversation_id}', '1')
+
+
+def has_important_conversation_notification_been_sent(uid: str, conversation_id: str) -> bool:
+    """Check if important conversation notification was already sent for this conversation"""
+    return r.exists(f'users:{uid}:important_conv_notif:{conversation_id}')
+
+
+# ******************************************************
+# ******** CONVERSATION SUMMARY APP IDS ****************
+# ******************************************************
+
+CONVERSATION_SUMMARY_APPS_KEY = 'conversation_summary_app_ids'
+
+
+@try_catch_decorator
+def get_conversation_summary_app_ids() -> List[str]:
+    """Get list of conversation summary app IDs from Redis"""
+    app_ids = r.smembers(CONVERSATION_SUMMARY_APPS_KEY)
+    return [app_id.decode('utf-8') if isinstance(app_id, bytes) else app_id for app_id in app_ids] if app_ids else []
+
+
+@try_catch_decorator
+def add_conversation_summary_app_id(app_id: str) -> bool:
+    """Add an app ID to the conversation summary apps set"""
+    result = r.sadd(CONVERSATION_SUMMARY_APPS_KEY, app_id)
+    return result > 0
+
+
+@try_catch_decorator
+def remove_conversation_summary_app_id(app_id: str) -> bool:
+    """Remove an app ID from the conversation summary apps set"""
+    result = r.srem(CONVERSATION_SUMMARY_APPS_KEY, app_id)
+    return result > 0
+
+
+# ******************************************************
+# *************** RATE LIMITING ************************
+# ******************************************************
+
+# Lua script: atomic increment + TTL in a single round-trip.
+# Returns [current_count, ttl_remaining].  Sets TTL on first hit
+# and self-heals any key that lost its TTL (prevents permanent buckets).
+_RATE_LIMIT_LUA = r.register_script("""
+local key = KEYS[1]
+local window = tonumber(ARGV[1])
+local current = redis.call('INCR', key)
+if current == 1 then
+    redis.call('EXPIRE', key, window)
+end
+local ttl = redis.call('TTL', key)
+if ttl < 0 then
+    redis.call('EXPIRE', key, window)
+    ttl = window
+end
+return {current, ttl}
+""")
+
+
+def check_rate_limit(key: str, policy: str, max_requests: int, window: int) -> tuple[bool, int, int]:
+    """Check per-key rate limit using a single atomic Lua call.
+
+    Args:
+        key: Rate limit subject (uid, ip, app_id:uid).
+        policy: Policy name (used in Redis key namespace).
+        max_requests: Maximum requests allowed in the window (after boost).
+        window: Window size in seconds.
+
+    Returns:
+        (allowed, remaining, retry_after_seconds)
+    """
+    redis_key = f'rl:{policy}:{key}'
+    current, ttl = _RATE_LIMIT_LUA(keys=[redis_key], args=[window])
+    remaining = max(0, max_requests - current)
+    allowed = current <= max_requests
+    retry_after = max(0, ttl) if not allowed else 0
+    return allowed, remaining, retry_after
+
+
+def try_acquire_listen_lock(uid: str, ttl: int = 7) -> bool:
+    """Atomically try to acquire listen rate limit lock. Returns True if acquired (not rate limited), False if already rate limited."""
+    result = r.set(f'users:{uid}:listen_rate_limit', '1', ex=ttl, nx=True)
+    return result is not None
+
+
+def set_persona_update_timestamp(uid: str):
+    """Mark that user has updated personas (expires at 00:00 UTC)"""
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    ttl = int((tomorrow - now).total_seconds())
+    r.set(f'users:{uid}:persona_updated', '1', ex=ttl)
+
+
+def can_update_persona(uid: str) -> bool:
+    """Check if user can update personas (not updated since last 00:00 UTC)"""
+    return not r.exists(f'users:{uid}:persona_updated')
+
+
+# ******************************************************
+# *************** SPEECH PROFILE CACHE *****************
+# ******************************************************
+
+
+@try_catch_decorator
+def set_speech_profile_duration(uid: str, duration: float):
+    """Cache speech profile duration (write-ahead on upload)"""
+    r.set(f'users:{uid}:speech_profile_duration', str(duration))
+
+
+@try_catch_decorator
+def get_speech_profile_duration(uid: str) -> Optional[float]:
+    """Get cached speech profile duration"""
+    val = r.get(f'users:{uid}:speech_profile_duration')
+    if val:
+        return float(val.decode())
+    return None
+
+
+@try_catch_decorator
+def delete_speech_profile_duration(uid: str):
+    """Delete cached speech profile duration"""
+    r.delete(f'users:{uid}:speech_profile_duration')
+
+
+# ******************************************************
+# ************ DAILY SUMMARY NOTIFICATIONS *************
+# ******************************************************
+
+
+# ******************************************************
+# *************** TASK SHARING TOKENS ******************
+# ******************************************************
+
+TASK_SHARE_TTL = 60 * 60 * 24 * 30  # 30 days
+
+
+@try_catch_decorator
+def store_task_share(token: str, uid: str, display_name: str, task_ids: list):
+    """Store a task share token in Redis with 30-day TTL."""
+    data = json.dumps({"uid": uid, "display_name": display_name, "task_ids": task_ids})
+    return r.set(f'task_share:{token}', data, ex=TASK_SHARE_TTL)
+
+
+@try_catch_decorator
+def get_task_share(token: str) -> Optional[dict]:
+    """Get task share data by token. Returns None if expired or not found."""
+    data = r.get(f'task_share:{token}')
+    if data:
+        return json.loads(data)
+    return None
+
+
+@try_catch_decorator
+def try_accept_task_share(token: str, uid: str) -> bool:
+    """Atomically mark a task share as accepted. Returns True on first acceptance, False if already accepted."""
+    key = f'task_share:{token}:accepted'
+    if r.sadd(key, uid) == 1:
+        r.expire(key, TASK_SHARE_TTL)
+        return True
+    return False
+
+
+def try_acquire_daily_summary_lock(uid: str, date: str, ttl: int = 60 * 60 * 2) -> bool:
+    """Atomically acquire lock BEFORE expensive LLM work. Returns True if acquired, False if another job instance already holds it."""
+    result = r.set(f'users:{uid}:daily_summary_lock:{date}', '1', ex=ttl, nx=True)
+    return result is not None
+
+
+@try_catch_decorator
+def set_credits_invalidation_signal(uid: str, ttl: int = 120):
+    """Signal active WebSocket sessions to refresh credits immediately.
+
+    Called when subscription changes (Stripe webhook, upgrade, etc.).
+    Active transcribe loops check this on each 60s tick and force a Firestore refresh.
+    TTL is 2 min — long enough for all streams to see it on their next 60s tick.
+    Uses GET (not GETDEL) so multiple concurrent streams all see the signal.
+    """
+    r.set(f'credits_invalidated:{uid}', '1', ex=ttl)
+
+
+@try_catch_decorator
+def check_credits_invalidation(uid: str) -> bool:
+    """Check if credits need immediate refresh.
+
+    Returns True if invalidation signal is present (caller should refresh).
+    Uses GET (not GETDEL) so all concurrent streams for the same user see the signal.
+    The signal auto-expires via its TTL.
+    """
+    result = r.get(f'credits_invalidated:{uid}')
+    return result is not None
+
+
+# ******************************************************
+# *************** GOAL RATE LIMITING *******************
+# ******************************************************
+
+
+def try_acquire_goal_extraction_lock(uid: str, ttl: int = 300) -> bool:
+    """Per-user rate limit for goal extraction. Returns True if acquired (not rate limited)."""
+    result = r.set(f'users:{uid}:goal_extraction_lock', '1', ex=ttl, nx=True)
+    return result is not None
+
+
+def try_acquire_conversation_goal_lock(uid: str, conversation_id: str, ttl: int = 3600) -> bool:
+    """Idempotency lock: one goal extraction per conversation. Returns True if acquired."""
+    result = r.set(f'users:{uid}:conv_goal_lock:{conversation_id}', '1', ex=ttl, nx=True)
+    return result is not None

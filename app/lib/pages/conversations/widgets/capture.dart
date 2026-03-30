@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
+
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/pages/capture/widgets/widgets.dart';
 import 'package:omi/providers/capture_provider.dart';
-import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/device_provider.dart';
-import 'package:omi/providers/onboarding_provider.dart';
-import 'package:omi/services/services.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
-import 'package:provider/provider.dart';
 
 class LiteCaptureWidget extends StatefulWidget {
   const LiteCaptureWidget({super.key});
@@ -28,32 +28,28 @@ class LiteCaptureWidgetState extends State<LiteCaptureWidget> with AutomaticKeep
   @override
   void initState() {
     WavBytesUtil.clearTempWavFiles();
-    SchedulerBinding.instance.addPostFrameCallback((_) async {
-      if (context.read<DeviceProvider>().connectedDevice != null) {
-        context.read<OnboardingProvider>().stopScanDevices();
-      }
-    });
-
     super.initState();
-  }
-
-  Future<BleAudioCodec> _getAudioCodec(String deviceId) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) {
-      return BleAudioCodec.pcm8;
-    }
-    return connection.getAudioCodec();
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return Consumer2<CaptureProvider, DeviceProvider>(builder: (context, provider, deviceProvider, child) {
-      return getLiteTranscriptWidget(
-        provider.segments,
-        [],
-        deviceProvider.connectedDevice,
-      );
-    });
+    // Use Selector to only rebuild when segments/photos change, not on metrics, recording state, etc.
+    // This reduces battery drain by avoiding unnecessary rebuilds during transcription.
+    // segmentsPhotosVersion detects in-place mutations (translations, speaker assignments, photo descriptions).
+    // We rely on default shouldRebuild (reference equality) since CaptureProvider now creates new list
+    // instances on mutation and bumps segmentsPhotosVersion for content changes.
+    return Selector<CaptureProvider, (List<TranscriptSegment>, List<ConversationPhoto>, int)>(
+      selector: (_, provider) => (provider.segments, provider.photos, provider.segmentsPhotosVersion),
+      builder: (context, data, child) {
+        final (segments, photos, _) = data;
+        return Selector<DeviceProvider, BtDevice?>(
+          selector: (_, provider) => provider.connectedDevice,
+          builder: (context, connectedDevice, child) {
+            return getLiteTranscriptWidget(segments, photos, connectedDevice);
+          },
+        );
+      },
+    );
   }
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Code, Sparkles, Zap, ArrowRight } from 'lucide-react';
+import { Sparkles, Zap, ArrowRight } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 export const DeveloperBanner = () => {
@@ -23,12 +23,12 @@ export const DeveloperBanner = () => {
       setCodeStep((prev) => (prev + 1) % codeLines.length);
     }, 1200);
     return () => clearInterval(interval);
-  }, []);
+  }, [codeLines.length]);
 
   return (
     <div className="container mx-auto px-3 sm:px-6 md:px-8">
       <Link
-        href="https://docs.omi.me/docs/developer/apps/Introduction"
+        href="https://docs.omi.me/doc/developer/apps/Introduction"
         target="_blank"
         className="group block w-full transform transition-transform duration-300 hover:scale-[1.01]"
       >

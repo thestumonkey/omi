@@ -1,9 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
-//TODO: switch to required named parameters
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/platform/platform_service.dart';
+
 getDialog(
   BuildContext context,
   Function onCancel,
@@ -11,25 +11,30 @@ getDialog(
   String title,
   String content, {
   bool singleButton = false,
-  String okButtonText = 'Ok',
-  String cancelButtonText = 'Cancel',
+  String? okButtonText,
+  String? cancelButtonText,
 }) {
+  final okText = okButtonText ?? context.l10n.ok;
+  final cancelText = cancelButtonText ?? context.l10n.cancel;
+
   var actions = singleButton
       ? [
           TextButton(
             onPressed: () => onCancel(),
-            child: Text(okButtonText, style: const TextStyle(color: Colors.white)),
-          )
+            child: Text(okText, style: const TextStyle(color: Colors.white)),
+          ),
         ]
       : [
           TextButton(
             onPressed: () => onCancel(),
-            child: Text(cancelButtonText, style: TextStyle(color: Colors.white)),
+            child: Text(cancelText, style: const TextStyle(color: Colors.white)),
           ),
           TextButton(
-              onPressed: () => onConfirm(), child: Text(okButtonText, style: const TextStyle(color: Colors.white))),
+            onPressed: () => onConfirm(),
+            child: Text(okText, style: const TextStyle(color: Colors.white)),
+          ),
         ];
-  if (Platform.isIOS) {
+  if (PlatformService.isApple) {
     return CupertinoAlertDialog(title: Text(title), content: Text(content), actions: actions);
   }
   return AlertDialog(title: Text(title), content: Text(content), actions: actions);

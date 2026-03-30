@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import { Mulish } from 'next/font/google';
 import './globals.css';
 import AppHeader from '../components/shared/app-header';
-import Footer from '../components/shared/footer';
+import ConditionalFooter from '../components/shared/conditional-footer';
 import envConfig from '../constants/envConfig';
 import { GleapInit } from '@/src/components/shared/gleap';
 import { GoogleAnalytics } from '@/src/components/shared/google-analytics';
@@ -29,12 +29,20 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <script src="https://elfsightcdn.com/platform.js" async></script>
+      </head>
       <body className={inter.className}>
         <AppHeader />
+        {/* Elfsight Announcement Bar */}
+        <div
+          className="elfsight-app-4df8bf4f-92a3-44bb-8bae-fcdac7faa58a"
+          data-elfsight-app-lazy
+        ></div>
         <main className="flex min-h-screen flex-col">
           <div className="w-full flex-grow">{children}</div>
         </main>
-        <Footer />
+        <ConditionalFooter />
       </body>
       <GleapInit />
       <GoogleAnalytics />

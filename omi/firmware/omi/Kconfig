@@ -10,11 +10,6 @@ config OMI_CODEC_OPUS
 
 config OMI_ENABLE_OFFLINE_STORAGE
 	bool "Offline SD Card Storage"
-    select DISK_ACCESS
-    select FILE_SYSTEM
-    select FAT_FILESYSTEM_ELM
-    select FS_FATFS_MOUNT_MKFS
-    select FS_FATFS_EXFAT
     help
         "Enable the offline storage support. Requires a SD Card."
 	default n
@@ -60,5 +55,18 @@ config OMI_ENABLE_RFSW_CTRL
     help
         "Enable RFSwitch Control support."
     default y
+
+config OMI_ENABLE_MONITOR
+    bool "Enable monitoring/metrics system"
+    help
+        "Enable the monitoring system for debugging and metrics collection.
+         Disable in production to save power, RAM, and flash space."
+    default n
+
+config OMI_ENABLE_WIFI
+    bool "Enable WiFi support"
+    help
+        "Enable the WiFi support to sync audio data over TCP."
+    default n
 
 endmenu

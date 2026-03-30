@@ -7,6 +7,9 @@ from google.api_core.retry import Retry
 from models.conversation import Conversation
 from models.trend import Trend, valid_items
 from ._client import db, document_id_from_seed
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_trends_data() -> List[Dict]:
@@ -16,8 +19,13 @@ def get_trends_data() -> List[Dict]:
     for category in trends_docs:
         try:
             category_data = category.to_dict()
-            if category_data['category'] not in ['ceo', 'company', 'software_product', 'hardware_product',
-                                                 'ai_product']:
+            if category_data['category'] not in [
+                'ceo',
+                'company',
+                'software_product',
+                'hardware_product',
+                'ai_product',
+            ]:
                 continue
 
             category_topics_ref = trends_ref.document(category_data['id']).collection('topics')
@@ -34,7 +42,7 @@ def get_trends_data() -> List[Dict]:
             category_data['topics'] = cleaned_topics
             trends_data.append(category_data)
         except Exception as e:
-            print(e)
+            logger.error(e)
             continue
 
     return trends_data
@@ -51,8 +59,7 @@ def save_trends(memory: Conversation, trends: List[Trend]):
         category_doc_ref = trends_coll_ref.document(category_id)
 
         category_doc_ref.set(
-            {"id": category_id, "category": category, "type": trend_type, "created_at": datetime.utcnow()},
-            merge=True
+            {"id": category_id, "category": category, "type": trend_type, "created_at": datetime.utcnow()}, merge=True
         )
 
         topics_coll_ref = category_doc_ref.collection('topics')

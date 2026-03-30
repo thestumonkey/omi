@@ -1,49 +1,76 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'package:calendar_date_picker2/calendar_date_picker2.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_svg/flutter_svg.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:gradient_borders/gradient_borders.dart';
+import 'package:provider/provider.dart';
+import 'package:upgrader/upgrader.dart';
+
+import 'package:omi/backend/http/api/agents.dart';
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/geolocation.dart';
-import 'package:omi/gen/assets.gen.dart';
-import 'package:omi/main.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/pages/action_items/action_items_page.dart';
+import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/apps/page.dart';
 import 'package:omi/pages/chat/page.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
+import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/conversations/conversations_page.dart';
-import 'package:omi/pages/home/widgets/chat_apps_dropdown_widget.dart';
+import 'package:omi/pages/conversations/auto_sync_page.dart';
+import 'package:omi/pages/conversations/sync_page.dart';
+import 'package:omi/pages/conversations/widgets/merge_action_bar.dart';
 import 'package:omi/pages/memories/page.dart';
-import 'package:omi/pages/settings/page.dart';
+import 'package:omi/pages/phone_calls/active_call_banner.dart';
+import 'package:omi/pages/phone_calls/phone_calls_page.dart';
+import 'package:omi/pages/phone_calls/phone_calls_upsell_sheet.dart';
+import 'package:omi/models/subscription.dart';
+import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/pages/settings/daily_summary_detail_page.dart';
+import 'package:omi/pages/settings/data_privacy_page.dart';
+import 'package:omi/pages/settings/settings_drawer.dart';
+import 'package:omi/pages/settings/task_integrations_page.dart';
+import 'package:omi/pages/settings/wrapped_2025_page.dart';
+import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/announcement_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
+import 'package:omi/providers/sync_provider.dart';
+import 'package:omi/services/announcement_service.dart';
 import 'package:omi/services/notifications.dart';
-import 'package:omi/utils/analytics/analytics_manager.dart';
+import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
-import 'package:omi/utils/other/temp.dart';
-import 'package:omi/utils/platform/platform_service.dart';
-import 'package:omi/widgets/upgrade_alert.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:provider/provider.dart';
-import 'package:upgrader/upgrader.dart';
+import 'package:omi/utils/enums.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
-
-import '../conversations/sync_page.dart';
+import 'package:omi/utils/responsive/responsive_helper.dart';
+import 'package:omi/widgets/calendar_date_picker_sheet.dart';
+import 'package:omi/widgets/freemium_switch_dialog.dart';
+import 'package:omi/widgets/upgrade_alert.dart';
+import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'widgets/battery_info_widget.dart';
 
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
-  const HomePageWrapper({super.key, this.navigateToRoute});
+  final String? autoMessage;
+  const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage});
 
   @override
   State<HomePageWrapper> createState() => _HomePageWrapperState();
@@ -51,41 +78,39 @@ class HomePageWrapper extends StatefulWidget {
 
 class _HomePageWrapperState extends State<HomePageWrapper> {
   String? _navigateToRoute;
+  String? _autoMessage;
 
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (SharedPreferencesUtil().notificationsEnabled != await Permission.notification.isGranted) {
-        SharedPreferencesUtil().notificationsEnabled = await Permission.notification.isGranted;
-        AnalyticsManager().setUserAttribute('Notifications Enabled', SharedPreferencesUtil().notificationsEnabled);
+      if (mounted) {
+        context.read<DeviceProvider>().initiateConnection('HomePageWrapper', boundDeviceOnly: true);
       }
       if (SharedPreferencesUtil().notificationsEnabled) {
         NotificationService.instance.register();
-      }
-      if (SharedPreferencesUtil().locationEnabled != await Permission.location.isGranted) {
-        SharedPreferencesUtil().locationEnabled = await Permission.location.isGranted;
-        AnalyticsManager().setUserAttribute('Location Enabled', SharedPreferencesUtil().locationEnabled);
-      }
-      if (mounted) {
-        context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper');
-      }
-      if (mounted) {
-        await context.read<ConversationProvider>().getInitialConversations();
+        NotificationService.instance.saveNotificationToken();
+
+        // Schedule daily reflection notification if enabled
+        if (SharedPreferencesUtil().dailyReflectionEnabled) {
+          DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+        }
       }
     });
     _navigateToRoute = widget.navigateToRoute;
+    _autoMessage = widget.autoMessage;
     super.initState();
   }
 
   @override
   Widget build(BuildContext context) {
-    return HomePage(navigateToRoute: _navigateToRoute);
+    return HomePage(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage);
   }
 }
 
 class HomePage extends StatefulWidget {
   final String? navigateToRoute;
-  const HomePage({super.key, this.navigateToRoute});
+  final String? autoMessage;
+  const HomePage({super.key, this.navigateToRoute, this.autoMessage});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -97,12 +122,61 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   final _upgrader = MyUpgrader(debugLogging: false, debugDisplayOnce: false);
   bool scriptsInProgress = false;
+  StreamSubscription? _notificationStreamSubscription;
 
-  PageController? _controller;
+  final GlobalKey<State<ConversationsPage>> _conversationsPageKey = GlobalKey<State<ConversationsPage>>();
+  final GlobalKey<State<ActionItemsPage>> _actionItemsPageKey = GlobalKey<State<ActionItemsPage>>();
+  final GlobalKey<State<MemoriesPage>> _memoriesPageKey = GlobalKey<State<MemoriesPage>>();
+  final GlobalKey<AppsPageState> _appsPageKey = GlobalKey<AppsPageState>();
+  late final List<Widget> _pages;
+
+  // Freemium switch handler for auto-switch dialogs
+  final FreemiumSwitchHandler _freemiumHandler = FreemiumSwitchHandler();
+
+  CaptureProvider? _captureProvider;
 
   void _initiateApps() {
     context.read<AppProvider>().getApps();
     context.read<AppProvider>().getPopularApps();
+  }
+
+  void _scrollToTop(int pageIndex) {
+    switch (pageIndex) {
+      case 0:
+        final conversationsState = _conversationsPageKey.currentState;
+        if (conversationsState != null) {
+          (conversationsState as dynamic).scrollToTop();
+        }
+        break;
+      case 1:
+        final actionItemsState = _actionItemsPageKey.currentState;
+        if (actionItemsState != null) {
+          (actionItemsState as dynamic).scrollToTop();
+        }
+        break;
+      case 2:
+        final memoriesState = _memoriesPageKey.currentState;
+        if (memoriesState != null) {
+          (memoriesState as dynamic).scrollToTop();
+        }
+        break;
+      case 3:
+        final appsState = _appsPageKey.currentState;
+        if (appsState != null) {
+          appsState.scrollToTop();
+        }
+        break;
+    }
+  }
+
+  void _addGoal() {
+    // Navigate to conversations page
+    context.read<HomeProvider>().setIndex(0);
+    // Trigger goal creation
+    final conversationsState = _conversationsPageKey.currentState;
+    if (conversationsState != null) {
+      (conversationsState as dynamic).addGoal();
+    }
   }
 
   @override
@@ -111,6 +185,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     String event = '';
     if (state == AppLifecycleState.paused) {
       event = 'App is paused';
+      // Stop keepalive when app goes to background
+      if (mounted) {
+        Provider.of<MessageProvider>(context, listen: false).stopVmKeepalive();
+      }
     } else if (state == AppLifecycleState.resumed) {
       event = 'App is resumed';
 
@@ -119,6 +197,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         Provider.of<ConversationProvider>(context, listen: false).refreshConversations();
         Provider.of<CaptureProvider>(context, listen: false).refreshInProgressConversations();
       }
+
+      // Ensure agent VM is running and restart keepalive
+      if (mounted && SharedPreferencesUtil().claudeAgentEnabled) {
+        ensureAgentVm();
+        Provider.of<MessageProvider>(context, listen: false).startVmKeepalive();
+      }
     } else if (state == AppLifecycleState.hidden) {
       event = 'App is hidden';
     } else if (state == AppLifecycleState.detached) {
@@ -126,19 +210,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     } else {
       return;
     }
-    debugPrint(event);
-    PlatformManager.instance.instabug.logInfo(event);
+    Logger.debug(event);
+    PlatformManager.instance.crashReporter.logInfo(event);
   }
 
   ///Screens with respect to subpage
-  final Map<String, Widget> screensWithRespectToPath = {
-    '/settings': const SettingsPage(),
-    '/facts': const MemoriesPage(),
-  };
+  final Map<String, Widget> screensWithRespectToPath = {'/facts': const MemoriesPage()};
   bool? previousConnection;
 
   void _onReceiveTaskData(dynamic data) async {
-    debugPrint('_onReceiveTaskData $data');
     if (data is! Map<String, dynamic>) return;
     if (!(data.containsKey('latitude') && data.containsKey('longitude'))) return;
     await updateUserGeolocation(
@@ -154,7 +234,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   void initState() {
+    _pages = [
+      ConversationsPage(key: _conversationsPageKey),
+      ActionItemsPage(key: _actionItemsPageKey, onAddGoal: _addGoal),
+      MemoriesPage(key: _memoriesPageKey),
+      AppsPage(key: _appsPageKey),
+    ];
     SharedPreferencesUtil().onboardingCompleted = true;
+    if (!SharedPreferencesUtil().permissionsCompleted) {
+      SharedPreferencesUtil().permissionsCompleted = true;
+    }
+    updateUserOnboardingState(completed: true);
 
     // Navigate uri
     Uri? navigateToUri;
@@ -164,7 +254,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     if (widget.navigateToRoute != null && widget.navigateToRoute!.isNotEmpty) {
       navigateToUri = Uri.tryParse("http://localhost.com${widget.navigateToRoute!}");
-      debugPrint("initState ${navigateToUri?.pathSegments.join("...")}");
+      Logger.debug("initState ${navigateToUri?.pathSegments.join("...")}");
       var segments = navigateToUri?.pathSegments ?? [];
       if (segments.isNotEmpty) {
         pageAlias = segments[0];
@@ -174,12 +264,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
 
       switch (pageAlias) {
-        case "memories":
-          homePageIdx = 0;
-          break;
-        case "chat":
+        case "action-items":
           homePageIdx = 1;
-        case "memoriesPage":
+          break;
+        case "memories":
+        case "facts":
           homePageIdx = 2;
           break;
         case "apps":
@@ -189,33 +278,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     }
 
     // Home controller
-    _controller = PageController(initialPage: homePageIdx);
     context.read<HomeProvider>().selectedIndex = homePageIdx;
-    context.read<HomeProvider>().onSelectedIndexChanged = (index) {
-      _controller?.animateToPage(index, duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
-    };
     WidgetsBinding.instance.addObserver(this);
+
+    // Pre-warm agent VM and WebSocket so session is ready by the time the user opens chat
+    if (SharedPreferencesUtil().claudeAgentEnabled) {
+      print('[HomePage] claudeAgentEnabled=true, calling ensureAgentVm + starting keepalive + preConnectAgent');
+      ensureAgentVm();
+      final messageProvider = Provider.of<MessageProvider>(context, listen: false);
+      messageProvider.startVmKeepalive();
+      messageProvider.preConnectAgent();
+    } else {
+      print('[HomePage] claudeAgentEnabled=false, skipping VM ensure');
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _initiateApps();
 
-      // ForegroundUtil.requestPermissions();
-      if (!Platform.isMacOS) {
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
         await ForegroundUtil.initializeForegroundService();
-        ForegroundUtil.startForegroundTask();
+        await ForegroundUtil.startForegroundTask();
       }
       if (mounted) {
         await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
       }
       if (mounted) {
-        await Provider.of<CaptureProvider>(context, listen: false)
-            .streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        await Provider.of<CaptureProvider>(
+          context,
+          listen: false,
+        ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
       }
 
       // Navigate
+      if (!mounted) return;
       switch (pageAlias) {
+        case "apps":
+          if (detailPageId != null && detailPageId.isNotEmpty) {
+            final appProvider = context.read<AppProvider>();
+            var app = await appProvider.getAppFromId(detailPageId);
+            if (app != null && mounted) {
+              Navigator.push(context, MaterialPageRoute(builder: (context) => AppDetailPage(app: app)));
+            }
+          }
+          break;
         case "chat":
-          print('inside chat alias $detailPageId');
+          Logger.debug('inside chat alias $detailPageId');
           if (detailPageId != null && detailPageId.isNotEmpty) {
             var appId = detailPageId != "omi" ? detailPageId : ''; // omi ~ no select
             if (mounted) {
@@ -236,34 +344,172 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
               await Provider.of<MessageProvider>(context, listen: false).refreshMessages();
             }
           }
+          // Navigate to chat page directly since it's no longer in the tab bar
+          // If there's an auto-message (e.g., from daily reflection notification), send it
+          final autoMessageToSend = widget.autoMessage;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => ChatPage(isPivotBottom: false, autoMessage: autoMessageToSend)),
+              );
+            }
+          });
           break;
         case "settings":
-          MyApp.navigatorKey.currentState?.push(
-            MaterialPageRoute(
-              builder: (context) => const SettingsPage(),
-            ),
-          );
+          // Use context from the current widget instead of navigator key for bottom sheet
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              SettingsDrawer.show(context);
+            }
+          });
+          if (detailPageId == 'data-privacy') {
+            globalNavigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const DataPrivacyPage()));
+          }
           break;
         case "facts":
-          MyApp.navigatorKey.currentState?.push(
-            MaterialPageRoute(
-              builder: (context) => const MemoriesPage(),
-            ),
-          );
+          globalNavigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const MemoriesPage()));
+          break;
+        case "conversation":
+          // Handle conversation deep link: /conversation/{id}?share=1
+          if (detailPageId != null && detailPageId.isNotEmpty) {
+            // Check for share query param
+            final shouldOpenShare = navigateToUri?.queryParameters['share'] == '1';
+            final conversationId = detailPageId; // Capture non-null value
+
+            WidgetsBinding.instance.addPostFrameCallback((_) async {
+              if (!mounted) return;
+
+              // Fetch conversation from server
+              final conversation = await getConversationById(conversationId);
+              if (conversation != null && mounted) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        ConversationDetailPage(conversation: conversation, openShareToContactsOnLoad: shouldOpenShare),
+                  ),
+                );
+              } else {
+                Logger.debug('Conversation not found: $conversationId');
+              }
+            });
+          }
+          break;
+        case "daily-summary":
+          if (detailPageId != null && detailPageId.isNotEmpty) {
+            // Track notification opened
+            MixpanelManager().dailySummaryNotificationOpened(
+              summaryId: detailPageId,
+              date: '', // Date not available in navigate_to, will be fetched when detail page loads
+            );
+
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => DailySummaryDetailPage(summaryId: detailPageId!)),
+                );
+              }
+            });
+          }
+          break;
+        case "wrapped":
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              Navigator.push(context, MaterialPageRoute(builder: (context) => const Wrapped2025Page()));
+            }
+          });
+          break;
+        case "action-items":
+          // Tab index already set to 1 (ActionItemsPage) above
           break;
         default:
       }
     });
 
     _listenToMessagesFromNotification();
+    _listenToFreemiumThreshold();
+    _checkForAnnouncements();
+    _registerAutoSyncCallback();
     super.initState();
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
   }
 
+  void _checkForAnnouncements() {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+
+      await Future.delayed(const Duration(seconds: 2));
+
+      if (!mounted) return;
+
+      final announcementProvider = Provider.of<AnnouncementProvider>(context, listen: false);
+      final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+      await AnnouncementService().checkAndShowAnnouncements(
+        context,
+        announcementProvider,
+        connectedDevice: deviceProvider.connectedDevice,
+      );
+
+      // Register callback for device connection to check firmware announcements
+      deviceProvider.onDeviceConnected = _onDeviceConnectedForAnnouncements;
+    });
+  }
+
+  void _registerAutoSyncCallback() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+      final syncProvider = Provider.of<SyncProvider>(context, listen: false);
+      deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) {
+        if (!syncProvider.isSyncing) {
+          Logger.debug('HomePage: Auto-sync triggered ($fileCount files, $totalBytes bytes)');
+          syncProvider.syncWals();
+        }
+      };
+    });
+  }
+
+  void _onDeviceConnectedForAnnouncements(BtDevice device) async {
+    if (!mounted) return;
+
+    final announcementProvider = Provider.of<AnnouncementProvider>(context, listen: false);
+    await AnnouncementService().showFirmwareUpdateAnnouncements(
+      context,
+      announcementProvider,
+      device.firmwareRevision,
+      device.modelNumber,
+    );
+  }
+
+  void _listenToFreemiumThreshold() {
+    // Listen to capture provider for freemium threshold events
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      _captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+      _captureProvider!.addListener(_onCaptureProviderChanged);
+      // Connect freemium session reset callback
+      _captureProvider!.onFreemiumSessionReset = () {
+        _freemiumHandler.resetDialogFlag();
+      };
+    });
+  }
+
+  void _onCaptureProviderChanged() {
+    if (!mounted || _captureProvider == null) return;
+
+    _freemiumHandler.checkAndShowDialog(context, _captureProvider!).catchError((e) {
+      Logger.debug('[Freemium] Error checking dialog: $e');
+      return false;
+    });
+  }
+
   void _listenToMessagesFromNotification() {
-    NotificationService.instance.listenForServerMessages.listen((message) {
+    _notificationStreamSubscription = NotificationService.instance.listenForServerMessages.listen((message) {
       if (mounted) {
         var selectedApp = Provider.of<AppProvider>(context, listen: false).getSelectedApp();
         if (selectedApp == null || message.appId == selectedApp.id) {
@@ -283,70 +529,82 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         builder: (ctx, connectivityProvider, child) {
           bool isConnected = connectivityProvider.isConnected;
           previousConnection ??= true;
-          if (previousConnection != isConnected && connectivityProvider.isInitialized) {
+
+          if (previousConnection != isConnected &&
+              connectivityProvider.isInitialized &&
+              connectivityProvider.previousConnection != isConnected) {
             previousConnection = isConnected;
             if (!isConnected) {
-              Future.delayed(const Duration(seconds: 2), () {
-                if (mounted && !connectivityProvider.isConnected) {
-                  ScaffoldMessenger.of(ctx).showMaterialBanner(
-                    MaterialBanner(
-                      content: const Text(
-                        'No internet connection. Please check your connection.',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                      backgroundColor: const Color(0xFF424242), // Dark gray instead of red
-                      leading: const Icon(Icons.wifi_off, color: Colors.white70),
-                      actions: [
-                        TextButton(
-                          onPressed: () {
-                            ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                          },
-                          child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-              });
+              // TODO: Re-enable when internet connection banners are redesigned
+              // Future.delayed(const Duration(seconds: 2), () {
+              //   if (mounted && !connectivityProvider.isConnected) {
+              //     ScaffoldMessenger.of(ctx).showMaterialBanner(
+              //       MaterialBanner(
+              //         content: const Text(
+              //           'No internet connection. Please check your connection.',
+              //           style: TextStyle(color: Colors.white70),
+              //         ),
+              //         backgroundColor: const Color(0xFF424242), // Dark gray instead of red
+              //         leading: const Icon(Icons.wifi_off, color: Colors.white70),
+              //         actions: [
+              //           TextButton(
+              //             onPressed: () {
+              //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //             },
+              //             child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
+              //           ),
+              //         ],
+              //       ),
+              //     );
+              //   }
+              // });
             } else {
               Future.delayed(Duration.zero, () {
-                if (mounted) {
-                  ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                  ScaffoldMessenger.of(ctx).showMaterialBanner(
-                    MaterialBanner(
-                      content: const Text(
-                        'Internet connection is restored.',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
-                      leading: const Icon(Icons.wifi, color: Colors.white),
-                      actions: [
-                        TextButton(
-                          onPressed: () {
-                            if (mounted) {
-                              ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                            }
-                          },
-                          child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
-                        ),
-                      ],
-                      onVisible: () => Future.delayed(const Duration(seconds: 3), () {
-                        if (mounted) {
-                          ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                        }
-                      }),
-                    ),
-                  );
-                }
+                // TODO: Re-enable when internet connection banners are redesigned
+                // if (mounted) {
+                //   ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+                //   ScaffoldMessenger.of(ctx).showMaterialBanner(
+                //     MaterialBanner(
+                //       content: const Text(
+                //         'Internet connection is restored.',
+                //         style: TextStyle(color: Colors.white),
+                //       ),
+                //       backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
+                //       leading: const Icon(Icons.wifi, color: Colors.white),
+                //       actions: [
+                //         TextButton(
+                //           onPressed: () {
+                //             if (mounted) {
+                //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+                //             }
+                //           },
+                //           child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
+                //         ),
+                //       ],
+                //       onVisible: () => Future.delayed(const Duration(seconds: 3), () {
+                //         if (mounted) {
+                //           ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+                //         }
+                //       }),
+                //     ),
+                //   );
+                // }
 
                 WidgetsBinding.instance.addPostFrameCallback((_) async {
-                  if (mounted) {
-                    if (ctx.read<ConversationProvider>().conversations.isEmpty) {
-                      await ctx.read<ConversationProvider>().getInitialConversations();
-                    }
-                    if (ctx.read<MessageProvider>().messages.isEmpty) {
-                      await ctx.read<MessageProvider>().refreshMessages();
-                    }
+                  if (!mounted) return;
+
+                  final convoProvider = ctx.read<ConversationProvider>();
+                  final messageProvider = ctx.read<MessageProvider>();
+
+                  if (convoProvider.conversations.isEmpty) {
+                    await convoProvider.getInitialConversations();
+                  } else {
+                    // Force refresh when internet connection is restored
+                    await convoProvider.forceRefreshConversations();
+                  }
+
+                  if (messageProvider.messages.isEmpty) {
+                    await messageProvider.refreshMessages();
                   }
                 });
               });
@@ -358,10 +616,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           builder: (context, homeProvider, _) {
             return Scaffold(
               backgroundColor: Theme.of(context).colorScheme.primary,
+              resizeToAvoidBottomInset: false,
               appBar: homeProvider.selectedIndex == 5 ? null : _buildAppBar(context),
               body: DefaultTabController(
-                length: 5,
-                initialIndex: _controller?.initialPage ?? 0,
+                length: 4,
+                initialIndex: homeProvider.selectedIndex,
                 child: GestureDetector(
                   onTap: () {
                     primaryFocus?.unfocus();
@@ -370,169 +629,114 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                   },
                   child: Stack(
                     children: [
-                      Center(
-                        child: PageView(
-                          controller: _controller,
-                          physics: const NeverScrollableScrollPhysics(),
-                          children: const [
-                            ConversationsPage(),
-                            ChatPage(isPivotBottom: false),
-                            MemoriesPage(),
-                            ActionItemsPage(),
-                            AppsPage(),
-                          ],
-                        ),
+                      Column(
+                        children: [
+                          // Show slim green call bar on non-home tabs when a call is active
+                          if (homeProvider.selectedIndex != 0) const ActiveCallTopBar(),
+                          Expanded(
+                            child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
+                          ),
+                        ],
                       ),
                       Consumer<HomeProvider>(
                         builder: (context, home, child) {
                           if (home.isChatFieldFocused ||
-                              home.isConvoSearchFieldFocused ||
                               home.isAppsSearchFieldFocused ||
                               home.isMemoriesSearchFieldFocused) {
                             return const SizedBox.shrink();
-                          } else {
-                            return Align(
-                              alignment: Alignment.bottomCenter,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10),
-                                margin: const EdgeInsets.fromLTRB(20, 16, 20, 42),
-                                decoration: const BoxDecoration(
-                                  color: Colors.black,
-                                  borderRadius: BorderRadius.all(Radius.circular(18)),
-                                  border: GradientBoxBorder(
-                                    gradient: LinearGradient(colors: [
-                                      Color.fromARGB(127, 208, 208, 208),
-                                      Color.fromARGB(127, 188, 99, 121),
-                                      Color.fromARGB(127, 86, 101, 182),
-                                      Color.fromARGB(127, 126, 190, 236)
-                                    ]),
-                                    width: 2,
-                                  ),
-                                  shape: BoxShape.rectangle,
-                                ),
-                                child: TabBar(
-                                  labelPadding: const EdgeInsets.symmetric(vertical: 10),
-                                  indicatorPadding: EdgeInsets.zero,
-                                  onTap: (index) {
-                                    MixpanelManager().bottomNavigationTabClicked(
-                                        ['Memories', 'Chat', 'Facts', 'Action Items', 'Explore'][index]);
-                                    primaryFocus?.unfocus();
-                                    if (home.selectedIndex == index) {
-                                      return;
-                                    }
-                                    home.setIndex(index);
-                                    _controller?.animateToPage(index,
-                                        duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
-                                  },
-                                  indicatorColor: Colors.transparent,
-                                  tabs: [
-                                    Tab(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            FontAwesomeIcons.house,
-                                            color: home.selectedIndex == 0 ? Colors.white : Colors.grey,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Home',
-                                            style: TextStyle(
-                                              color: home.selectedIndex == 0 ? Colors.white : Colors.grey,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    Tab(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            FontAwesomeIcons.solidMessage,
-                                            color: home.selectedIndex == 1 ? Colors.white : Colors.grey,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Chat',
-                                            style: TextStyle(
-                                              color: home.selectedIndex == 1 ? Colors.white : Colors.grey,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    Tab(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            FontAwesomeIcons.brain,
-                                            color: home.selectedIndex == 2 ? Colors.white : Colors.grey,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Memories',
-                                            style: TextStyle(
-                                              color: home.selectedIndex == 2 ? Colors.white : Colors.grey,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    Tab(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            FontAwesomeIcons.listCheck,
-                                            color: home.selectedIndex == 3 ? Colors.white : Colors.grey,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Actions',
-                                            style: TextStyle(
-                                              color: home.selectedIndex == 3 ? Colors.white : Colors.grey,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    Tab(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            FontAwesomeIcons.search,
-                                            color: home.selectedIndex == 4 ? Colors.white : Colors.grey,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Explore',
-                                            style: TextStyle(
-                                              color: home.selectedIndex == 4 ? Colors.white : Colors.grey,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
                           }
+
+                          return Stack(
+                            children: [
+                              BottomNavBar(
+                                onTabTap: (index, isRepeat) {
+                                  if (isRepeat) {
+                                    _scrollToTop(index);
+                                  } else {
+                                    home.setIndex(index);
+                                  }
+                                },
+                              ),
+                              // Phone calls button - bottom left
+                              if (home.selectedIndex == 0)
+                                Positioned(
+                                  left: 20,
+                                  bottom: 100,
+                                  child: GestureDetector(
+                                    onTap: () async {
+                                      HapticFeedback.mediumImpact();
+                                      MixpanelManager().bottomNavigationTabClicked('Phone Calls');
+                                      var usageProvider = context.read<UsageProvider>();
+                                      if (usageProvider.subscription == null) {
+                                        await usageProvider.fetchSubscription();
+                                      }
+                                      var isUnlimited =
+                                          usageProvider.subscription?.subscription.plan == PlanType.unlimited;
+                                      if (!isUnlimited) {
+                                        MixpanelManager().phoneCallUpsellShown(source: 'home');
+                                        if (!context.mounted) return;
+                                        showPhoneCallsUpsell(context);
+                                        return;
+                                      }
+                                      if (!context.mounted) return;
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(builder: (context) => const PhoneCallsPage()),
+                                      );
+                                    },
+                                    child: Container(
+                                      width: 56,
+                                      height: 56,
+                                      decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF1F1F25)),
+                                      child: const Icon(FontAwesomeIcons.phone, size: 22, color: Colors.white70),
+                                    ),
+                                  ),
+                                ),
+                              // Ask Omi button - bottom right
+                              if (home.selectedIndex == 0)
+                                Positioned(
+                                  right: 20,
+                                  bottom: 100,
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      HapticFeedback.mediumImpact();
+                                      MixpanelManager().bottomNavigationTabClicked('Chat');
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(builder: (context) => const ChatPage(isPivotBottom: false)),
+                                      );
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(32),
+                                        color: Colors.deepPurple,
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(FontAwesomeIcons.solidComment, size: 22, color: Colors.white),
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            context.l10n.askOmi,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 17,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          );
                         },
                       ),
+                      // Merge action bar - floats above bottom nav when in selection mode
+                      if (homeProvider.selectedIndex == 0)
+                        const Positioned(left: 0, right: 0, bottom: 0, child: MergeActionBar()),
                     ],
                   ),
                 ),
@@ -544,116 +748,331 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     );
   }
 
+  Future<void> _handleRecordButtonPress(BuildContext context, CaptureProvider captureProvider) async {
+    var recordingState = captureProvider.recordingState;
+
+    if (recordingState == RecordingState.record) {
+      // Stop recording and summarize conversation
+      await captureProvider.stopStreamRecording();
+      captureProvider.forceProcessingCurrentConversation();
+      MixpanelManager().phoneMicRecordingStopped();
+    } else if (recordingState == RecordingState.initialising) {
+      // Already initializing, do nothing
+      Logger.debug('initialising, have to wait');
+    } else {
+      // Start recording directly without dialog
+      await captureProvider.streamRecording();
+      MixpanelManager().phoneMicRecordingStarted();
+
+      // Navigate to conversation capturing page
+      if (context.mounted) {
+        var topConvoId = (captureProvider.conversationProvider?.conversations ?? []).isNotEmpty
+            ? captureProvider.conversationProvider!.conversations.first.id
+            : null;
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => ConversationCapturingPage(topConversationId: topConvoId)),
+        );
+      }
+    }
+  }
+
   PreferredSizeWidget _buildAppBar(BuildContext context) {
     return AppBar(
       automaticallyImplyLeading: false,
       backgroundColor: Theme.of(context).colorScheme.surface,
-      toolbarHeight: Platform.isMacOS ? 80 : null,
       title: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           const BatteryInfoWidget(),
-          Consumer<HomeProvider>(builder: (context, provider, child) {
-            if (provider.selectedIndex == 0) {
-              return Consumer<ConversationProvider>(builder: (context, convoProvider, child) {
-                if (convoProvider.missingWalsInSeconds >= 120) {
-                  return GestureDetector(
-                    onTap: () {
-                      routeToPage(context, const SyncPage());
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.only(left: 12),
-                      child: const Icon(Icons.download, color: Colors.white, size: 28),
-                    ),
-                  );
-                } else {
-                  return const SizedBox.shrink();
-                }
-              });
-            } else {
-              return const SizedBox.shrink();
-            }
-          }),
-          Consumer<HomeProvider>(
-            builder: (context, provider, child) {
-              if (provider.selectedIndex == 1) {
-                return ChatAppsDropdownWidget(
-                  controller: _controller!,
-                );
-              } else if (provider.selectedIndex == 2) {
-                return Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(right: MediaQuery.sizeOf(context).width * 0.10),
-                    child: const Text('Memories',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w600,
-                        )),
-                  ),
-                );
-              } else if (provider.selectedIndex == 3) {
-                return const Expanded(
-                  child: Center(
-                    child: Text(
-                      'Actions',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                );
-              } else if (provider.selectedIndex == 4) {
-                return Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(right: MediaQuery.sizeOf(context).width * 0.10),
-                    child: const Text('Explore',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w600,
-                        )),
-                  ),
-                );
-              } else {
-                return const Expanded(
-                  child: Center(
-                    child: Text(
-                      '',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                );
-              }
-            },
-          ),
+          const SizedBox.shrink(),
           Row(
             children: [
+              // Sync icon - shows when there are pending files on device or a device is paired
+              // Only shown on home page (index 0)
+              Consumer3<HomeProvider, DeviceProvider, SyncProvider>(
+                builder: (context, homeProvider, deviceProvider, syncProvider, child) {
+                  final device = deviceProvider.pairedDevice;
+                  // Only show orange indicator for files still on device (SD card or Limitless)
+                  final hasPendingOnDevice = syncProvider.missingWalsOnDevice.isNotEmpty;
+                  final isSyncing = syncProvider.isSyncing;
+
+                  // Show sync icon only on home page and if there's a paired device OR if there are pending files on device
+                  if (homeProvider.selectedIndex == 0 && (device != null || hasPendingOnDevice)) {
+                    return GestureDetector(
+                      onTap: () {
+                        HapticFeedback.mediumImpact();
+                        final page = deviceProvider.supportsMultiFileSync ? const AutoSyncPage() : const SyncPage();
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => page));
+                      },
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        margin: const EdgeInsets.only(right: 8),
+                        decoration: BoxDecoration(
+                          color: isSyncing
+                              ? Colors.deepPurple.withValues(alpha: 0.2)
+                              : hasPendingOnDevice
+                                  ? Colors.orange.withValues(alpha: 0.15)
+                                  : const Color(0xFF1F1F25),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.cloud_rounded,
+                          size: 18,
+                          color: isSyncing
+                              ? Colors.deepPurpleAccent
+                              : hasPendingOnDevice
+                                  ? Colors.orangeAccent
+                                  : Colors.white70,
+                        ),
+                      ),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                },
+              ),
+              // Search and Calendar buttons - only on home page
+              Consumer2<HomeProvider, ConversationProvider>(
+                builder: (context, homeProvider, convoProvider, _) {
+                  // Only show search and calendar buttons on home page (index 0)
+                  if (homeProvider.selectedIndex != 0) {
+                    return const SizedBox.shrink();
+                  }
+
+                  // Hide search button if there's an active search query
+                  bool shouldShowSearchButton = convoProvider.previousQuery.isEmpty;
+                  return Row(
+                    children: [
+                      // Search button - show when no active search, clicking closes search bar
+                      if (shouldShowSearchButton)
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: homeProvider.showConvoSearchBar
+                                ? Colors.deepPurple.withValues(alpha: 0.5)
+                                : const Color(0xFF1F1F25),
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.search, size: 18, color: Colors.white70),
+                            onPressed: () {
+                              HapticFeedback.mediumImpact();
+                              // Toggle search bar visibility
+                              homeProvider.toggleConvoSearchBar();
+                            },
+                          ),
+                        ),
+                      if (shouldShowSearchButton) const SizedBox(width: 8),
+                      // Daily Recaps toggle button
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: convoProvider.showDailySummaries
+                              ? Colors.deepPurple.withValues(alpha: 0.5)
+                              : const Color(0xFF1F1F25),
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            FontAwesomeIcons.clockRotateLeft,
+                            size: 16,
+                            color: convoProvider.showDailySummaries ? Colors.white : Colors.white70,
+                          ),
+                          onPressed: () {
+                            HapticFeedback.mediumImpact();
+                            if (!convoProvider.showDailySummaries) {
+                              MixpanelManager().recapTabOpened();
+                            }
+                            convoProvider.toggleDailySummaries();
+                          },
+                        ),
+                      ),
+                      // Calendar button - only show when date filter is active
+                      if (convoProvider.selectedDate != null) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: Colors.deepPurple.withValues(alpha: 0.5),
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(FontAwesomeIcons.calendarDay, size: 16, color: Colors.white),
+                            onPressed: () async {
+                              HapticFeedback.mediumImpact();
+                              // Open date picker to change date, cancel clears filter
+                              DateTime selectedDate = convoProvider.selectedDate ?? DateTime.now();
+                              await showCupertinoModalPopup<void>(
+                                context: context,
+                                builder: (BuildContext context) {
+                                  return Container(
+                                    height: 420,
+                                    padding: const EdgeInsets.only(top: 6.0),
+                                    margin: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                                    color: const Color(0xFF1F1F25),
+                                    child: SafeArea(
+                                      top: false,
+                                      child: Column(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                                            decoration: const BoxDecoration(
+                                              color: Color(0xFF1F1F25),
+                                              border: Border(bottom: BorderSide(color: Color(0xFF35343B), width: 0.5)),
+                                            ),
+                                            child: Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                CupertinoButton(
+                                                  padding: EdgeInsets.zero,
+                                                  onPressed: () async {
+                                                    // Get provider before pop to avoid using invalid context
+                                                    final provider = Provider.of<ConversationProvider>(
+                                                      context,
+                                                      listen: false,
+                                                    );
+                                                    Navigator.of(context).pop();
+                                                    await provider.clearDateFilter();
+                                                    MixpanelManager().calendarFilterCleared();
+                                                  },
+                                                  child: Text(
+                                                    context.l10n.removeFilter,
+                                                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                                                  ),
+                                                ),
+                                                const Spacer(),
+                                                CupertinoButton(
+                                                  padding: EdgeInsets.zero,
+                                                  onPressed: () async {
+                                                    final provider = Provider.of<ConversationProvider>(
+                                                      context,
+                                                      listen: false,
+                                                    );
+                                                    Navigator.of(context).pop();
+                                                    await provider.filterConversationsByDate(selectedDate);
+                                                    MixpanelManager().calendarFilterApplied(selectedDate);
+                                                  },
+                                                  child: Text(
+                                                    context.l10n.done,
+                                                    style: const TextStyle(
+                                                      color: Colors.deepPurple,
+                                                      fontSize: 16,
+                                                      fontWeight: FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          Expanded(
+                                            child: Material(
+                                              color: ResponsiveHelper.backgroundSecondary,
+                                              child: CalendarDatePicker2(
+                                                config: getDefaultCalendarConfig(
+                                                  firstDate: DateTime(2020),
+                                                  lastDate: DateTime.now(),
+                                                  currentDate: DateTime.now(),
+                                                ),
+                                                value: [selectedDate],
+                                                onValueChanged: (dates) {
+                                                  if (dates.isNotEmpty) {
+                                                    selectedDate = dates[0];
+                                                  }
+                                                },
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 8),
+                    ],
+                  );
+                },
+              ),
+              // Action items page buttons - export and completed toggle
+              Consumer2<HomeProvider, ActionItemsProvider>(
+                builder: (context, homeProvider, actionItemsProvider, _) {
+                  if (homeProvider.selectedIndex != 1) {
+                    return const SizedBox.shrink();
+                  }
+                  final showCompleted = actionItemsProvider.showCompletedView;
+                  return Row(
+                    children: [
+                      // Export button
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: const BoxDecoration(color: Color(0xFF1F1F25), shape: BoxShape.circle),
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(FontAwesomeIcons.arrowUpFromBracket, size: 16, color: Colors.white70),
+                          onPressed: () {
+                            HapticFeedback.mediumImpact();
+                            MixpanelManager().exportTasksBannerClicked();
+                            Navigator.of(
+                              context,
+                            ).push(MaterialPageRoute(builder: (context) => const TaskIntegrationsPage()));
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Completed toggle
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: showCompleted ? Colors.deepPurple.withValues(alpha: 0.5) : const Color(0xFF1F1F25),
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            FontAwesomeIcons.solidCircleCheck,
+                            size: 16,
+                            color: showCompleted ? Colors.white : Colors.white70,
+                          ),
+                          onPressed: () {
+                            HapticFeedback.mediumImpact();
+                            actionItemsProvider.toggleShowCompletedView();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                  );
+                },
+              ),
+              // Settings button - always visible
               Container(
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.transparent,
-                ),
+                width: 36,
+                height: 36,
+                decoration: const BoxDecoration(color: Color(0xFF1F1F25), shape: BoxShape.circle),
                 child: IconButton(
-                  padding: const EdgeInsets.fromLTRB(2.0, 2.0, 0, 2.0),
-                  icon: SvgPicture.asset(
-                    Assets.images.icSettingPersona.path,
-                    width: 36,
-                    height: 36,
-                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(FontAwesomeIcons.gear, size: 16, color: Colors.white70),
                   onPressed: () {
+                    HapticFeedback.mediumImpact();
                     MixpanelManager().pageOpened('Settings');
                     String language = SharedPreferencesUtil().userPrimaryLanguage;
                     bool hasSpeech = SharedPreferencesUtil().hasSpeakerProfile;
                     String transcriptModel = SharedPreferencesUtil().transcriptionModel;
-                    routeToPage(context, const SettingsPage());
+                    SettingsDrawer.show(context);
                     if (language != SharedPreferencesUtil().userPrimaryLanguage ||
                         hasSpeech != SharedPreferencesUtil().hasSpeakerProfile ||
                         transcriptModel != SharedPreferencesUtil().transcriptionModel) {
@@ -676,11 +1095,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    ForegroundUtil.stopForegroundTask();
-    if (_controller != null) {
-      _controller!.dispose();
-      _controller = null;
+    // Stop VM keepalive timer
+    try {
+      Provider.of<MessageProvider>(context, listen: false).stopVmKeepalive();
+    } catch (_) {}
+    // Cancel stream subscription to prevent memory leak
+    _notificationStreamSubscription?.cancel();
+    // Remove capture provider listener using stored reference
+    if (_captureProvider != null) {
+      _captureProvider!.removeListener(_onCaptureProviderChanged);
+      _captureProvider!.onFreemiumSessionReset = null;
+      _captureProvider = null;
     }
+    // Remove device provider callback
+    try {
+      final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+      deviceProvider.onDeviceConnected = null;
+      deviceProvider.onOfflineDataDetected = null;
+    } catch (_) {}
+    // Clean up freemium handler
+    _freemiumHandler.dispose();
+    // Remove foreground task callback to prevent memory leak
+    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
+    ForegroundUtil.stopForegroundTask();
     super.dispose();
   }
 }

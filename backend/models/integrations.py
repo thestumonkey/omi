@@ -32,12 +32,14 @@ class ExternalIntegrationMemory(BaseModel):
 
 class ExternalIntegrationCreateMemory(BaseModel):
     text: Optional[str] = Field(description="The original text from which the fact was extracted")
-    text_source: ExternalIntegrationMemorySource = Field(description="The source of the text",
-                                                         default=ExternalIntegrationMemorySource.other)
+    text_source: ExternalIntegrationMemorySource = Field(
+        description="The source of the text", default=ExternalIntegrationMemorySource.other
+    )
     text_source_spec: Optional[str] = Field(description="Additional specification about the source", default=None)
     app_id: Optional[str] = None
     memories: Optional[List[ExternalIntegrationMemory]] = Field(
-        description="List of explicit memories(facts) to be created", default=None)
+        description="List of explicit memories(facts) to be created", default=None
+    )
 
 
 class EmptyResponse(BaseModel):
@@ -65,7 +67,9 @@ class MemoriesResponse(BaseModel):
 class ActionItem(BaseModel):
     description: str = Field(description="The action item to be completed")
     completed: bool = False
-    deleted: bool = False
+    exported: bool = False
+    export_date: Optional[datetime] = None
+    export_platform: Optional[str] = None
 
 
 class Event(BaseModel):
@@ -128,8 +132,11 @@ class ConversationItem(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat() + 'Z' if v.tzinfo is None else v.astimezone(
-                timezone.utc).isoformat().replace('+00:00', 'Z')
+            datetime: lambda v: (
+                v.isoformat() + 'Z'
+                if v.tzinfo is None
+                else v.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+            )
         }
 
 
@@ -142,3 +149,29 @@ class SearchConversationsResponse(BaseModel):
     total_pages: int = Field(description="Total number of pages")
     current_page: int = Field(description="Current page number")
     per_page: int = Field(description="Number of items per page")
+
+
+class TaskItem(BaseModel):
+    """Task (action item) model for API responses"""
+
+    id: str
+    description: str
+    completed: bool
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    conversation_id: Optional[str] = None
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: (
+                v.isoformat() + 'Z'
+                if v.tzinfo is None
+                else v.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+            )
+        }
+
+
+class TasksResponse(BaseModel):
+    tasks: List[TaskItem] = Field(description="List of user tasks (action items)")

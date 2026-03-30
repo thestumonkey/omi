@@ -1,30 +1,29 @@
 import 'dart:io';
 
-import 'package:collection/collection.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+
+import 'package:collection/collection.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/schema/person.dart';
-import 'package:omi/providers/people_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
+import 'package:omi/providers/people_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/functions.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:provider/provider.dart';
 
 class UserPeoplePage extends StatelessWidget {
   const UserPeoplePage({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => PeopleProvider(),
-      child: const _UserPeoplePage(),
-    );
+    return const _UserPeoplePage();
   }
 }
 
 class _UserPeoplePage extends StatefulWidget {
-  const _UserPeoplePage({super.key});
+  const _UserPeoplePage();
 
   @override
   State<_UserPeoplePage> createState() => _UserPeoplePageState();
@@ -39,7 +38,7 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
     }.withPostFrameCallback();
   }
 
-  Widget _showPersonDialogForm(formKey, nameController) {
+  Widget _showPersonDialogForm(BuildContext context, formKey, nameController) {
     return Platform.isIOS
         ? Material(
             color: Colors.transparent,
@@ -56,12 +55,12 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
                 child: CupertinoTextFormFieldRow(
                   padding: const EdgeInsets.only(top: 16),
                   controller: nameController,
-                  placeholder: 'Name',
+                  placeholder: context.l10n.name,
                   keyboardType: TextInputType.name,
                   textCapitalization: TextCapitalization.words,
                   placeholderStyle: const TextStyle(color: Colors.white),
                   style: const TextStyle(color: Colors.white),
-                  validator: _nameValidator,
+                  validator: _nameValidator(context),
                 ),
               ),
             ),
@@ -73,24 +72,26 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
               keyboardType: TextInputType.name,
               textCapitalization: TextCapitalization.words,
               decoration: InputDecoration(
-                labelText: 'Name',
+                labelText: context.l10n.name,
                 labelStyle: const TextStyle(color: Colors.white),
                 focusColor: Colors.white,
                 focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.grey.shade300)),
               ),
-              validator: _nameValidator,
+              validator: _nameValidator(context),
             ),
           );
   }
 
-  String? _nameValidator(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Please enter a name';
-    }
-    if (value.length < 2 || value.length > 40) {
-      return 'Name must be between 2 and 40 characters';
-    }
-    return null;
+  String? Function(String?) _nameValidator(BuildContext context) {
+    return (String? value) {
+      if (value == null || value.isEmpty) {
+        return context.l10n.pleaseEnterName;
+      }
+      if (value.length < 2 || value.length > 40) {
+        return context.l10n.nameMustBeBetweenCharacters;
+      }
+      return null;
+    };
   }
 
   List<Widget> _showPersonDialogActions(
@@ -102,7 +103,12 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
   }) {
     onPressed() async {
       if (formKey.currentState!.validate()) {
-        provider.addOrUpdatePersonProvider(person, nameController);
+        String name = nameController.text.toString()[0].toUpperCase() + nameController.text.toString().substring(1);
+        if (person == null) {
+          provider.createPersonProvider(name);
+        } else {
+          provider.updatePersonProvider(person, name);
+        }
         Navigator.pop(context);
       }
     }
@@ -111,21 +117,24 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
         ? [
             CupertinoDialogAction(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: Colors.white)),
+              child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white)),
             ),
             CupertinoDialogAction(
               onPressed: onPressed,
-              child: Text(person == null ? 'Add' : 'Update', style: const TextStyle(color: Colors.white)),
+              child: Text(
+                person == null ? context.l10n.add : context.l10n.update,
+                style: const TextStyle(color: Colors.white),
+              ),
             ),
           ]
         : [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(context.l10n.cancel)),
             TextButton(
               onPressed: onPressed,
-              child: Text(person == null ? 'Add' : 'Update', style: const TextStyle(color: Colors.white)),
+              child: Text(
+                person == null ? context.l10n.add : context.l10n.update,
+                style: const TextStyle(color: Colors.white),
+              ),
             ),
           ];
   }
@@ -144,19 +153,19 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
       context: context,
       builder: (BuildContext context) => Platform.isIOS
           ? CupertinoAlertDialog(
-              title: Text(person == null ? 'Add New Person' : 'Edit Person'),
-              content: _showPersonDialogForm(formKey, nameController),
+              title: Text(person == null ? context.l10n.addNewPerson : context.l10n.editPerson),
+              content: _showPersonDialogForm(context, formKey, nameController),
               actions: _showPersonDialogActions(context, formKey, nameController, provider, person: person),
             )
           : AlertDialog(
-              title: Text(person == null ? 'Add New Person' : 'Edit Person'),
-              content: _showPersonDialogForm(formKey, nameController),
+              title: Text(person == null ? context.l10n.addNewPerson : context.l10n.editPerson),
+              content: _showPersonDialogForm(context, formKey, nameController),
               actions: _showPersonDialogActions(context, formKey, nameController, provider, person: person),
             ),
     );
   }
 
-  Future<void> _confirmDeleteSample(int peopleIdx, Person person, String url, PeopleProvider provider) async {
+  Future<void> _confirmDeleteSample(int peopleIdx, Person person, int sampleIdx, PeopleProvider provider) async {
     final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
     if (!connectivityProvider.isConnected) {
       ConnectivityProvider.showNoInternetDialog(context);
@@ -168,14 +177,14 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
         context,
         () => Navigator.pop(context, false),
         () => Navigator.pop(context, true),
-        'Delete Sample?',
-        'Are you sure you want to delete ${person.name}\'s sample?',
-        okButtonText: 'Confirm',
+        context.l10n.deleteSampleQuestion,
+        context.l10n.deleteSampleConfirmation(person.name),
+        okButtonText: context.l10n.confirm,
       ),
     );
 
     if (confirmed == true) {
-      provider.deletePersonSample(peopleIdx, url);
+      await provider.deletePersonSample(peopleIdx, sampleIdx);
     }
   }
 
@@ -186,9 +195,9 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
         context,
         () => Navigator.pop(context, false),
         () => Navigator.pop(context, true),
-        'Confirm Deletion',
-        'Are you sure you want to delete ${person.name}? This will also remove all associated speech samples.',
-        okButtonText: 'Confirm',
+        context.l10n.confirmDeletion,
+        context.l10n.deletePersonConfirmation(person.name),
+        okButtonText: context.l10n.confirm,
       ),
     );
 
@@ -202,14 +211,11 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
         return Scaffold(
           backgroundColor: Theme.of(context).colorScheme.primary,
           appBar: AppBar(
-            title: const Text('People'),
+            title: Text(context.l10n.people),
             backgroundColor: Theme.of(context).colorScheme.primary,
             centerTitle: true,
             actions: [
-              IconButton(
-                icon: const Icon(Icons.add),
-                onPressed: () => _showPersonDialog(context, provider),
-              ),
+              IconButton(icon: const Icon(Icons.add), onPressed: () => _showPersonDialog(context, provider)),
               provider.people.isNotEmpty
                   ? IconButton(
                       icon: const Icon(Icons.question_mark),
@@ -221,97 +227,105 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
                             () => Navigator.pop(context),
                             () => Navigator.pop(context),
                             singleButton: true,
-                            'How it works?',
-                            'Once a person is created, you can go to a conversation transcript, and assign them their corresponding segments, that way Omi will be able to recognize their speech too!',
-                            okButtonText: 'Got it',
+                            context.l10n.howItWorksTitle,
+                            context.l10n.howPeopleWorks,
+                            okButtonText: context.l10n.gotIt,
                           ),
                         );
-                      })
+                      },
+                    )
                   : const SizedBox(),
             ],
           ),
           body: provider.loading
-              ? const Center(
-                  child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+              ? const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+              : provider.people.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.question_mark, size: 40),
+                      const SizedBox(height: 24),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 32),
+                        child: Text(
+                          context.l10n.createPersonHint,
+                          style: const TextStyle(color: Colors.white, fontSize: 24),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      const SizedBox(height: 64),
+                    ],
                   ),
                 )
-              : provider.people.isEmpty
-                  ? const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Icon(Icons.question_mark, size: 40),
-                          SizedBox(height: 24),
-                          Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 32),
-                            child: Text('Create a new person and train Omi to recognize their speech too!',
-                                style: TextStyle(color: Colors.white, fontSize: 24), textAlign: TextAlign.center),
+              : ListView.separated(
+                  itemCount: provider.people.length,
+                  separatorBuilder: (context, index) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final person = provider.people[index];
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ListTile(
+                          title: Text(person.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
+                          onTap: () => _showPersonDialog(context, provider, person: person),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, size: 20),
+                            onPressed: () => _confirmDeletePerson(person, provider),
                           ),
-                          SizedBox(height: 64),
-                        ],
-                      ),
-                    )
-                  : ListView.separated(
-                      itemCount: provider.people.length,
-                      separatorBuilder: (context, index) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final person = provider.people[index];
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            ListTile(
-                              title: Text(
-                                person.name,
-                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
-                              ),
-                              onTap: () => _showPersonDialog(context, provider, person: person),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete, size: 20),
-                                onPressed: () => _confirmDeletePerson(person, provider),
-                              ),
-                            ),
-                            if (person.speechSamples != null && person.speechSamples!.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.only(left: 8, right: 16, bottom: 8),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const SizedBox(height: 4),
-                                    ...person.speechSamples!.mapIndexed((j, sample) => ListTile(
-                                          contentPadding: EdgeInsets.zero,
-                                          leading: IconButton(
-                                            padding: const EdgeInsets.all(0),
-                                            icon: Icon(
-                                              provider.currentPlayingPersonIndex == index &&
-                                                      provider.currentPlayingIndex == j &&
-                                                      provider.isPlaying
-                                                  ? Icons.pause
-                                                  : Icons.play_arrow,
+                        ),
+                        if (person.speechSamples != null && person.speechSamples!.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8, right: 16, bottom: 8),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const SizedBox(height: 4),
+                                ...person.speechSamples!.mapIndexed(
+                                  (j, sample) => ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: IconButton(
+                                      padding: const EdgeInsets.all(0),
+                                      icon: Icon(
+                                        provider.currentPlayingPersonIndex == index &&
+                                                provider.currentPlayingIndex == j &&
+                                                provider.isPlaying
+                                            ? Icons.pause
+                                            : Icons.play_arrow,
+                                      ),
+                                      onPressed: () => provider.playPause(index, j, sample),
+                                    ),
+                                    title: Text(j == 0 ? context.l10n.speechProfile : context.l10n.sampleNumber(j)),
+                                    onTap: () => _confirmDeleteSample(index, person, j, provider),
+                                    subtitle: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        if (person.speechSampleTranscripts != null &&
+                                            j < person.speechSampleTranscripts!.length &&
+                                            person.speechSampleTranscripts![j].isNotEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(bottom: 4),
+                                            child: Text(
+                                              '"${person.speechSampleTranscripts![j]}"',
+                                              style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
                                             ),
-                                            onPressed: () => provider.playPause(index, j, sample),
                                           ),
-                                          title: Text(index == 0 ? 'Speech Profile' : 'Sample $index'),
-                                          onTap: () => _confirmDeleteSample(index, person, sample, provider),
-                                          subtitle: FutureBuilder<Duration?>(
-                                            future: AudioPlayer().setUrl(sample),
-                                            builder: (context, snapshot) {
-                                              if (snapshot.hasData) {
-                                                return Text('${snapshot.data!.inSeconds} seconds');
-                                              } else {
-                                                return const Text('Loading duration...');
-                                              }
-                                            },
-                                          ),
-                                        )),
-                                  ],
+                                        Text(
+                                          context.l10n.tapToDelete,
+                                          style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                              ),
-                          ],
-                        );
-                      },
-                    ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
         );
       },
     );

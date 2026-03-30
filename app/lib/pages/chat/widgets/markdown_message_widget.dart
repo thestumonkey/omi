@@ -1,28 +1,25 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 
-Widget getMarkdownWidget(BuildContext context, String content) {
-  var style = TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.3);
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+Widget getMarkdownWidget(BuildContext context, String message, {Function(String)? onAskOmi}) {
   return MarkdownBody(
-    shrinkWrap: true,
-    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-      a: style,
-      p: style,
-      blockquote: style.copyWith(
-        backgroundColor: Colors.transparent,
-        color: Colors.black,
-      ),
-      blockquoteDecoration: BoxDecoration(
-        color: Colors.grey.shade800,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      code: style.copyWith(
-        backgroundColor: Colors.transparent,
-        decoration: TextDecoration.none,
-        color: Colors.white,
-        fontWeight: FontWeight.w500,
-      ),
+    data: message.trimRight(),
+    selectable: false,
+    styleSheet: MarkdownStyleSheet(
+      p: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4),
+      a: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
+      listBullet: const TextStyle(color: Colors.white, fontSize: 16),
+      blockquote: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4, backgroundColor: Colors.transparent),
+      blockquoteDecoration: BoxDecoration(color: const Color(0xFF35343B), borderRadius: BorderRadius.circular(4)),
+      code: const TextStyle(color: Colors.white, backgroundColor: Colors.transparent, fontFamily: 'monospace'),
+      codeblockDecoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(8)),
     ),
-    data: content,
+    onTapLink: (text, href, title) {
+      if (href != null) {
+        launchUrl(Uri.parse(href));
+      }
+    },
   );
 }

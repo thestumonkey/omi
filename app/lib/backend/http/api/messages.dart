@@ -1,23 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/string_utils.dart';
-import 'package:http/http.dart' as http;
-import 'package:path/path.dart';
 
-Future<List<ServerMessage>> getMessagesServer({
-  String? pluginId,
-  bool dropdownSelected = false,
-}) async {
-  if (pluginId == 'no_selected') pluginId = null;
+Future<List<ServerMessage>> getMessagesServer({String? appId, bool dropdownSelected = false}) async {
+  if (appId == 'no_selected') appId = null;
   // TODO: Add pagination
   var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v2/messages?plugin_id=${pluginId ?? ''}&dropdown_selected=$dropdownSelected',
+    url: '${Env.apiBaseUrl}v2/messages?app_id=${appId ?? ''}&dropdown_selected=$dropdownSelected',
     headers: {},
     method: 'GET',
     body: '',
@@ -30,16 +24,24 @@ Future<List<ServerMessage>> getMessagesServer({
       return [];
     }
     var messages = decodedBody.map((conversation) => ServerMessage.fromJson(conversation)).toList();
-    debugPrint('getMessages length: ${messages.length}');
+    Logger.debug('getMessages length: ${messages.length}');
+    // Debug: Check if any messages have ratings
+    var ratedMessages = messages.where((m) => m.rating != null).toList();
+    if (ratedMessages.isNotEmpty) {
+      Logger.debug('📊 Messages with ratings: ${ratedMessages.length}');
+      for (var m in ratedMessages) {
+        Logger.debug('  - Message ${m.id}: rating=${m.rating}');
+      }
+    }
     return messages;
   }
   return [];
 }
 
-Future<List<ServerMessage>> clearChatServer({String? pluginId}) async {
-  if (pluginId == 'no_selected') pluginId = null;
+Future<List<ServerMessage>> clearChatServer({String? appId}) async {
+  if (appId == 'no_selected') appId = null;
   var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v2/messages?plugin_id=${pluginId ?? ''}',
+    url: '${Env.apiBaseUrl}v2/messages?app_id=${appId ?? ''}',
     headers: {},
     method: 'DELETE',
     body: '',
@@ -63,75 +65,43 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
 
   if (line.startsWith('done: ')) {
     var text = decodeBase64(line.substring(6));
-    return ServerMessageChunk(messageId, text, MessageChunkType.done,
-        message: ServerMessage.fromJson(json.decode(text)));
+    return ServerMessageChunk(
+      messageId,
+      text,
+      MessageChunkType.done,
+      message: ServerMessage.fromJson(json.decode(text)),
+    );
   }
 
   if (line.startsWith('message: ')) {
     var text = decodeBase64(line.substring(9));
-    return ServerMessageChunk(messageId, text, MessageChunkType.message,
-        message: ServerMessage.fromJson(json.decode(text)));
+    return ServerMessageChunk(
+      messageId,
+      text,
+      MessageChunkType.message,
+      message: ServerMessage.fromJson(json.decode(text)),
+    );
   }
 
   return null;
 }
 
 Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, List<String>? filesId}) async* {
-  var url = '${Env.apiBaseUrl}v2/messages?plugin_id=$appId';
+  var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
   }
 
-  try {
-    final request = await HttpClient().postUrl(Uri.parse(url));
-    request.headers.set('Authorization', await getAuthHeader());
-    request.headers.contentType = ContentType.json;
-    request.write(jsonEncode({'text': text, 'file_ids': filesId}));
+  var messageId = "1000"; // Default new message
 
-    final response = await request.close();
-
-    if (response.statusCode != 200) {
-      Logger.error('Failed to send message: ${response.statusCode}');
+  await for (var line in makeStreamingApiCall(url: url, body: jsonEncode({'text': text, 'file_ids': filesId}))) {
+    var messageChunk = parseMessageChunk(line, messageId);
+    if (messageChunk != null) {
+      yield messageChunk;
+    } else {
       yield ServerMessageChunk.failedMessage();
       return;
     }
-
-    var buffers = <String>[];
-    var messageId = "1000"; // Default new message
-    await for (var data in response.transform(utf8.decoder)) {
-      var lines = data.split('\n\n');
-      for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Dealing w/ the package spliting by 1024 bytes in dart
-        // Waiting for the next package
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge package if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
-        var messageChunk = parseMessageChunk(line, messageId);
-        if (messageChunk != null) {
-          yield messageChunk;
-        }
-      }
-    }
-
-    // Flush remainings
-    if (buffers.isNotEmpty) {
-      var messageChunk = parseMessageChunk(buffers.join(), messageId);
-      if (messageChunk != null) {
-        yield messageChunk;
-      }
-    }
-  } catch (e) {
-    Logger.error('Error sending message: $e');
-    yield ServerMessageChunk.failedMessage();
   }
 }
 
@@ -151,60 +121,21 @@ Future<ServerMessage> getInitialAppMessage(String? appId) {
   });
 }
 
-Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files) async* {
-  var request = http.MultipartRequest(
-    'POST',
-    Uri.parse('${Env.apiBaseUrl}v2/voice-messages'),
-  );
-  for (var file in files) {
-    request.files.add(await http.MultipartFile.fromPath('files', file.path, filename: basename(file.path)));
-  }
-  request.headers.addAll({'Authorization': await getAuthHeader()});
+Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files, {String? language}) async* {
+  var messageId = "1000"; // Default new message
 
-  try {
-    var response = await request.send();
-    if (response.statusCode != 200) {
-      Logger.error('Failed to send message: ${response.statusCode}');
+  await for (var line in makeMultipartStreamingApiCall(
+    url: '${Env.apiBaseUrl}v2/voice-messages',
+    files: files,
+    fields: language != null ? {'language': language} : {},
+  )) {
+    var messageChunk = parseMessageChunk(line, messageId);
+    if (messageChunk != null) {
+      yield messageChunk;
+    } else {
       yield ServerMessageChunk.failedMessage();
       return;
     }
-
-    var buffers = <String>[];
-    var messageId = "1000"; // Default new message
-    await for (var data in response.stream.transform(utf8.decoder)) {
-      var lines = data.split('\n\n');
-      for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Dealing w/ the package spliting by 1024 bytes in dart
-        // Waiting for the next package
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge package if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
-        var messageChunk = parseMessageChunk(line, messageId);
-        if (messageChunk != null) {
-          yield messageChunk;
-        }
-      }
-    }
-
-    // Flush remainings
-    if (buffers.isNotEmpty) {
-      var messageChunk = parseMessageChunk(buffers.join(), messageId);
-      if (messageChunk != null) {
-        yield messageChunk;
-      }
-    }
-  } catch (e) {
-    Logger.error('Error sending message: $e');
-    yield ServerMessageChunk.failedMessage();
   }
 }
 
@@ -213,35 +144,19 @@ Future<List<MessageFile>?> uploadFilesServer(List<File> files, {String? appId}) 
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/files';
   }
-  var request = http.MultipartRequest(
-    'POST',
-    Uri.parse(url),
-  );
-  request.headers.addAll({'Authorization': await getAuthHeader()});
-  for (var file in files) {
-    var stream = http.ByteStream(file.openRead());
-    var length = await file.length();
-    var multipartFile = http.MultipartFile(
-      'files',
-      stream,
-      length,
-      filename: basename(file.path),
-    );
-    request.files.add(multipartFile);
-  }
 
   try {
-    var streamedResponse = await request.send();
-    var response = await http.Response.fromStream(streamedResponse);
+    var response = await makeMultipartApiCall(url: url, files: files);
+
     if (response.statusCode == 200) {
-      debugPrint('uploadFileServer response body: ${jsonDecode(response.body)}');
+      Logger.debug('uploadFileServer response body: ${jsonDecode(response.body)}');
       return MessageFile.fromJsonList(jsonDecode(response.body));
     } else {
-      debugPrint('Failed to upload file. Status code: ${response.statusCode} ${response.body}');
+      Logger.debug('Failed to upload file. Status code: ${response.statusCode} ${response.body}');
       throw Exception('Failed to upload file. Status code: ${response.statusCode}');
     }
   } catch (e) {
-    debugPrint('An error occurred uploadFileServer: $e');
+    Logger.debug('An error occurred uploadFileServer: $e');
     throw Exception('An error occurred uploadFileServer: $e');
   }
 }
@@ -259,28 +174,23 @@ Future reportMessageServer(String messageId) async {
   }
 }
 
-Future<String> transcribeVoiceMessage(File audioFile) async {
+Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async {
   try {
-    var request = http.MultipartRequest(
-      'POST',
-      Uri.parse('${Env.apiBaseUrl}v2/voice-message/transcribe'),
+    var response = await makeMultipartApiCall(
+      url: '${Env.apiBaseUrl}v2/voice-message/transcribe',
+      files: [audioFile],
+      fields: language != null ? {'language': language} : {},
     );
-
-    request.headers.addAll({'Authorization': await getAuthHeader()});
-    request.files.add(await http.MultipartFile.fromPath('files', audioFile.path));
-
-    var streamedResponse = await request.send();
-    var response = await http.Response.fromStream(streamedResponse);
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
       return data['transcript'] ?? '';
     } else {
-      debugPrint('Failed to transcribe voice message: ${response.statusCode} ${response.body}');
+      Logger.debug('Failed to transcribe voice message: ${response.statusCode} ${response.body}');
       throw Exception('Failed to transcribe voice message');
     }
   } catch (e) {
-    debugPrint('Error transcribing voice message: $e');
+    Logger.debug('Error transcribing voice message: $e');
     throw Exception('Error transcribing voice message: $e');
   }
 }

@@ -26,12 +26,7 @@ class Structured {
   }
 
   static Structured fromJson(Map<String, dynamic> json) {
-    var structured = Structured(
-      json['title'],
-      json['overview'],
-      emoji: json['emoji'],
-      category: json['category'],
-    );
+    var structured = Structured(json['title'], json['overview'], emoji: json['emoji'], category: json['category']);
     var aItems = json['actionItems'] ?? json['action_items'];
     if (aItems != null) {
       for (dynamic item in aItems) {
@@ -47,15 +42,17 @@ class Structured {
     if (json['events'] != null) {
       for (dynamic event in json['events']) {
         if (event.isEmpty) continue;
-        structured.events.add(Event(
-          event['title'],
-          (event['startsAt'] ?? event['start']) is int
-              ? DateTime.fromMillisecondsSinceEpoch((event['startsAt'] ?? event['start']) * 1000).toLocal()
-              : DateTime.parse(event['startsAt'] ?? event['start']).toLocal(),
-          event['duration'],
-          description: event['description'] ?? '',
-          created: event['created'] ?? false,
-        ));
+        structured.events.add(
+          Event(
+            event['title'],
+            (event['startsAt'] ?? event['start']) is int
+                ? DateTime.fromMillisecondsSinceEpoch((event['startsAt'] ?? event['start']) * 1000).toLocal()
+                : DateTime.parse(event['startsAt'] ?? event['start']).toLocal(),
+            event['duration'],
+            description: event['description'] ?? '',
+            created: event['created'] ?? false,
+          ),
+        );
       }
     }
     return structured;
@@ -142,26 +139,6 @@ class Event {
       'duration': duration,
       'description': description,
       'created': created,
-    };
-  }
-}
-
-class ConversationPhoto {
-  int id = 0;
-
-  String base64;
-  String description;
-
-  ConversationPhoto(this.base64, this.description, {this.id = 0});
-
-  factory ConversationPhoto.fromJson(Map<String, dynamic> json) {
-    return ConversationPhoto(json['base64'], json['description']);
-  }
-
-  toJson() {
-    return {
-      'base64': base64,
-      'description': description,
     };
   }
 }

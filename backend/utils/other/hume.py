@@ -1,13 +1,16 @@
 import os
 
 import requests
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class HumePredictionEmotionResponseModel:
     def __init__(
-            self,
-            name: str,
-            score: float,
+        self,
+        name: str,
+        score: float,
     ) -> None:
         self.name = name
         self.score = score
@@ -30,16 +33,17 @@ class HumePredictionEmotionResponseModel:
 
 class HumeJobModelPredictionResponseModel:
     def __init__(
-            self,
-            time,
-            emotions: [HumePredictionEmotionResponseModel] = [],
+        self,
+        time,
+        emotions: [HumePredictionEmotionResponseModel] = [],
     ) -> None:
         self.emotions = emotions
         self.time = time
 
     @classmethod
-    def get_top_emotion_names(cls, emotions: [HumePredictionEmotionResponseModel] = [], k: int = 5,
-                              peak_threshold: float = .7):
+    def get_top_emotion_names(
+        cls, emotions: [HumePredictionEmotionResponseModel] = [], k: int = 5, peak_threshold: float = 0.7
+    ):
         emotions_dict = {}
         for emo in emotions:
             if emo.name not in emotions_dict:
@@ -84,10 +88,10 @@ class HumeJobModelPredictionResponseModel:
 
 class HumeJobCallbackModel:
     def __init__(
-            self,
-            job_id,
-            status,
-            predictions: [HumeJobModelPredictionResponseModel] = [],
+        self,
+        job_id,
+        status,
+        predictions: [HumeJobModelPredictionResponseModel] = [],
     ) -> None:
         self.job_id = job_id
         self.status = status
@@ -106,8 +110,8 @@ class HumeJobCallbackModel:
 
 class HumeJobResponseModel:
     def __init__(
-            self,
-            id,
+        self,
+        id,
     ) -> None:
         self.id = id
 
@@ -125,9 +129,9 @@ class HumeClient:
     """
 
     def __init__(
-            self,
-            api_key,
-            callback_url,
+        self,
+        api_key,
+        callback_url,
     ) -> None:
         self.api_key = api_key
         self.callback_url = callback_url
@@ -138,20 +142,21 @@ class HumeClient:
 
         # Model
         data = {
-            "models": {
-                "prosody": {
-                    "granularity": "utterance"
-                }
-            },
+            "models": {"prosody": {"granularity": "utterance"}},
             "urls": urls,
             "callback_url": self.callback_url,
         }
         try:
-            resp = requests.post("https://api.hume.ai/v0/batch/jobs", json=data, headers={
-                'Content-Type': 'application/json',
-                'Accept': 'application/json; charset=utf-8',
-                'X-Hume-Api-Key': self.api_key,
-            }, timeout=300, )
+            resp = requests.post(
+                "https://api.hume.ai/v0/batch/jobs",
+                json=data,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json; charset=utf-8',
+                    'X-Hume-Api-Key': self.api_key,
+                },
+                timeout=300,
+            )
         except requests.exceptions.HTTPError:
             resp_text = f"{resp}"
             err = {
@@ -187,7 +192,7 @@ class HumeClient:
                 },
             }
         if err is not None:
-            print(err)
+            logger.error(err)
             return err
 
         return {"result": HumeJobResponseModel.from_dict(resp.json())}

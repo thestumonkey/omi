@@ -4,23 +4,14 @@ class Translation {
   String lang;
   String text;
 
-  Translation({
-    required this.lang,
-    required this.text,
-  });
+  Translation({required this.lang, required this.text});
 
   factory Translation.fromJson(Map<String, dynamic> json) {
-    return Translation(
-      lang: json['lang'] as String,
-      text: json['text'] as String,
-    );
+    return Translation(lang: json['lang'] as String, text: json['text'] as String);
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'lang': lang,
-      'text': text,
-    };
+    return {'lang': lang, 'text': text};
   }
 
   static List<Translation> fromJsonList(List<dynamic> jsonList) {
@@ -30,6 +21,7 @@ class Translation {
 
 class TranscriptSegment {
   String id;
+  late int idx;
 
   String text;
   String? speaker;
@@ -39,6 +31,8 @@ class TranscriptSegment {
   double start;
   double end;
   List<Translation> translations = [];
+  bool speechProfileProcessed;
+  String? sttProvider;
 
   TranscriptSegment({
     required this.id,
@@ -49,8 +43,11 @@ class TranscriptSegment {
     required this.start,
     required this.end,
     required this.translations,
+    this.speechProfileProcessed = true,
+    this.sttProvider,
   }) {
-    speakerId = speaker != null ? int.parse(speaker!.split('_')[1]) : 0;
+    final parts = speaker?.split('_') ?? [];
+    speakerId = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
   }
 
   @override
@@ -75,6 +72,8 @@ class TranscriptSegment {
       start: double.tryParse(json['start'].toString()) ?? 0.0,
       end: double.tryParse(json['end'].toString()) ?? 0.0,
       translations: json['translations'] != null ? Translation.fromJsonList(json['translations'] as List<dynamic>) : [],
+      speechProfileProcessed: (json['speech_profile_processed'] ?? true) as bool,
+      sttProvider: json['stt_provider'] as String?,
     );
   }
 
@@ -87,16 +86,25 @@ class TranscriptSegment {
       'is_user': isUser,
       'start': start,
       'end': end,
-      'translations': translations?.map((t) => t.toJson()).toList(),
+      'translations': translations.map((t) => t.toJson()).toList(),
+      if (sttProvider != null) 'stt_provider': sttProvider,
     };
   }
 
   static List<TranscriptSegment> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => TranscriptSegment.fromJson(e)).toList();
+    final List<TranscriptSegment> segments = [];
+    for (int i = 0; i < jsonList.length; i++) {
+      final segment = TranscriptSegment.fromJson(jsonList[i]);
+      segment.idx = i;
+      segments.add(segment);
+    }
+    return segments;
   }
 
   static List<TranscriptSegment> updateSegments(
-      List<TranscriptSegment> segments, List<TranscriptSegment> updateSegments) {
+    List<TranscriptSegment> segments,
+    List<TranscriptSegment> updateSegments,
+  ) {
     if (updateSegments.isEmpty) return [];
 
     if (segments.isEmpty) return updateSegments;
@@ -169,9 +177,13 @@ class TranscriptSegment {
   static String segmentsAsString(
     List<TranscriptSegment> segments, {
     bool includeTimestamps = false,
+    String Function(String speakerId)? speakerLabelBuilder,
   }) {
     String transcript = '';
     var userName = SharedPreferencesUtil().givenName;
+    var people = SharedPreferencesUtil().cachedPeople;
+    var peopleMap = {for (var p in people) p.id: p.name};
+
     includeTimestamps = includeTimestamps && TranscriptSegment.canDisplaySeconds(segments);
     for (var segment in segments) {
       var segmentText = segment.text.trim();
@@ -179,7 +191,14 @@ class TranscriptSegment {
       if (segment.isUser) {
         transcript += '$timestampStr ${userName.isEmpty ? 'User' : userName}: $segmentText ';
       } else {
-        transcript += '$timestampStr Speaker ${segment.speakerId}: $segmentText ';
+        String speakerName;
+        if (segment.personId != null && peopleMap.containsKey(segment.personId)) {
+          speakerName = peopleMap[segment.personId]!;
+        } else {
+          var displayId = '${getDisplaySpeakerId(segment.speakerId, segments)}';
+          speakerName = speakerLabelBuilder != null ? speakerLabelBuilder(displayId) : 'Speaker $displayId';
+        }
+        transcript += '$timestampStr $speakerName: $segmentText ';
       }
       transcript += '\n\n';
     }
@@ -195,5 +214,32 @@ class TranscriptSegment {
       }
     }
     return true;
+  }
+
+  /// Gets the display speaker ID (1-indexed) for a segment.
+  /// Normalizes based on the minimum speaker ID in the conversation.
+  ///
+  /// Examples:
+  /// - If conversation has speakers [0, 1, 2] -> displays as [1, 2, 3]
+  /// - If conversation has speakers [1, 2, 3] -> displays as [1, 2, 3]
+  /// - If conversation has speakers [5, 6] -> displays as [1, 2]
+  static int getDisplaySpeakerId(int speakerId, List<TranscriptSegment> segments) {
+    if (segments.isEmpty) return speakerId + 1;
+
+    // Find minimum speaker ID among non-user segments
+    int? minSpeakerId;
+    for (var segment in segments) {
+      if (!segment.isUser) {
+        if (minSpeakerId == null || segment.speakerId < minSpeakerId) {
+          minSpeakerId = segment.speakerId;
+        }
+      }
+    }
+
+    // If no non-user segments found, default to simple +1
+    if (minSpeakerId == null) return speakerId + 1;
+
+    // Normalize: subtract minimum and add 1 to make it 1-indexed
+    return speakerId - minSpeakerId + 1;
   }
 }

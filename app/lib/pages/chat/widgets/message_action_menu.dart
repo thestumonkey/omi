@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 import 'markdown_message_widget.dart';
 
@@ -7,6 +9,8 @@ class MessageActionMenu extends StatelessWidget {
   final Function()? onSelectText;
   final Function()? onShare;
   final Function()? onReport;
+  final Function()? onThumbsUp;
+  final Function()? onThumbsDown;
   final String message;
 
   const MessageActionMenu({
@@ -15,6 +19,8 @@ class MessageActionMenu extends StatelessWidget {
     this.onSelectText,
     this.onShare,
     this.onReport,
+    this.onThumbsUp,
+    this.onThumbsDown,
     required this.message,
   });
 
@@ -23,9 +29,7 @@ class MessageActionMenu extends StatelessWidget {
     return Container(
       decoration: const BoxDecoration(
         color: Colors.black54,
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(20),
-        ),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 22.0, horizontal: 22.0),
@@ -35,31 +39,25 @@ class MessageActionMenu extends StatelessWidget {
           children: [
             Container(
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.grey[900],
-                borderRadius: BorderRadius.circular(12),
+              decoration: BoxDecoration(color: Colors.grey[900], borderRadius: BorderRadius.circular(12)),
+              child: getMarkdownWidget(
+                context,
+                '${message.substring(0, message.length > 200 ? 200 : message.length)}...',
               ),
-              child:
-                  getMarkdownWidget(context, '${message.substring(0, message.length > 200 ? 200 : message.length)}...'),
             ),
             const SizedBox(height: 16),
+            _buildActionButton(title: context.l10n.copy, icon: Icons.copy, onTap: onCopy),
+            _buildActionButton(title: context.l10n.selectText, icon: Icons.description_outlined, onTap: onSelectText),
+            _buildActionButton(title: context.l10n.share, icon: FontAwesomeIcons.share, onTap: onShare),
+            if (onThumbsDown != null) ...[
+              _buildActionButton(
+                title: context.l10n.notHelpful,
+                icon: Icons.thumb_down_alt_outlined,
+                onTap: onThumbsDown,
+              ),
+            ],
             _buildActionButton(
-              title: 'Copy',
-              icon: Icons.copy,
-              onTap: onCopy,
-            ),
-            _buildActionButton(
-              title: 'Select Text',
-              icon: Icons.description_outlined,
-              onTap: onSelectText,
-            ),
-            _buildActionButton(
-              title: 'Share',
-              icon: Icons.share,
-              onTap: onShare,
-            ),
-            _buildActionButton(
-              title: 'Report',
+              title: context.l10n.report,
               icon: Icons.report_gmailerrorred,
               onTap: onReport,
               isDestructive: true,
@@ -83,19 +81,9 @@ class MessageActionMenu extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12.0),
         child: Row(
           children: [
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 16,
-                color: isDestructive ? Colors.red : Colors.white,
-              ),
-            ),
+            Text(title, style: TextStyle(fontSize: 16, color: isDestructive ? Colors.red : Colors.white)),
             const Spacer(),
-            Icon(
-              icon,
-              size: 20,
-              color: isDestructive ? Colors.red : Colors.white,
-            ),
+            Icon(icon, size: 20, color: isDestructive ? Colors.red : Colors.white),
           ],
         ),
       ),

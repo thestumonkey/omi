@@ -1,109 +1,237 @@
-// import 'package:device_calendar/device_calendar.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import 'package:collection/collection.dart';
+
+import 'package:omi/backend/http/api/calendar_meetings.dart' as calendar_api;
 import 'package:omi/backend/preferences.dart';
-import 'package:omi/utils/alerts/app_snackbar.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:omi/utils/features/calendar.dart';
-import 'package:manage_calendar_events/manage_calendar_events.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:omi/backend/schema/calendar_meeting_context.dart';
+import 'package:omi/services/calendar_service.dart';
+import 'package:omi/utils/logger.dart';
 
-class CalenderProvider extends ChangeNotifier {
-  List<Calendar> calendars = [];
-  bool calendarEnabled = false;
-  final CalendarUtil _calendarUtil = CalendarUtil();
-  final MixpanelManager _mixpanelManager = MixpanelManager();
-  final SharedPreferencesUtil _sharedPreferencesUtil = SharedPreferencesUtil();
-  bool isLoading = false;
+class CalendarProvider extends ChangeNotifier {
+  final CalendarService _service = CalendarService();
 
-  void setLoading(bool value) {
-    isLoading = value;
-    notifyListeners();
+  // State
+  CalendarPermissionStatus _permissionStatus = CalendarPermissionStatus.notDetermined;
+  bool _isMonitoring = false;
+  List<CalendarMeeting> _upcomingMeetings = [];
+  List<SystemCalendar> _systemCalendars = [];
+  bool _isLoading = false;
+  bool _isSyncing = false;
+
+  // Getters
+  CalendarPermissionStatus get permissionStatus => _permissionStatus;
+  bool get isMonitoring => _isMonitoring;
+
+  List<CalendarMeeting> get upcomingMeetings => _upcomingMeetings;
+  List<SystemCalendar> get systemCalendars => _systemCalendars;
+  bool get isLoading => _isLoading;
+  bool get isAuthorized => _permissionStatus == CalendarPermissionStatus.authorized;
+
+  /// Returns meetings in the immediate window (next 60 minutes or currently in progress)
+  List<CalendarMeeting> get immediateMeetings {
+    return _upcomingMeetings.where((meeting) {
+      final minutesUntilStart = meeting.minutesUntilStart;
+      final hasEnded = meeting.hasEnded;
+      // Include if starting in next 60 minutes or currently in progress
+      return (minutesUntilStart >= -5 && minutesUntilStart <= 60) || (meeting.hasStarted && !hasEnded);
+    }).toList();
   }
 
-  Future<void> initialize() async {
-    calendarEnabled = await hasCalendarAccess();
-    if (await hasCalendarAccess()) await _getCalendars();
+  /// Returns the currently active meeting (started within last 5 min or starting in next 5 min)
+  CalendarMeeting? get activeMeeting {
+    return _upcomingMeetings.firstWhereOrNull((meeting) {
+      final minutesUntilStart = meeting.minutesUntilStart;
+      final hasStarted = meeting.hasStarted;
+      final hasEnded = meeting.hasEnded;
+
+      // Meeting is active if:
+      // - Starting in the next 5 minutes, OR
+      // - Started but not ended yet (currently in progress)
+      return (minutesUntilStart >= -5 && minutesUntilStart <= 5) || (hasStarted && !hasEnded);
+    });
   }
 
-  Future<void> _getCalendars() async {
-    calendars = await _calendarUtil.fetchCalendars();
-    notifyListeners();
+  CalendarProvider() {
+    _init();
   }
 
-  Future<bool> hasCalendarAccess() async {
-    return await _calendarUtil.checkCalendarPermission();
+  Future<void> _init() async {
+    // Calendar integration was only supported on macOS (now removed)
+    return;
   }
 
-  Future<void> onCalendarSwitchChanged(bool s) async {
-    if (s) {
-      var res = await Permission.calendarFullAccess.request();
-      print('res: $res');
-      _sharedPreferencesUtil.calendarPermissionAlreadyRequested = true;
-      bool hasAccess = await hasCalendarAccess();
-      print('hasAccess: $hasAccess');
-      if (res.isGranted || hasAccess) {
-        setLoading(true);
-
-        await _getCalendars();
-        // try to get calendars again after 3 seconds
-        // Delay is necessary because the calendar plugin does not return the calendars immediately
-        // While testing, on first call I got only 1 calendar, but on the second call I got all the calendars
-        await Future.delayed(const Duration(seconds: 3), () async {
-          await _getCalendars();
-        });
-        setLoading(false);
-        if (calendars.isEmpty) {
-          AppSnackbar.showSnackbar(
-            'No calendars found. Please check your device settings.',
-            duration: const Duration(seconds: 5),
-          );
-          calendarEnabled = false;
-        } else {
-          calendarEnabled = true;
-          _mixpanelManager.calendarEnabled();
-        }
-      } else if ((await Permission.calendarFullAccess.isDenied ||
-              await Permission.calendarFullAccess.isPermanentlyDenied) &&
-          _sharedPreferencesUtil.calendarPermissionAlreadyRequested) {
-        AppSnackbar.showSnackbar(
-          'Calendar access was denied. Please enable it in your app settings.',
-          duration: const Duration(seconds: 5),
-          // action: SnackBarAction(
-          //   label: 'Open Settings',
-          //   onPressed: () => _calendarUtil.openAppSettings(),
-          // ),
-        );
-        calendarEnabled = false;
-      } else {
-        AppSnackbar.showSnackbar(
-          'Failed to request calendar access. Please try again.',
-          duration: const Duration(seconds: 5),
-        );
-        calendarEnabled = false;
-      }
-    } else {
-      _sharedPreferencesUtil.calendarId = '';
-      _sharedPreferencesUtil.calendarType = 'auto';
-      _mixpanelManager.calendarDisabled();
-      calendarEnabled = false;
-    }
-    _sharedPreferencesUtil.calendarEnabled = calendarEnabled;
-    notifyListeners();
-  }
-
-  void onCalendarTypeChanged(String? v) {
-    _sharedPreferencesUtil.calendarType = v!;
-    _mixpanelManager.calendarTypeChanged(v);
-    notifyListeners();
-  }
-
-  void selectCalendar(String? value, Calendar calendar) {
-    _sharedPreferencesUtil.calendarId = value!;
-    notifyListeners();
-    _mixpanelManager.calendarSelected();
-    AppSnackbar.showSnackbar(
-      'Calendar ${calendar.name} selected.',
-      duration: const Duration(seconds: 1),
+  Future<void> _applySavedSettings() async {
+    // Apply saved settings to calendar monitor
+    await _service.updateSettings(
+      showEventsWithNoParticipants: SharedPreferencesUtil().showEventsWithNoParticipants,
+      showMeetingsInMenuBar: SharedPreferencesUtil().showMeetingsInMenuBar,
     );
+  }
+
+  Future<void> updateShowEventsWithNoParticipants(bool value) async {
+    SharedPreferencesUtil().showEventsWithNoParticipants = value;
+    await _service.updateSettings(showEventsWithNoParticipants: value);
+    await refreshMeetings();
+  }
+
+  Future<void> updateShowMeetingsInMenuBar(bool value) async {
+    SharedPreferencesUtil().showMeetingsInMenuBar = value;
+    await _service.updateSettings(showMeetingsInMenuBar: value);
+  }
+
+  Future<void> checkPermissionStatus() async {
+    _permissionStatus = await _service.checkPermissionStatus();
+    notifyListeners();
+  }
+
+  Future<void> requestPermission() async {
+    _isLoading = true;
+    notifyListeners();
+
+    try {
+      _permissionStatus = await _service.requestPermission();
+      if (isAuthorized) {
+        // Mark calendar as enabled when user grants permission
+        SharedPreferencesUtil().calendarIntegrationEnabled = true;
+        await _applySavedSettings();
+        await startMonitoring();
+        await fetchSystemCalendars();
+        await refreshMeetings();
+      }
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> startMonitoring() async {
+    if (!isAuthorized) return;
+
+    await _service.startMonitoring();
+    _isMonitoring = true;
+
+    // Listen to events
+    _service.initialize(onMeetingEvent: _handleMeetingEvent);
+
+    // Initial fetch
+    await refreshMeetings();
+
+    notifyListeners();
+  }
+
+  Future<void> stopMonitoring() async {
+    await _service.stopMonitoring();
+    _service.dispose();
+    _isMonitoring = false;
+    // Clear enabled flag when user disables calendar
+    SharedPreferencesUtil().calendarIntegrationEnabled = false;
+    notifyListeners();
+  }
+
+  Future<void> refreshMeetings() async {
+    if (!isAuthorized) return;
+
+    // Get fresh meetings from calendar
+    final freshMeetings = await _service.getUpcomingMeetings();
+
+    // Preserve meetingId from previous syncs
+    final meetingIdMap = {
+      for (var m in _upcomingMeetings)
+        if (m.meetingId != null) m.id: m.meetingId,
+    };
+
+    // Update meetings list, preserving meetingIds
+    _upcomingMeetings = freshMeetings.map((meeting) {
+      final existingMeetingId = meetingIdMap[meeting.id];
+      if (existingMeetingId != null) {
+        return meeting.copyWith(meetingId: existingMeetingId);
+      }
+      return meeting;
+    }).toList();
+
+    // Sync meetings to backend (in background, don't block UI)
+    _syncMeetingsToBackend();
+
+    notifyListeners();
+  }
+
+  Future<void> _syncMeetingsToBackend() async {
+    // Prevent concurrent syncs - if already syncing, skip this call
+    if (_isSyncing) {
+      Logger.debug('CalendarProvider: Sync already in progress, skipping');
+      return;
+    }
+
+    _isSyncing = true;
+    try {
+      // Build a map of already synced event IDs to avoid re-syncing on every refresh
+      final alreadySyncedIds = _upcomingMeetings.where((m) => m.meetingId != null).map((m) => m.id).toSet();
+
+      Logger.debug(
+        'CalendarProvider: Syncing ${_upcomingMeetings.length} meetings (${alreadySyncedIds.length} already synced)',
+      );
+
+      for (final meeting in _upcomingMeetings) {
+        // Skip if we've already synced this calendar event in this session
+        if (alreadySyncedIds.contains(meeting.id)) {
+          continue;
+        }
+
+        try {
+          // Convert participants
+          final participants = meeting.participants.map((p) {
+            return MeetingParticipant(name: p.name, email: p.email);
+          }).toList();
+
+          // Store meeting in backend (backend handles create vs update based on calendar_event_id)
+          final response = await calendar_api.storeMeeting(
+            calendarEventId: meeting.id,
+            calendarSource: 'macos_calendar', // TODO: Detect source dynamically
+            title: meeting.title,
+            startTime: meeting.startTime,
+            endTime: meeting.endTime,
+            platform: meeting.platform,
+            meetingLink: meeting.meetingUrl,
+            participants: participants,
+            notes: meeting.notes,
+          );
+
+          if (response != null) {
+            // Update local meeting with backend meeting_id to mark as synced
+            final index = _upcomingMeetings.indexWhere((m) => m.id == meeting.id);
+            if (index != -1) {
+              _upcomingMeetings[index] = meeting.copyWith(meetingId: response.meetingId);
+            }
+          }
+        } catch (e) {
+          Logger.debug('CalendarProvider: Error syncing meeting ${meeting.id}: $e');
+          // Continue with other meetings even if one fails
+        }
+      }
+      notifyListeners();
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
+  Future<void> fetchSystemCalendars() async {
+    if (!isAuthorized) return;
+
+    _systemCalendars = await _service.getAvailableCalendars();
+    notifyListeners();
+  }
+
+  void _handleMeetingEvent(CalendarMeetingEvent event) {
+    // Refresh list when events happen
+    refreshMeetings();
+  }
+
+  @override
+  void dispose() {
+    _service.dispose();
+    super.dispose();
   }
 }

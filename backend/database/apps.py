@@ -10,6 +10,9 @@ from ulid import ULID
 from models.app import UsageHistoryType
 from ._client import db
 from .redis_db import get_app_reviews
+import logging
+
+logger = logging.getLogger(__name__)
 
 # *****************************
 # ********** CRUD *************
@@ -23,7 +26,7 @@ testers_collection = 'testers'
 def migrate_reviews_from_redis_to_firestore():
     apps_ref = db.collection(apps_collection).stream()
     for app in apps_ref:
-        print('migrating reviews for app:', app.id)
+        logger.info(f'migrating reviews for app: {app.id}')
         app_id = app.id
         reviews = get_app_reviews(app_id)
         for uid, review in reviews.items():
@@ -36,24 +39,20 @@ def get_app_by_id_db(app_id: str):
     app_ref = db.collection(apps_collection).document(app_id)
     doc = app_ref.get()
     if doc.exists:
-        if doc.to_dict().get('deleted', True):
-            return None
-        else:
-            return doc.to_dict()
+        return doc.to_dict()
     return None
 
 
 def get_audio_apps_count(app_ids: List[str]):
     if not app_ids or len(app_ids) == 0:
         return 0
-    filters = [FieldFilter('id', 'in', app_ids), FieldFilter('deleted', '==', False),
-               FieldFilter('external_integration.triggers_on', '==', 'audio_bytes')]
+    filters = [FieldFilter('id', 'in', app_ids), FieldFilter('external_integration.triggers_on', '==', 'audio_bytes')]
     apps_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).count().get()
     return apps_ref[0][0].value
 
 
 def get_private_apps_db(uid: str) -> List:
-    filters = [FieldFilter('uid', '==', uid), FieldFilter('private', '==', True), FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('uid', '==', uid), FieldFilter('private', '==', True)]
     private_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     data = [doc.to_dict() for doc in private_apps]
     return data
@@ -61,15 +60,14 @@ def get_private_apps_db(uid: str) -> List:
 
 # This returns public unapproved apps of all users
 def get_unapproved_public_apps_db() -> List:
-    filters = [FieldFilter('approved', '==', False), FieldFilter('private', '==', False),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('approved', '==', False), FieldFilter('private', '==', False)]
     public_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     return [doc.to_dict() for doc in public_apps]
 
 
 # This returns all unapproved apps of all users including private apps
 def get_all_unapproved_apps_db() -> List:
-    filters = [FieldFilter('approved', '==', False), FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('approved', '==', False)]
     all_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     return [doc.to_dict() for doc in all_apps]
 
@@ -82,15 +80,13 @@ def get_public_apps_db(uid: str) -> List:
 
 
 def get_public_approved_apps_db() -> List:
-    filters = [FieldFilter('approved', '==', True), FieldFilter('private', '==', False),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('approved', '==', True), FieldFilter('private', '==', False)]
     public_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     return [doc.to_dict() for doc in public_apps]
 
 
 def get_popular_apps_db() -> List:
-    filters = [FieldFilter('approved', '==', True), FieldFilter('deleted', '==', False),
-               FieldFilter('is_popular', '==', True)]
+    filters = [FieldFilter('approved', '==', True), FieldFilter('is_popular', '==', True)]
     popular_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     return [doc.to_dict() for doc in popular_apps]
 
@@ -100,10 +96,104 @@ def set_app_popular_db(app_id: str, popular: bool):
     app_ref.update({'is_popular': popular})
 
 
+def search_apps_db(
+    uid: str,
+    category: str | None = None,
+    capability: str | None = None,
+    my_apps: bool = False,
+    installed_apps: bool = False,
+    enabled_app_ids: List[str] | None = None,
+) -> List:
+    """
+    Optimized search function that applies filters at database level.
+    Uses smart filter ordering to minimize data fetched from Firestore.
+
+    Note: Rating filter is NOT applied here as rating_avg is calculated from Redis,
+    not stored in Firestore. Apply rating filter after fetching from DB.
+
+    Args:
+        uid: User ID for private apps and filtering
+        category: Filter by category ID
+        capability: Filter by capability ID
+        my_apps: Only return user's own apps
+        installed_apps: Only return user's enabled apps
+        enabled_app_ids: Pre-fetched list of enabled app IDs (for installed_apps filter)
+
+    Returns:
+        List of app dictionaries matching the filters
+    """
+    filters = []
+
+    # 1. Apply most restrictive filter first
+    if my_apps:
+        filters.append(FieldFilter('uid', '==', uid))
+
+    elif installed_apps:
+        if not enabled_app_ids or len(enabled_app_ids) == 0:
+            # User has no enabled apps
+            return []
+
+        if len(enabled_app_ids) > 30:
+            # Firestore 'in' limited to 30 items
+            # Query public approved apps first, then add user's own apps
+            filters.append(FieldFilter('approved', '==', True))
+            filters.append(FieldFilter('private', '==', False))
+        else:
+            # Query by specific IDs
+            filters.append(FieldFilter('id', 'in', enabled_app_ids))
+
+    else:
+        # Default: Public approved apps
+        filters.append(FieldFilter('approved', '==', True))
+        filters.append(FieldFilter('private', '==', False))
+
+    # 2. Add category filter
+    if category and not my_apps:  # Don't add if already filtering by my_apps
+        filters.append(FieldFilter('category', '==', category))
+
+    # 3. Add capability filter
+    if capability and not my_apps:
+        filters.append(FieldFilter('capabilities', 'array_contains', capability))
+
+    # Execute query with all filters
+    if filters:
+        query = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters))
+        apps = [doc.to_dict() for doc in query.stream()]
+    else:
+        apps = []
+
+    # For installed_apps with > 30 enabled apps, we need to also fetch user's own apps
+    # because the main query only returns approved+public apps
+    if installed_apps and enabled_app_ids and len(enabled_app_ids) > 30:
+        enabled_set = set(enabled_app_ids)
+        # Filter to only enabled apps from the public approved set
+        apps = [app for app in apps if app.get('id') in enabled_set]
+
+        # Also fetch user's own enabled apps (which may be private or unapproved)
+        user_apps_filter = FieldFilter('uid', '==', uid)
+        user_apps_query = db.collection(apps_collection).where(filter=user_apps_filter)
+        user_apps = [doc.to_dict() for doc in user_apps_query.stream()]
+
+        # Add user's own enabled apps that aren't already in the list
+        existing_ids = {app.get('id') for app in apps}
+        for user_app in user_apps:
+            if user_app.get('id') in enabled_set and user_app.get('id') not in existing_ids:
+                apps.append(user_app)
+
+    # Post-filter for category if my_apps is enabled
+    if my_apps and category:
+        apps = [app for app in apps if app.get('category') == category]
+
+    # Post-filter for capability if my_apps is enabled
+    if my_apps and capability:
+        apps = [app for app in apps if capability in app.get('capabilities', [])]
+
+    return apps
+
+
 # This returns public unapproved apps for a user
 def get_public_unapproved_apps_db(uid: str) -> List:
-    filters = [FieldFilter('approved', '==', False), FieldFilter('uid', '==', uid), FieldFilter('deleted', '==', False),
-               FieldFilter('private', '==', False)]
+    filters = [FieldFilter('approved', '==', False), FieldFilter('uid', '==', uid), FieldFilter('private', '==', False)]
     public_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     return [doc.to_dict() for doc in public_apps]
 
@@ -115,8 +205,7 @@ def get_apps_for_tester_db(uid: str) -> List:
         apps = doc.to_dict().get('apps', [])
         if not apps:
             return []
-        filters = [FieldFilter('approved', '==', False), FieldFilter('id', 'in', apps),
-                   FieldFilter('deleted', '==', False)]
+        filters = [FieldFilter('approved', '==', False), FieldFilter('id', 'in', apps)]
         public_apps = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
         return [doc.to_dict() for doc in public_apps]
     return []
@@ -139,7 +228,7 @@ def update_app_in_db(app_data: dict):
 
 def delete_app_from_db(app_id: str):
     app_ref = db.collection(apps_collection).document(app_id)
-    app_ref.update({'deleted': True})
+    app_ref.delete()
 
 
 def update_app_visibility_in_db(app_id: str, private: bool):
@@ -167,20 +256,38 @@ def get_app_usage_history_db(app_id: str):
 
 
 def get_app_memory_created_integration_usage_count_db(app_id: str):
-    usage = db.collection(app_analytics_collection).document(app_id).collection('usage_history').where(
-        filter=FieldFilter('type', '==', UsageHistoryType.memory_created_external_integration)).count().get()
+    usage = (
+        db.collection(app_analytics_collection)
+        .document(app_id)
+        .collection('usage_history')
+        .where(filter=FieldFilter('type', '==', UsageHistoryType.memory_created_external_integration))
+        .count()
+        .get()
+    )
     return usage[0][0].value
 
 
 def get_app_memory_prompt_usage_count_db(app_id: str):
-    usage = db.collection(app_analytics_collection).document(app_id).collection('usage_history').where(
-        filter=FieldFilter('type', '==', UsageHistoryType.memory_created_prompt)).count().get()
+    usage = (
+        db.collection(app_analytics_collection)
+        .document(app_id)
+        .collection('usage_history')
+        .where(filter=FieldFilter('type', '==', UsageHistoryType.memory_created_prompt))
+        .count()
+        .get()
+    )
     return usage[0][0].value
 
 
 def get_app_chat_message_sent_usage_count_db(app_id: str):
-    usage = db.collection(app_analytics_collection).document(app_id).collection('usage_history').where(
-        filter=FieldFilter('type', '==', UsageHistoryType.chat_message_sent)).count().get()
+    usage = (
+        db.collection(app_analytics_collection)
+        .document(app_id)
+        .collection('usage_history')
+        .where(filter=FieldFilter('type', '==', UsageHistoryType.chat_message_sent))
+        .count()
+        .get()
+    )
     return usage[0][0].value
 
 
@@ -193,6 +300,7 @@ def get_app_usage_count_db(app_id: str):
 # *********** REVIEWS ************
 # ********************************
 
+
 def set_app_review_in_db(app_id: str, uid: str, review: dict):
     app_ref = db.collection(apps_collection).document(app_id).collection('reviews').document(uid)
     app_ref.set(review)
@@ -201,6 +309,7 @@ def set_app_review_in_db(app_id: str, uid: str, review: dict):
 # ********************************
 # ************ TESTER ************
 # ********************************
+
 
 def add_tester_db(data: dict):
     app_ref = db.collection(testers_collection).document(data['uid'])
@@ -239,9 +348,14 @@ def is_tester_db(uid: str) -> bool:
 # *********** APPS USAGE *********
 # ********************************
 
+
 def record_app_usage(
-        uid: str, app_id: str, usage_type: UsageHistoryType, conversation_id: str = None, message_id: str = None,
-        timestamp: datetime = None
+    uid: str,
+    app_id: str,
+    usage_type: UsageHistoryType,
+    conversation_id: str = None,
+    message_id: str = None,
+    timestamp: datetime = None,
 ):
     if not conversation_id and not message_id:
         raise ValueError('memory_id or message_id must be provided')
@@ -254,8 +368,9 @@ def record_app_usage(
         'type': usage_type,
     }
 
-    db.collection(app_analytics_collection).document(app_id).collection('usage_history').document(conversation_id or message_id).set(
-        data)
+    db.collection(app_analytics_collection).document(app_id).collection('usage_history').document(
+        conversation_id or message_id
+    ).set(data)
     return data
 
 
@@ -263,9 +378,10 @@ def record_app_usage(
 # *********** PERSONAS ***********
 # ********************************
 
+
 def delete_persona_db(persona_id: str):
     persona_ref = db.collection(apps_collection).document(persona_id)
-    persona_ref.update({'deleted': True})
+    persona_ref.delete()
 
 
 def get_personas_by_username_db(persona_id: str):
@@ -277,8 +393,7 @@ def get_personas_by_username_db(persona_id: str):
 
 
 def get_persona_by_username_db(username: str):
-    filters = [FieldFilter('username', '==', username), FieldFilter('capabilities', 'array_contains', 'persona'),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('username', '==', username), FieldFilter('capabilities', 'array_contains', 'persona')]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).limit(1)
     docs = persona_ref.get()
     if not docs:
@@ -298,8 +413,7 @@ def get_persona_by_id_db(persona_id: str):
 
 
 def get_persona_by_uid_db(uid: str):
-    filters = [FieldFilter('uid', '==', uid), FieldFilter('capabilities', 'array_contains', 'persona'),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('uid', '==', uid), FieldFilter('capabilities', 'array_contains', 'persona')]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).limit(1)
     docs = persona_ref.get()
     if not docs:
@@ -314,7 +428,6 @@ def get_user_persona_by_uid(uid: str):
     filters = [
         FieldFilter('capabilities', 'array_contains', 'persona'),
         FieldFilter('category', '==', 'personality-emulation'),
-        FieldFilter('deleted', '==', False),
         FieldFilter('uid', '==', uid),
     ]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).limit(1)
@@ -335,11 +448,7 @@ def create_user_persona_db(persona_data: dict):
 
 
 def get_persona_by_twitter_handle_db(handle: str):
-    filters = [
-        FieldFilter('category', '==', 'personality-emulation'),
-        FieldFilter('deleted', '==', False),
-        FieldFilter('twitter.username', '==', handle)
-    ]
+    filters = [FieldFilter('category', '==', 'personality-emulation'), FieldFilter('twitter.username', '==', handle)]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).limit(1)
     docs = persona_ref.get()
     if not docs:
@@ -354,8 +463,7 @@ def get_persona_by_username_twitter_handle_db(username: str, handle: str):
     filters = [
         FieldFilter('username', '==', username),
         FieldFilter('category', '==', 'personality-emulation'),
-        FieldFilter('deleted', '==', False),
-        FieldFilter('twitter.username', '==', handle)
+        FieldFilter('twitter.username', '==', handle),
     ]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).limit(1)
     docs = persona_ref.get()
@@ -368,8 +476,7 @@ def get_persona_by_username_twitter_handle_db(username: str, handle: str):
 
 
 def get_omi_personas_by_uid_db(uid: str):
-    filters = [FieldFilter('uid', '==', uid), FieldFilter('capabilities', 'array_contains', 'persona'),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('uid', '==', uid), FieldFilter('capabilities', 'array_contains', 'persona')]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters))
     docs = persona_ref.get()
     if not docs:
@@ -379,9 +486,7 @@ def get_omi_personas_by_uid_db(uid: str):
 
 
 def get_omi_persona_apps_by_uid_db(uid: str):
-    filters = [FieldFilter('uid', '==', uid),
-               FieldFilter('category', '==', 'personality-emulation'),
-               FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('uid', '==', uid), FieldFilter('category', '==', 'personality-emulation')]
     persona_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters))
     docs = persona_ref.get()
     if not docs:
@@ -401,7 +506,7 @@ def update_persona_in_db(persona_data: dict):
 
 
 def migrate_app_owner_id_db(new_id: str, old_id: str):
-    filters = [FieldFilter('uid', '==', old_id), FieldFilter('deleted', '==', False)]
+    filters = [FieldFilter('uid', '==', old_id)]
     apps_ref = db.collection(apps_collection).where(filter=BaseCompositeFilter('AND', filters)).stream()
     for app in apps_ref:
         app_ref = db.collection(apps_collection).document(app.id)
@@ -427,8 +532,13 @@ def get_api_key_by_id_db(app_id: str, key_id: str):
 def get_api_key_by_hash_db(app_id: str, hashed_key: str):
     """Get an API key by its hash value"""
     filters = [FieldFilter('hashed', '==', hashed_key)]
-    api_keys_ref = db.collection(apps_collection).document(app_id).collection('api_keys').where(
-        filter=BaseCompositeFilter('AND', filters)).limit(1)
+    api_keys_ref = (
+        db.collection(apps_collection)
+        .document(app_id)
+        .collection('api_keys')
+        .where(filter=BaseCompositeFilter('AND', filters))
+        .limit(1)
+    )
     docs = api_keys_ref.get()
     if not docs:
         return None
@@ -440,8 +550,13 @@ def get_api_key_by_hash_db(app_id: str, hashed_key: str):
 
 def list_api_keys_db(app_id: str):
     """List all API keys for an app (excluding the hashed values)"""
-    api_keys_ref = db.collection(apps_collection).document(app_id).collection('api_keys').order_by('created_at',
-                                                                                                   direction='DESCENDING').stream()
+    api_keys_ref = (
+        db.collection(apps_collection)
+        .document(app_id)
+        .collection('api_keys')
+        .order_by('created_at', direction='DESCENDING')
+        .stream()
+    )
     return [{k: v for k, v in doc.to_dict().items() if k != 'hashed'} for doc in api_keys_ref]
 
 

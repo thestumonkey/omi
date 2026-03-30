@@ -1,28 +1,27 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
-import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+
+import 'package:version/version.dart';
+
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
-import 'package:omi/services/devices/errors.dart';
 import 'package:omi/services/devices/models.dart';
-import 'package:omi/utils/audio/wav_bytes.dart';
+import 'package:omi/services/devices/wifi_sync_error.dart';
+import 'package:omi/services/notifications.dart';
 import 'package:omi/utils/logger.dart';
 
 class OmiDeviceConnection extends DeviceConnection {
-  BluetoothService? _batteryService;
-  BluetoothService? _omiService;
-  BluetoothService? _storageService;
-  BluetoothService? _accelService;
-  BluetoothService? _buttonService;
-  BluetoothService? _speakerService;
+  static const String settingsServiceUuid = '19b10010-e8f2-537e-4f6c-d104768a1214';
+  static const String settingsDimRatioCharacteristicUuid = '19b10011-e8f2-537e-4f6c-d104768a1214';
+  static const String settingsMicGainCharacteristicUuid = '19b10012-e8f2-537e-4f6c-d104768a1214';
+  static const String featuresServiceUuid = '19b10020-e8f2-537e-4f6c-d104768a1214';
+  static const String featuresCharacteristicUuid = '19b10021-e8f2-537e-4f6c-d104768a1214';
 
-  OmiDeviceConnection(super.device, super.bleDevice);
+  OmiDeviceConnection(super.device, super.transport);
 
   get deviceId => device.id;
 
@@ -30,371 +29,359 @@ class OmiDeviceConnection extends DeviceConnection {
   Future<void> connect({Function(String deviceId, DeviceConnectionState state)? onConnectionStateChanged}) async {
     await super.connect(onConnectionStateChanged: onConnectionStateChanged);
 
-    // Services
-    _omiService = await getService(omiServiceUuid);
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
-      throw DeviceConnectionException("Omi ble service is not found");
-    }
-
-    _batteryService = await getService(batteryServiceUuid);
-    if (_batteryService == null) {
-      logServiceNotFoundError('Battery', deviceId);
-    }
-
-    _storageService = await getService(storageDataStreamServiceUuid);
-    if (_storageService == null) {
-      logServiceNotFoundError('Storage', deviceId);
-    }
-
-    _speakerService = await getService(speakerDataStreamServiceUuid);
-    if (_speakerService == null) {
-      logServiceNotFoundError('Speaker', deviceId);
-    }
-
-    _accelService = await getService(accelDataStreamServiceUuid);
-    if (_accelService == null) {
-      logServiceNotFoundError('Accelerometer', deviceId);
-    }
-
-    _buttonService = await getService(buttonServiceUuid);
-    if (_buttonService == null) {
-      logServiceNotFoundError('Button', deviceId);
-    }
+    await performSyncTime();
   }
 
-  // Mimic @app/lib/utils/ble/friend_communication.dart
-  @override
-  Future<bool> isConnected() async {
-    return bleDevice.isConnected;
+  Future<bool> performSyncTime() async {
+    try {
+      final epochSeconds = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+      final byteData = ByteData(4)..setUint32(0, epochSeconds, Endian.little);
+
+      await transport.writeCharacteristic(
+        timeSyncServiceUuid,
+        timeSyncWriteCharacteristicUuid,
+        byteData.buffer.asUint8List(),
+      );
+      Logger.debug('OmiDeviceConnection: Time synced to device: $epochSeconds');
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error syncing time: $e');
+      return false;
+    }
   }
 
   @override
   Future<int> performRetrieveBatteryLevel() async {
-    if (_batteryService == null) {
-      logServiceNotFoundError('Battery', deviceId);
+    try {
+      final data = await transport.readCharacteristic(batteryServiceUuid, batteryLevelCharacteristicUuid);
+      if (data.isNotEmpty) return data[0];
+      return -1;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error reading battery level: $e');
       return -1;
     }
-
-    var batteryLevelCharacteristic = getCharacteristic(_batteryService!, batteryLevelCharacteristicUuid);
-    if (batteryLevelCharacteristic == null) {
-      logCharacteristicNotFoundError('Battery level', deviceId);
-      return -1;
-    }
-
-    var currValue = await batteryLevelCharacteristic.read();
-    if (currValue.isNotEmpty) return currValue[0];
-    return -1;
   }
 
   @override
   Future<StreamSubscription<List<int>>?> performGetBleBatteryLevelListener({
     void Function(int)? onBatteryLevelChange,
   }) async {
-    if (_batteryService == null) {
-      logServiceNotFoundError('Battery', deviceId);
-      return null;
-    }
-
-    var batteryLevelCharacteristic = getCharacteristic(_batteryService!, batteryLevelCharacteristicUuid);
-    if (batteryLevelCharacteristic == null) {
-      logCharacteristicNotFoundError('Battery level', deviceId);
-      return null;
-    }
-
-    var currValue = await batteryLevelCharacteristic.read();
-    if (currValue.isNotEmpty) {
-      debugPrint('Battery level: ${currValue[0]}');
-      onBatteryLevelChange!(currValue[0]);
-    }
-
     try {
-      await batteryLevelCharacteristic.setNotifyValue(true);
-    } catch (e, stackTrace) {
-      logSubscribeError('Battery level', deviceId, e, stackTrace);
+      final stream = transport.getCharacteristicStream(batteryServiceUuid, batteryLevelCharacteristicUuid);
+
+      final subscription = stream.listen((value) {
+        if (value.isNotEmpty && onBatteryLevelChange != null) {
+          Logger.debug('Battery level changed: ${value[0]}');
+          onBatteryLevelChange(value[0]);
+        }
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up battery listener: $e');
       return null;
     }
-
-    var listener = batteryLevelCharacteristic.lastValueStream.listen((value) {
-      // debugPrint('Battery level listener: $value');
-      if (value.isNotEmpty) {
-        debugPrint('Battery level changed: ${value[0]}');
-        onBatteryLevelChange!(value[0]);
-      }
-    });
-
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
-
-    return listener;
   }
 
   @override
   Future<List<int>> performGetButtonState() async {
-    debugPrint('perform button state called');
-    if (_buttonService == null) {
-      return Future.value(<int>[]);
+    Logger.debug('perform button state called');
+    try {
+      return await transport.readCharacteristic(buttonServiceUuid, buttonTriggerCharacteristicUuid);
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error reading button state: $e');
+      return <int>[];
     }
-
-    var buttonStateCharacteristic = getCharacteristic(_buttonService!, buttonTriggerCharacteristicUuid);
-    if (buttonStateCharacteristic == null) {
-      logCharacteristicNotFoundError('Button state', deviceId);
-      return Future.value(<int>[]);
-    }
-    var value = await buttonStateCharacteristic.read();
-    return value;
   }
 
   @override
-  Future<StreamSubscription?> performGetBleButtonListener({
-    required void Function(List<int>) onButtonReceived,
-  }) async {
-    if (_buttonService == null) {
-      logServiceNotFoundError('Button', deviceId);
-      return null;
-    }
-
-    var buttonDataStreamCharacteristic = getCharacteristic(_buttonService!, buttonTriggerCharacteristicUuid);
-    if (buttonDataStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Button data stream', deviceId);
-      return null;
-    }
-
+  Future<StreamSubscription?> performGetBleButtonListener({required void Function(List<int>) onButtonReceived}) async {
     try {
-      // TODO: Unknown GATT error here (code 133) on Android. StackOverflow says that it has to do with smaller MTU size
-      // The creator of the plugin says not to use autoConnect
-      // https://github.com/chipweinberger/flutter_blue_plus/issues/612
-      final device = bleDevice;
-      if (device.isConnected) {
-        if (Platform.isAndroid && device.mtuNow < 512) {
-          await device.requestMtu(512); // This might fix the code 133 error
-        }
-        if (device.isConnected) {
-          try {
-            await buttonDataStreamCharacteristic.setNotifyValue(true); // device could be disconnected here.
-          } on PlatformException catch (e) {
-            Logger.error('Error setting notify value for audio data stream $e');
-          }
-        } else {
-          Logger.handle(Exception('Device disconnected before setting notify value'), StackTrace.current,
-              message: 'Device is disconnected. Please reconnect and try again');
-        }
-      }
-    } catch (e, stackTrace) {
-      logSubscribeError('Button data stream', deviceId, e, stackTrace);
+      final stream = transport.getCharacteristicStream(buttonServiceUuid, buttonTriggerCharacteristicUuid);
+
+      Logger.debug('Subscribed to button stream from Omi Device');
+      final subscription = stream.listen((value) {
+        Logger.debug("new button value $value");
+        if (value.isNotEmpty) onButtonReceived(value);
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up button listener: $e');
       return null;
     }
-
-    debugPrint('Subscribed to button stream from Omi Device');
-    var listener = buttonDataStreamCharacteristic.lastValueStream.listen((value) {
-      debugPrint("new button value ${value}");
-      if (value.isNotEmpty) onButtonReceived(value);
-    });
-
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
-
-    // This will cause a crash in OpenGlass devices
-    // due to a race with discoverServices() that triggers
-    // a bug in the device firmware.
-    if (Platform.isAndroid && device.isConnected) await device.requestMtu(512);
-
-    return listener;
   }
 
   @override
   Future<StreamSubscription?> performGetBleAudioBytesListener({
     required void Function(List<int>) onAudioBytesReceived,
   }) async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
-      return null;
-    }
-
-    var audioDataStreamCharacteristic = getCharacteristic(_omiService!, audioDataStreamCharacteristicUuid);
-    if (audioDataStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Audio data stream', deviceId);
-      return null;
-    }
-
     try {
-      // TODO: Unknown GATT error here (code 133) on Android. StackOverflow says that it has to do with smaller MTU size
-      // The creator of the plugin says not to use autoConnect
-      // https://github.com/chipweinberger/flutter_blue_plus/issues/612
-      final device = bleDevice;
-      if (device.isConnected) {
-        if (Platform.isAndroid && device.mtuNow < 512) {
-          await device.requestMtu(512); // This might fix the code 133 error
-        }
-        if (device.isConnected) {
-          try {
-            await audioDataStreamCharacteristic.setNotifyValue(true); // device could be disconnected here.
-          } on PlatformException catch (e) {
-            Logger.error('Error setting notify value for audio data stream $e');
-          }
-        } else {
-          Logger.handle(Exception('Device disconnected before setting notify value'), StackTrace.current,
-              message: 'Device is disconnected. Please reconnect and try again');
-        }
-      }
-    } catch (e, stackTrace) {
-      logSubscribeError('Audio data stream', deviceId, e, stackTrace);
+      final stream = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+
+      Logger.debug('Subscribed to audioBytes stream from Omi Device');
+      final subscription = stream.listen((value) {
+        if (value.isNotEmpty) onAudioBytesReceived(value);
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up audio listener: $e');
       return null;
     }
-
-    debugPrint('Subscribed to audioBytes stream from Omi Device');
-    var listener = audioDataStreamCharacteristic.lastValueStream.listen((value) {
-      if (value.isNotEmpty) onAudioBytesReceived(value);
-    });
-
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
-
-    // This will cause a crash in OpenGlass devices
-    // due to a race with discoverServices() that triggers
-    // a bug in the device firmware.
-    if (Platform.isAndroid && device.isConnected) await device.requestMtu(512);
-
-    return listener;
   }
 
   @override
   Future<BleAudioCodec> performGetAudioCodec() async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
+    try {
+      final codecValue = await transport.readCharacteristic(omiServiceUuid, audioCodecCharacteristicUuid);
+
+      var codecId = 1;
+      if (codecValue.isNotEmpty) {
+        codecId = codecValue[0];
+      }
+
+      switch (codecId) {
+        case 1:
+          return BleAudioCodec.pcm8;
+        case 20:
+          return BleAudioCodec.opus;
+        case 21:
+          return BleAudioCodec.opusFS320;
+        default:
+          Logger.debug('OmiDeviceConnection: Unknown codec id: $codecId');
+          return BleAudioCodec.pcm8;
+      }
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error reading audio codec: $e');
       return BleAudioCodec.pcm8;
     }
-
-    var audioCodecCharacteristic = getCharacteristic(_omiService!, audioCodecCharacteristicUuid);
-    if (audioCodecCharacteristic == null) {
-      logCharacteristicNotFoundError('Audio codec', deviceId);
-      return BleAudioCodec.pcm8;
-    }
-
-    // Default codec is PCM8
-    var codecId = 1;
-    BleAudioCodec codec = BleAudioCodec.pcm8;
-
-    var codecValue = await audioCodecCharacteristic.read();
-    if (codecValue.isNotEmpty) {
-      codecId = codecValue[0];
-    }
-
-    switch (codecId) {
-      // case 0:
-      //   codec = BleAudioCodec.pcm16;
-      case 1:
-        codec = BleAudioCodec.pcm8;
-      // case 10:
-      //   codec = BleAudioCodec.mulaw16;
-      // case 11:
-      //   codec = BleAudioCodec.mulaw8;
-      case 20:
-        codec = BleAudioCodec.opus;
-      case 21:
-        codec = BleAudioCodec.opusFS320;
-      default:
-        logErrorMessage('Unknown codec id: $codecId', deviceId);
-    }
-
-    // debugPrint('Codec is $codec');
-    return codec;
   }
 
   @override
   Future<List<int>> getStorageList() async {
     if (await isConnected()) {
-      debugPrint('storage list called');
+      Logger.debug('storage list called');
       return await performGetStorageList();
     }
-    // _showDeviceDisconnectedNotification();
-    debugPrint('storage list error');
+    Logger.debug('storage list error');
     return Future.value(<int>[]);
   }
 
   @override
   Future<List<int>> performGetStorageList() async {
-    debugPrint(' perform storage list called');
-    if (_storageService == null) {
-      if (device.name == 'Omi DevKit 2') {
-        // Should only report incase of DevKit 2 because only DevKit 2 has storage service
-        logServiceNotFoundError('Storage', deviceId);
-      }
-      return Future.value(<int>[]);
-    }
-
-    var storageListCharacteristic = getCharacteristic(_storageService!, storageReadControlCharacteristicUuid);
-    if (storageListCharacteristic == null) {
-      logCharacteristicNotFoundError('Storage List', deviceId);
-      return Future.value(<int>[]);
-    }
-
-    List<int> storageValue;
+    Logger.debug('perform storage list called');
     try {
-      storageValue = await storageListCharacteristic.read();
-    } catch (e, stackTrace) {
-      logCrashMessage('Storage value', deviceId, e, stackTrace);
-      return Future.value(<int>[]);
-    }
-    List<int> storageLengths = [];
-    if (storageValue.isNotEmpty) {
-      int totalEntries = (storageValue.length / 4).toInt();
-      debugPrint('Storage list: ${totalEntries} items');
+      final storageValue = await transport.readCharacteristic(
+        storageDataStreamServiceUuid,
+        storageReadControlCharacteristicUuid,
+      );
 
-      for (int i = 0; i < totalEntries; i++) {
-        int baseIndex = i * 4;
-        var result = ((storageValue[baseIndex] |
-                    (storageValue[baseIndex + 1] << 8) |
-                    (storageValue[baseIndex + 2] << 16) |
-                    (storageValue[baseIndex + 3] << 24)) &
-                0xFFFFFFFF as int)
-            .toSigned(32);
-        storageLengths.add(result);
+      List<int> storageLengths = [];
+      if (storageValue.isNotEmpty) {
+        int totalEntries = (storageValue.length / 4).toInt();
+        Logger.debug('Storage list: $totalEntries items');
+
+        for (int i = 0; i < totalEntries; i++) {
+          int baseIndex = i * 4;
+          var result = ((storageValue[baseIndex] |
+                      (storageValue[baseIndex + 1] << 8) |
+                      (storageValue[baseIndex + 2] << 16) |
+                      (storageValue[baseIndex + 3] << 24)) &
+                  0xFFFFFFFF)
+              .toSigned(32);
+          storageLengths.add(result);
+        }
       }
+      Logger.debug('Storage lengths: ${storageLengths.length} items: ${storageLengths.join(', ')}');
+      return storageLengths;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error reading storage list: $e');
+      return <int>[];
     }
-    debugPrint('storage list finished');
-    debugPrint('Storage lengths: ${storageLengths.length} items: ${storageLengths.join(', ')}');
-    return storageLengths;
   }
+
+  // --- New multi-file storage protocol (CMD_LIST_FILES 0x10, CMD_READ_FILE 0x11, CMD_DELETE_FILE 0x12) ---
+
+  @override
+  Future<StorageStatus?> performGetStorageFileStats() async {
+    try {
+      // Reuse existing performGetStorageList() which reads storageReadControlCharacteristicUuid
+      // and parses as array of LE uint32s.
+      // New firmware format: [0]=totalBytes, [1]=fileCount (was offset in old firmware)
+      final storageFiles = await performGetStorageList();
+      if (storageFiles.isEmpty) return null;
+
+      final totalBytes = storageFiles[0];
+      final fileCount = storageFiles.length >= 2 ? storageFiles[1] : 0;
+
+      // Distinguish new firmware from old: old firmware returns [totalBytes, offset]
+      // where offset is a byte position (large number). New firmware returns
+      // [totalBytes, fileCount] where fileCount is small (typically 0-100).
+      // A value > 1000 in field[1] is almost certainly an old-firmware byte offset.
+      if (fileCount > 1000) {
+        Logger.debug('OmiDeviceConnection: Looks like old firmware (field[1]=$fileCount too large for file count)');
+        return null;
+      }
+
+      final status = StorageStatus(
+        totalUsedBytes: totalBytes,
+        fileCount: fileCount,
+        freeBytes: 0,
+        statusFlags: 0,
+      );
+      Logger.debug('OmiDeviceConnection: $status');
+      return status;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error reading storage status: $e');
+      return null;
+    }
+  }
+
+  /// Send CMD_LIST_FILES (0x10) and wait for the file list notification response.
+  /// Response format: [count:1][ts1:4 BE][sz1:4 BE][ts2:4 BE][sz2:4 BE]...
+  /// Caller is responsible for sending STOP command beforehand and retries.
+  @override
+  Future<List<StorageFileInfo>> performListStorageFiles() async {
+    try {
+      final completer = Completer<List<StorageFileInfo>>();
+      StreamSubscription? sub;
+
+      final stream = transport.getCharacteristicStream(
+        storageDataStreamServiceUuid,
+        storageDataStreamCharacteristicUuid,
+      );
+
+      sub = stream.listen((value) {
+        if (completer.isCompleted) return;
+        if (value.isEmpty) return;
+
+        int count = value[0];
+        int expectedLen = 1 + count * 8;
+
+        // Empty file list
+        if (count == 0 && value.length == 1) {
+          completer.complete([]);
+          return;
+        }
+
+        // Validate this looks like a file list response (not a data packet or status byte)
+        if (value.length >= expectedLen && count > 0 && count <= 128) {
+          List<StorageFileInfo> files = [];
+          for (int i = 0; i < count; i++) {
+            int base = 1 + i * 8;
+            if (base + 8 > value.length) break;
+            int timestamp = (value[base] << 24) | (value[base + 1] << 16) | (value[base + 2] << 8) | value[base + 3];
+            int size = (value[base + 4] << 24) | (value[base + 5] << 16) | (value[base + 6] << 8) | value[base + 7];
+            files.add(StorageFileInfo(index: i, timestamp: timestamp, sizeBytes: size));
+          }
+          Logger.debug('OmiDeviceConnection: Listed ${files.length} storage files');
+          completer.complete(files);
+        }
+      });
+
+      // Send CMD_LIST_FILES
+      try {
+        await transport.writeCharacteristic(storageDataStreamServiceUuid, storageDataStreamCharacteristicUuid, [0x10]);
+
+        final result = await completer.future.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            Logger.debug('OmiDeviceConnection: listFiles timeout');
+            return <StorageFileInfo>[];
+          },
+        );
+        return result;
+      } finally {
+        await sub?.cancel();
+      }
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error listing storage files: $e');
+      return [];
+    }
+  }
+
+  @override
+  Future<bool> performDeleteStorageFile(int fileIndex) async {
+    try {
+      final completer = Completer<bool>();
+
+      final stream = transport.getCharacteristicStream(
+        storageDataStreamServiceUuid,
+        storageDataStreamCharacteristicUuid,
+      );
+
+      StreamSubscription? subscription;
+      Timer? timeout;
+
+      subscription = stream.listen((value) {
+        if (completer.isCompleted) return;
+        timeout?.cancel();
+        // Single-byte result: 0 = success
+        final result = value.isNotEmpty ? value[0] : 0xFF;
+        Logger.debug('OmiDeviceConnection: deleteStorageFile result=$result');
+        completer.complete(result == 0);
+      });
+
+      timeout = Timer(const Duration(seconds: 5), () {
+        if (!completer.isCompleted) {
+          Logger.debug('OmiDeviceConnection: deleteStorageFile timeout');
+          completer.complete(false);
+        }
+      });
+
+      // Send CMD_DELETE_FILE command
+      try {
+        await transport.writeCharacteristic(storageDataStreamServiceUuid, storageDataStreamCharacteristicUuid, [
+          0x12,
+          fileIndex & 0xFF,
+        ]);
+
+        final result = await completer.future;
+        return result;
+      } finally {
+        await subscription?.cancel();
+        timeout?.cancel();
+      }
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error deleting storage file: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> performStopStorageSync() async {
+    try {
+      await transport.writeCharacteristic(storageDataStreamServiceUuid, storageDataStreamCharacteristicUuid, [0x03]);
+      Logger.debug('OmiDeviceConnection: Sent STOP_SYNC command');
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error sending stop command: $e');
+      return false;
+    }
+  }
+
+  // --- Legacy storage protocol ---
 
   @override
   Future<StreamSubscription?> performGetBleStorageBytesListener({
     required void Function(List<int>) onStorageBytesReceived,
   }) async {
-    if (_storageService == null) {
-      logServiceNotFoundError('Storage Write', deviceId);
-      return null;
-    }
-
-    var storageDataStreamCharacteristic = getCharacteristic(_storageService!, storageDataStreamCharacteristicUuid);
-    if (storageDataStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Storage data stream', deviceId);
-      return null;
-    }
-
     try {
-      await storageDataStreamCharacteristic.setNotifyValue(true); // device could be disconnected here.
-    } catch (e, stackTrace) {
-      logSubscribeError('Storage data stream', deviceId, e, stackTrace);
+      final stream = transport.getCharacteristicStream(
+        storageDataStreamServiceUuid,
+        storageDataStreamCharacteristicUuid,
+      );
+
+      final subscription = stream.listen((value) {
+        if (value.isNotEmpty) onStorageBytesReceived(value);
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up storage listener: $e');
       return null;
     }
-
-    debugPrint('Subscribed to StorageBytes stream from Omi Device');
-    var listener = storageDataStreamCharacteristic.lastValueStream.listen((value) {
-      if (value.isNotEmpty) onStorageBytesReceived(value);
-    });
-
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
-
-    // await storageDataStreamCharacteristic.write([0x00,0x01]);
-
-    // This will cause a crash in OpenGlass devices
-    // due to a race with discoverServices() that triggers
-    // a bug in the device firmware.
-    if (Platform.isAndroid) await device.requestMtu(512);
-
-    return listener;
   }
 
   // level
@@ -403,247 +390,548 @@ class OmiDeviceConnection extends DeviceConnection {
   //   3 - play 500ms
   @override
   Future<bool> performPlayToSpeakerHaptic(int level) async {
-    if (_speakerService == null) {
-      logServiceNotFoundError('Speaker Write', deviceId);
+    try {
+      Logger.debug('About to play to speaker haptic');
+      await transport.writeCharacteristic(speakerDataStreamServiceUuid, speakerDataStreamCharacteristicUuid, [
+        level & 0xFF,
+      ]);
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error playing haptic: $e');
       return false;
     }
-
-    var speakerDataStreamCharacteristic = getCharacteristic(_speakerService!, speakerDataStreamCharacteristicUuid);
-    if (speakerDataStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Speaker data stream', deviceId);
-      return false;
-    }
-    debugPrint('About to play to speaker haptic');
-    await speakerDataStreamCharacteristic.write([level & 0xFF]);
-    return true;
   }
 
   @override
   Future<bool> performWriteToStorage(int numFile, int command, int offset) async {
-    if (_storageService == null) {
-      logServiceNotFoundError('Storage Write', deviceId);
+    try {
+      Logger.debug('About to write to storage bytes');
+      Logger.debug('about to send $numFile');
+      Logger.debug('about to send $command');
+      Logger.debug('about to send offset$offset');
+
+      var offsetBytes = [(offset >> 24) & 0xFF, (offset >> 16) & 0xFF, (offset >> 8) & 0xFF, offset & 0xFF];
+
+      await transport.writeCharacteristic(storageDataStreamServiceUuid, storageDataStreamCharacteristicUuid, [
+        command & 0xFF,
+        numFile & 0xFF,
+        offsetBytes[0],
+        offsetBytes[1],
+        offsetBytes[2],
+        offsetBytes[3],
+      ]);
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error writing to storage: $e');
       return false;
     }
-
-    var storageDataStreamCharacteristic = getCharacteristic(_storageService!, storageDataStreamCharacteristicUuid);
-    if (storageDataStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Storage data stream', deviceId);
-      return false;
-    }
-    debugPrint('About to write to storage bytes');
-    debugPrint('about to send $numFile');
-    debugPrint('about to send $command');
-    debugPrint('about to send offset$offset');
-    var offsetBytes = [
-      (offset >> 24) & 0xFF,
-      (offset >> 16) & 0xFF,
-      (offset >> 8) & 0xFF,
-      offset & 0xFF,
-    ];
-
-    await storageDataStreamCharacteristic
-        .write([command & 0xFF, numFile & 0xFF, offsetBytes[0], offsetBytes[1], offsetBytes[2], offsetBytes[3]]);
-    return true;
   }
-  // Future<List<int>> performGetStorageList();
 
   @override
   Future performCameraStartPhotoController() async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
-      return;
+    try {
+      // Capture photo once every 5s
+      await transport.writeCharacteristic(omiServiceUuid, imageCaptureControlCharacteristicUuid, [0x05]);
+      print('cameraStartPhotoController');
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error starting photo capture: $e');
     }
-
-    var imageCaptureControlCharacteristic = getCharacteristic(_omiService!, imageCaptureControlCharacteristicUuid);
-    if (imageCaptureControlCharacteristic == null) {
-      logCharacteristicNotFoundError('Image capture control', deviceId);
-      return;
-    }
-
-    // Capture photo once every 10s
-    await imageCaptureControlCharacteristic.write([0x0A]);
-
-    print('cameraStartPhotoController');
   }
 
   @override
   Future performCameraStopPhotoController() async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
-      return;
+    try {
+      await transport.writeCharacteristic(omiServiceUuid, imageCaptureControlCharacteristicUuid, [0x00]);
+      print('cameraStopPhotoController');
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error stopping photo capture: $e');
     }
+  }
 
-    var imageCaptureControlCharacteristic = getCharacteristic(_omiService!, imageCaptureControlCharacteristicUuid);
-    if (imageCaptureControlCharacteristic == null) {
-      logCharacteristicNotFoundError('Image capture control', deviceId);
-      return;
+  Future performCameraTakePhoto() async {
+    try {
+      // -1 tells the firmware to take a single photo
+      await transport.writeCharacteristic(omiServiceUuid, imageCaptureControlCharacteristicUuid, [-1]);
+      print('cameraTakePhoto');
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error taking photo: $e');
     }
-
-    await imageCaptureControlCharacteristic.write([0x00]);
-
-    print('cameraStopPhotoController');
   }
 
   @override
   Future<bool> performHasPhotoStreamingCharacteristic() async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
+    try {
+      // Try to read from the image data stream characteristic to see if it exists
+      await transport.readCharacteristic(omiServiceUuid, imageDataStreamCharacteristicUuid);
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Photo streaming characteristic not available: $e');
       return false;
     }
-    var imageCaptureControlCharacteristic = getCharacteristic(_omiService!, imageDataStreamCharacteristicUuid);
-    return imageCaptureControlCharacteristic != null;
   }
 
   Future<StreamSubscription?> _getBleImageBytesListener({
     required void Function(List<int>) onImageBytesReceived,
   }) async {
-    if (_omiService == null) {
-      logServiceNotFoundError('Omi', deviceId);
-      return null;
-    }
-
-    var imageStreamCharacteristic = getCharacteristic(_omiService!, imageDataStreamCharacteristicUuid);
-    if (imageStreamCharacteristic == null) {
-      logCharacteristicNotFoundError('Image data stream', deviceId);
-      return null;
-    }
-
     try {
-      await imageStreamCharacteristic.setNotifyValue(true); // device could be disconnected here.
-    } catch (e, stackTrace) {
-      logSubscribeError('Image data stream', deviceId, e, stackTrace);
+      final stream = transport.getCharacteristicStream(omiServiceUuid, imageDataStreamCharacteristicUuid);
+
+      Logger.debug('Subscribed to imageBytes stream from Omi Device');
+      final subscription = stream.listen((value) {
+        if (value.isNotEmpty) onImageBytesReceived(value);
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up image listener: $e');
       return null;
     }
-
-    debugPrint('Subscribed to imageBytes stream from Omi Device');
-    var listener = imageStreamCharacteristic.lastValueStream.listen((value) {
-      if (value.isNotEmpty) onImageBytesReceived(value);
-    });
-
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
-
-    // This will cause a crash in OpenGlass devices
-    // due to a race with discoverServices() that triggers
-    // a bug in the device firmware.
-    // if (Platform.isAndroid) await device.requestMtu(512);
-
-    return listener;
   }
 
   @override
   Future<StreamSubscription?> performGetImageListener({
-    required void Function(Uint8List base64JpgData) onImageReceived,
+    required void Function(OrientedImage orientedImage) onImageReceived,
   }) async {
     if (!await hasPhotoStreamingCharacteristic()) {
       return null;
     }
     print("OpenGlassDevice getImageListener called");
-    ImageBytesUtil imageBytesUtil = ImageBytesUtil();
+
+    var buffer = BytesBuilder();
+    var nextExpectedFrame = 0;
+    var isTransferring = false;
+    ImageOrientation? currentOrientation;
+
+    Version newFirmwareVersion = Version.parse("2.1.1");
+    Version deviceFirmwareVersion;
+    try {
+      deviceFirmwareVersion = Version.parse(device.firmwareRevision);
+    } catch (e) {
+      deviceFirmwareVersion = Version(0, 0, 0);
+    }
+
     var bleBytesStream = await _getBleImageBytesListener(
       onImageBytesReceived: (List<int> value) async {
-        if (value.isEmpty) return;
-        Uint8List data = Uint8List.fromList(value);
-        // print(data);
-        Uint8List? completedImage = imageBytesUtil.processChunk(data);
-        if (completedImage != null && completedImage.isNotEmpty) {
-          debugPrint('Completed image bytes length: ${completedImage.length}');
-          onImageReceived(completedImage);
+        if (value.length < 2) return;
+
+        Uint8List chunk = Uint8List.fromList(value);
+        int frameIndex = chunk[0] | (chunk[1] << 8);
+
+        // End of image marker 0xFFFF
+        if (frameIndex == 0xFFFF) {
+          if (isTransferring) {
+            final imageBytes = buffer.toBytes();
+            if (imageBytes.isNotEmpty) {
+              Logger.debug('Completed image bytes length: ${imageBytes.length}');
+              try {
+                onImageReceived(
+                  OrientedImage(
+                    imageBytes: imageBytes,
+                    orientation: currentOrientation ?? ImageOrientation.orientation0,
+                  ),
+                );
+              } catch (e) {
+                Logger.debug('Error processing image: $e');
+              }
+            }
+          }
+          // Reset for next image
+          buffer.clear();
+          isTransferring = false;
+          nextExpectedFrame = 0;
+          currentOrientation = null;
+          return;
+        }
+
+        // If we get frame 0, it's the start of a new image. Reset everything.
+        if (frameIndex == 0) {
+          buffer.clear();
+          isTransferring = true;
+          nextExpectedFrame = 0;
+          currentOrientation = null;
+        }
+
+        // If we are not in a transfer state, ignore the packet unless it's frame 0.
+        if (!isTransferring) {
+          Logger.debug("Ignoring packet with frame $frameIndex, waiting for frame 0 to start transfer.");
+          return;
+        }
+
+        // Check if the frame is the one we expect.
+        if (frameIndex == nextExpectedFrame) {
+          if (frameIndex == 0) {
+            if (deviceFirmwareVersion >= newFirmwareVersion) {
+              // New firmware: parse orientation from packet
+              if (chunk.length > 2) {
+                currentOrientation = ImageOrientation.fromValue(chunk[2]);
+                if (chunk.length > 3) {
+                  buffer.add(chunk.sublist(3));
+                }
+              } else {
+                // Malformed packet, default orientation
+                currentOrientation = ImageOrientation.orientation0;
+              }
+            } else {
+              // Old firmware: default to 180 degrees and treat whole chunk as data
+              currentOrientation = ImageOrientation.orientation180;
+              if (chunk.length > 2) {
+                buffer.add(chunk.sublist(2));
+              }
+            }
+          } else {
+            if (chunk.length > 2) {
+              buffer.add(chunk.sublist(2));
+            }
+          }
+          nextExpectedFrame++;
+        } else {
+          // Out of order frame. The image is now corrupt.
+          // We should discard everything and wait for the next frame 0.
+          Logger.debug('Frame out of order. Expected $nextExpectedFrame, got $frameIndex. Discarding image.');
+          buffer.clear();
+          isTransferring = false;
+          nextExpectedFrame = 0;
+          currentOrientation = null;
+        }
+
+        // Safety break for oversized buffer
+        if (buffer.length > 200 * 1024) {
+          Logger.debug("Buffer size exceeded 200KB without a complete image. Resetting.");
+          buffer.clear();
+          isTransferring = false;
+          nextExpectedFrame = 0;
+          currentOrientation = null;
         }
       },
     );
     bleBytesStream?.onDone(() {
-      debugPrint('Image listener done');
+      Logger.debug('Image listener done');
       cameraStopPhotoController();
     });
     return bleBytesStream;
   }
 
   @override
-  Future<StreamSubscription<List<int>>?> performGetAccelListener({
-    void Function(int)? onAccelChange,
-  }) async {
-    if (_accelService == null) {
-      logServiceNotFoundError('Accelerometer', deviceId);
-      return null;
-    }
-
-    var accelCharacteristic = getCharacteristic(_accelService!, accelDataStreamCharacteristicUuid);
-    if (accelCharacteristic == null) {
-      logCharacteristicNotFoundError('Accelerometer', deviceId);
-      return null;
-    }
-
-    var currValue = await accelCharacteristic.read();
-    if (currValue.isNotEmpty) {
-      debugPrint('Accelerometer level: ${currValue[0]}');
-      onAccelChange!(currValue[0]);
-    }
-
+  Future<StreamSubscription<List<int>>?> performGetAccelListener({void Function(int)? onAccelChange}) async {
     try {
-      await accelCharacteristic.setNotifyValue(true);
-    } catch (e, stackTrace) {
-      logSubscribeError('Accelerometer level', deviceId, e, stackTrace);
-      return null;
-    }
+      final stream = transport.getCharacteristicStream(accelDataStreamServiceUuid, accelDataStreamCharacteristicUuid);
 
-    var listener = accelCharacteristic.lastValueStream.listen((value) {
-      // debugPrint('Battery level listener: $value');
+      final subscription = stream.listen((value) async {
+        if (value.length > 4) {
+          //for some reason, the very first reading is four bytes
 
-      if (value.length > 4) {
-        //for some reason, the very first reading is four bytes
+          if (value.isNotEmpty) {
+            List<double> accelerometerData = [];
+            onAccelChange?.call(value[0]);
 
-        if (value.isNotEmpty) {
-          List<double> accelerometerData = [];
-          onAccelChange!(value[0]);
+            for (int i = 0; i < 6; i++) {
+              int baseIndex = i * 8;
+              var result = ((value[baseIndex] |
+                          (value[baseIndex + 1] << 8) |
+                          (value[baseIndex + 2] << 16) |
+                          (value[baseIndex + 3] << 24)) &
+                      0xFFFFFFFF)
+                  .toSigned(32);
+              var temp = ((value[baseIndex + 4] |
+                          (value[baseIndex + 5] << 8) |
+                          (value[baseIndex + 6] << 16) |
+                          (value[baseIndex + 7] << 24)) &
+                      0xFFFFFFFF)
+                  .toSigned(32);
+              double axisValue = result + (temp / 1000000);
+              accelerometerData.add(axisValue);
+            }
+            Logger.debug('Accelerometer x direction: ${accelerometerData[0]}');
+            Logger.debug('Gyroscope x direction: ${accelerometerData[3]}\n');
 
-          for (int i = 0; i < 6; i++) {
-            int baseIndex = i * 8;
-            var result = ((value[baseIndex] |
-                        (value[baseIndex + 1] << 8) |
-                        (value[baseIndex + 2] << 16) |
-                        (value[baseIndex + 3] << 24)) &
-                    0xFFFFFFFF as int)
-                .toSigned(32);
-            var temp = ((value[baseIndex + 4] |
-                        (value[baseIndex + 5] << 8) |
-                        (value[baseIndex + 6] << 16) |
-                        (value[baseIndex + 7] << 24)) &
-                    0xFFFFFFFF as int)
-                .toSigned(32);
-            double axisValue = result + (temp / 1000000);
-            accelerometerData.add(axisValue);
-          }
-          debugPrint('Accelerometer x direction: ${accelerometerData[0]}');
-          debugPrint('Gyroscope x direction: ${accelerometerData[3]}\n');
+            Logger.debug('Accelerometer y direction: ${accelerometerData[1]}');
+            Logger.debug('Gyroscope y direction: ${accelerometerData[4]}\n');
 
-          debugPrint('Accelerometer y direction: ${accelerometerData[1]}');
-          debugPrint('Gyroscope y direction: ${accelerometerData[4]}\n');
-
-          debugPrint('Accelerometer z direction: ${accelerometerData[2]}');
-          debugPrint('Gyroscope z direction: ${accelerometerData[5]}\n');
-          //simple threshold fall calcaultor
-          var fall_number =
-              sqrt(pow(accelerometerData[0], 2) + pow(accelerometerData[1], 2) + pow(accelerometerData[2], 2));
-          if (fall_number > 30.0) {
-            AwesomeNotifications().createNotification(
-              content: NotificationContent(
-                id: 6,
-                channelKey: 'channel',
-                actionType: ActionType.Default,
-                title: 'ouch',
-                body: 'did you fall?',
-                wakeUpScreen: true,
-              ),
+            Logger.debug('Accelerometer z direction: ${accelerometerData[2]}');
+            Logger.debug('Gyroscope z direction: ${accelerometerData[5]}\n');
+            //simple threshold fall calcaultor
+            var fall_number = sqrt(
+              pow(accelerometerData[0], 2) + pow(accelerometerData[1], 2) + pow(accelerometerData[2], 2),
             );
+            if (fall_number > 30.0) {
+              await NotificationUtil.triggerFallNotification();
+            }
           }
         }
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up accelerometer listener: $e');
+      return null;
+    }
+  }
+
+  @override
+  Future<void> performSetLedDimRatio(int ratio) async {
+    try {
+      await transport.writeCharacteristic(settingsServiceUuid, settingsDimRatioCharacteristicUuid, [
+        ratio.clamp(0, 100),
+      ]);
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting LED dim ratio: $e');
+    }
+  }
+
+  @override
+  Future<int?> performGetLedDimRatio() async {
+    try {
+      final value = await transport.readCharacteristic(settingsServiceUuid, settingsDimRatioCharacteristicUuid);
+      if (value.isNotEmpty) {
+        return value[0];
       }
-    });
+      return null;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error getting LED dim ratio: $e');
+      return null;
+    }
+  }
 
-    final device = bleDevice;
-    device.cancelWhenDisconnected(listener);
+  @override
+  Future<int> performGetFeatures() async {
+    try {
+      final value = await transport.readCharacteristic(featuresServiceUuid, featuresCharacteristicUuid);
+      if (value.length >= 4) {
+        return ByteData.view(Uint8List.fromList(value).buffer).getUint32(0, Endian.little);
+      }
+      return 0;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error getting features: $e');
+      return 0;
+    }
+  }
 
-    return listener;
+  @override
+  Future<void> performSetMicGain(int gain) async {
+    try {
+      await transport.writeCharacteristic(settingsServiceUuid, settingsMicGainCharacteristicUuid, [gain.clamp(0, 100)]);
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting mic gain: $e');
+    }
+  }
+
+  @override
+  Future<int?> performGetMicGain() async {
+    try {
+      final value = await transport.readCharacteristic(settingsServiceUuid, settingsMicGainCharacteristicUuid);
+      if (value.isNotEmpty) {
+        return value[0];
+      }
+      return null;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error getting mic gain: $e');
+      return null;
+    }
+  }
+
+  /// Get device information from Omi device
+  Future<Map<String, String>> getDeviceInfo() async {
+    Map<String, String> deviceInfo = {};
+
+    try {
+      // Read model number
+      try {
+        final modelValue = await transport.readCharacteristic(
+          deviceInformationServiceUuid,
+          modelNumberCharacteristicUuid,
+        );
+        if (modelValue.isNotEmpty) {
+          deviceInfo['modelNumber'] = String.fromCharCodes(modelValue);
+        }
+      } catch (e) {
+        Logger.debug('OmiDeviceConnection: Error reading model number: $e');
+      }
+
+      // Read firmware revision
+      try {
+        final firmwareValue = await transport.readCharacteristic(
+          deviceInformationServiceUuid,
+          firmwareRevisionCharacteristicUuid,
+        );
+        if (firmwareValue.isNotEmpty) {
+          deviceInfo['firmwareRevision'] = String.fromCharCodes(firmwareValue);
+        }
+      } catch (e) {
+        Logger.debug('OmiDeviceConnection: Error reading firmware revision: $e');
+      }
+
+      // Read hardware revision
+      try {
+        final hardwareValue = await transport.readCharacteristic(
+          deviceInformationServiceUuid,
+          hardwareRevisionCharacteristicUuid,
+        );
+        if (hardwareValue.isNotEmpty) {
+          deviceInfo['hardwareRevision'] = String.fromCharCodes(hardwareValue);
+        }
+      } catch (e) {
+        Logger.debug('OmiDeviceConnection: Error reading hardware revision: $e');
+      }
+
+      // Read manufacturer name
+      try {
+        final manufacturerValue = await transport.readCharacteristic(
+          deviceInformationServiceUuid,
+          manufacturerNameCharacteristicUuid,
+        );
+        if (manufacturerValue.isNotEmpty) {
+          deviceInfo['manufacturerName'] = String.fromCharCodes(manufacturerValue);
+        }
+      } catch (e) {
+        Logger.debug('OmiDeviceConnection: Error reading manufacturer name: $e');
+      }
+
+      // Check if device has image streaming capability (for OpenGlass/OmiGlass detection)
+      try {
+        final chars = await transport.readCharacteristic(omiServiceUuid, imageDataStreamCharacteristicUuid);
+        if (chars.isNotEmpty) {
+          deviceInfo['hasImageStream'] = 'true';
+        }
+      } catch (e) {
+        deviceInfo['hasImageStream'] = 'false';
+      }
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error getting device info: $e');
+    }
+
+    // Set defaults if values are empty
+    deviceInfo['modelNumber'] ??= 'Omi Device';
+    deviceInfo['firmwareRevision'] ??= '1.0.2';
+    deviceInfo['hardwareRevision'] ??= 'Seeed Xiao BLE Sense';
+    deviceInfo['manufacturerName'] ??= 'Based Hardware';
+    deviceInfo['hasImageStream'] ??= 'false';
+
+    return deviceInfo;
+  }
+
+  @override
+  Future<bool> performIsWifiSyncSupported() async {
+    final features = await getFeatures();
+    return (features & OmiFeatures.wifi) != 0;
+  }
+
+  @override
+  Future<WifiSyncSetupResult> performSetupWifiSync(String ssid, String password) async {
+    try {
+      // Validate SSID length (1-32 characters)
+      if (ssid.isEmpty || ssid.length > 32) {
+        debugPrint('OmiDeviceConnection: Invalid SSID length: ${ssid.length}');
+        return WifiSyncSetupResult.failure(
+          WifiSyncErrorCode.ssidLengthInvalid,
+          customMessage: 'SSID must be 1-32 characters',
+        );
+      }
+
+      // Validate password length (8-63 characters for WPA2)
+      if (password.isEmpty || password.length < 8 || password.length > 63) {
+        debugPrint('OmiDeviceConnection: Invalid password length: ${password.length}');
+        return WifiSyncSetupResult.failure(
+          WifiSyncErrorCode.passwordLengthInvalid,
+          customMessage: 'Password must be 8-63 characters',
+        );
+      }
+
+      final List<int> command = [];
+
+      command.add(0x01);
+
+      // SSID
+      final ssidBytes = ssid.codeUnits;
+      command.add(ssidBytes.length);
+      command.addAll(ssidBytes);
+
+      // Password
+      final passwordBytes = password.codeUnits;
+      command.add(passwordBytes.length);
+      command.addAll(passwordBytes);
+
+      // Set up listener for the response before sending the command
+      final completer = Completer<WifiSyncSetupResult>();
+      StreamSubscription? responseSubscription;
+
+      try {
+        final stream = transport.getCharacteristicStream(storageDataStreamServiceUuid, storageWifiCharacteristicUuid);
+
+        responseSubscription = stream.listen((value) {
+          if (value.isNotEmpty && !completer.isCompleted) {
+            final responseCode = value[0];
+            final errorCode = WifiSyncErrorCode.fromCode(responseCode);
+            if (errorCode.isSuccess) {
+              completer.complete(WifiSyncSetupResult.success());
+            } else {
+              completer.complete(WifiSyncSetupResult.failure(errorCode));
+            }
+          }
+        });
+
+        await Future.delayed(const Duration(milliseconds: 100));
+
+        // Send the setup command
+        await transport.writeCharacteristic(storageDataStreamServiceUuid, storageWifiCharacteristicUuid, command);
+
+        // Wait for response with timeout
+        final result = await completer.future.timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => WifiSyncSetupResult.timeout(),
+        );
+
+        return result;
+      } finally {
+        await responseSubscription?.cancel();
+      }
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up WiFi sync: $e');
+      return WifiSyncSetupResult.connectionFailed();
+    }
+  }
+
+  @override
+  Future<bool> performStartWifiSync() async {
+    try {
+      // Send WIFI_START command (0x02)
+      await transport.writeCharacteristic(storageDataStreamServiceUuid, storageWifiCharacteristicUuid, [0x02]);
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error starting WiFi sync: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> performStopWifiSync() async {
+    try {
+      // Send WIFI_SHUTDOWN command (0x03)
+      await transport.writeCharacteristic(storageDataStreamServiceUuid, storageWifiCharacteristicUuid, [0x03]);
+      return true;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error stopping WiFi sync: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<StreamSubscription?> performGetWifiSyncStatusListener({
+    required void Function(int status) onStatusReceived,
+  }) async {
+    try {
+      final stream = transport.getCharacteristicStream(storageDataStreamServiceUuid, storageWifiCharacteristicUuid);
+
+      final subscription = stream.listen((value) {
+        if (value.isNotEmpty) {
+          final status = value[0];
+          onStatusReceived(status);
+        }
+      });
+
+      return subscription;
+    } catch (e) {
+      Logger.debug('OmiDeviceConnection: Error setting up WiFi status listener: $e');
+      return null;
+    }
   }
 }

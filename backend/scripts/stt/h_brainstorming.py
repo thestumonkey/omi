@@ -31,7 +31,7 @@ def execute():
             timestamp_granularities=["segment"],
             response_format="verbose_json",
             language="en",
-            temperature=0.0
+            temperature=0.0,
         )
         segments = transcription.json()
         print(segments)
@@ -49,7 +49,7 @@ def execute_groq():
             model="whisper-large-v3",
             response_format="text",
             language="en",
-            temperature=0.0
+            temperature=0.0,
         )
         # print(transcription)
         return transcription
@@ -77,7 +77,7 @@ def diarization(content: str):
         # model="gpt-4o",
         model="llama3-70b-8192",
         temperature=0,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
     )
     return response.choices[0].message.content
 
@@ -119,7 +119,7 @@ def fal_whisperx():
             'language': 'en',
             'chunk_level': 'segment',
             "num_speakers": None,
-            'version': '3'
+            'version': '3',
         },
     )
 
@@ -138,7 +138,7 @@ import torch
 torch.set_num_threads(1)
 
 model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad')
-(get_speech_timestamps, _, read_audio, _, _) = utils
+get_speech_timestamps, _, read_audio, _, _ = utils
 
 
 @timeit

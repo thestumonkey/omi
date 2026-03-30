@@ -9,21 +9,24 @@ from scripts.rag._shared import *
 from database.auth import get_user_name
 from database._client import get_users_uid
 from models.memories import Memory, MemoryDB
+from utils.log_sanitizer import sanitize_pii
 
 firebase_admin.initialize_app()
 
 
 def get_memories_from_conversations(
-        conversations: List[dict], uid: str, user_name: str, existing_memories: List[Memory]
+    conversations: List[dict], uid: str, user_name: str, existing_memories: List[Memory]
 ) -> List[Tuple[str, List[Memory]]]:
-    print('get_memories_from_conversations', len(conversations), user_name, len(existing_memories))
+    print('get_memories_from_conversations', len(conversations), sanitize_pii(user_name), len(existing_memories))
 
     # learning_facts = list(filter(lambda x: x.category == 'learnings', existing_facts))
     all_memories = {}
 
     def execute(conversation):
         data = Conversation(**conversation)
-        new_memories = new_memories_extractor(uid, data.transcript_segments, user_name, Memory.get_memories_as_str(existing_memories))
+        new_memories = new_memories_extractor(
+            uid, data.transcript_segments, user_name, Memory.get_memories_as_str(existing_memories)
+        )
         # new_learnings = new_learnings_extractor(
         #     uid, data.transcript_segments, user_name,
         #     Fact.get_facts_as_str(learning_facts)
@@ -64,7 +67,7 @@ def execute_for_user(uid: str):
     memories = []
     chunk_size = 10
     for i in range(0, len(conversations), chunk_size):
-        new_memories = get_memories_from_conversations(conversations[i:i + chunk_size], uid, user_name, memories)
+        new_memories = get_memories_from_conversations(conversations[i : i + chunk_size], uid, user_name, memories)
         memories += new_memories
 
 
@@ -79,7 +82,7 @@ def script_migrate_users():
         threads.append(t)
 
     chunk_size = 1
-    chunks = [threads[i:i + chunk_size] for i in range(0, len(threads), chunk_size)]
+    chunks = [threads[i : i + chunk_size] for i in range(0, len(threads), chunk_size)]
     for i, chunk in enumerate(chunks):
         # print('STARTING CHUNK', i + 1)
         [t.start() for t in chunk]
@@ -102,6 +105,7 @@ def migration_fact_scoring_for_user(uid: str):
         memories_db.save_memories(uid, [fact.dict() for fact in facts])
         offset += len(facts)
 
+
 def script_migrate_fact_scoring_users(uids: [str]):
     threads = []
     for uid in uids:
@@ -109,17 +113,18 @@ def script_migrate_fact_scoring_users(uids: [str]):
         threads.append(t)
 
     chunk_size = 1
-    chunks = [threads[i:i + chunk_size] for i in range(0, len(threads), chunk_size)]
+    chunks = [threads[i : i + chunk_size] for i in range(0, len(threads), chunk_size)]
     for i, chunk in enumerate(chunks):
         [t.start() for t in chunk]
         [t.join() for t in chunk]
+
 
 def script_migrate_fact_scoring():
     uids = get_users_uid()
     print(f"script_migrate_fact_scoring {len(uids)} users")
     chunk_size = 10
     for i in range(0, len(uids), chunk_size):
-        script_migrate_fact_scoring_users(uids[i: i + chunk_size])
+        script_migrate_fact_scoring_users(uids[i : i + chunk_size])
         print(f"[progress] migrating {i+1}/{len(uids)}...")
 
 

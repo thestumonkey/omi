@@ -1,21 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/env/env.dart';
-import 'package:http/http.dart' as http;
-import 'package:path/path.dart';
+import 'package:omi/utils/logger.dart';
 
 Future<bool> userHasSpeakerProfile() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v3/speech-profile',
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v3/speech-profile', headers: {}, method: 'GET', body: '');
   if (response == null) return true;
-  debugPrint('userHasSpeakerProfile: ${response.body}');
+  Logger.debug('userHasSpeakerProfile: ${response.body}');
   if (response.statusCode == 200) {
     return jsonDecode(response.body)['has_profile'] ?? false;
   }
@@ -23,39 +16,30 @@ Future<bool> userHasSpeakerProfile() async {
 }
 
 Future<String?> getUserSpeechProfile() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v4/speech-profile',
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v4/speech-profile', headers: {}, method: 'GET', body: '');
   if (response == null) return null;
-  debugPrint('userHasSpeakerProfile: ${response.body}');
+  Logger.debug('userHasSpeakerProfile: ${response.body}');
   if (response.statusCode == 200) return jsonDecode(response.body)['url'];
   return null;
 }
 
 Future<bool> uploadProfile(File file) async {
-  var request = http.MultipartRequest(
-    'POST',
-    Uri.parse('${Env.apiBaseUrl}v3/upload-audio'),
-  );
-  request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
-  request.headers.addAll({'Authorization': await getAuthHeader()});
-
   try {
-    var streamedResponse = await request.send();
-    var response = await http.Response.fromStream(streamedResponse);
+    var response = await makeMultipartApiCall(
+      url: '${Env.apiBaseUrl}v3/upload-audio',
+      files: [file],
+      fileFieldName: 'file',
+    );
 
     if (response.statusCode == 200) {
-      debugPrint('uploadProfile Response body: ${jsonDecode(response.body)}');
+      Logger.debug('uploadProfile Response body: ${jsonDecode(response.body)}');
       return true;
     } else {
-      debugPrint('Failed to upload sample. Status code: ${response.statusCode}');
-      throw Exception('Failed to upload sample. Status code: ${response.statusCode}');
+      Logger.debug('Failed to upload sample. Status code: ${response.statusCode} body: ${response.body}');
+      throw Exception('Failed to upload sample (${response.statusCode}): ${response.body}');
     }
   } catch (e) {
-    debugPrint('An error occurred uploadSample: $e');
+    Logger.debug('An error occurred uploadSample: $e');
     throw Exception('An error occurred uploadSample: $e');
   }
 }
@@ -68,7 +52,7 @@ Future<List<String>> getExpandedProfileSamples() async {
     body: '',
   );
   if (response == null) return [];
-  debugPrint('getExpandedProfileSamples: ${response.body}');
+  Logger.debug('getExpandedProfileSamples: ${response.body}');
   if (response.statusCode == 200) {
     var data = jsonDecode(response.body);
     if (data != null) {
@@ -78,11 +62,7 @@ Future<List<String>> getExpandedProfileSamples() async {
   return [];
 }
 
-Future<bool> deleteProfileSample(
-  String conversationId,
-  int segmentIdx, {
-  String? personId,
-}) async {
+Future<bool> deleteProfileSample(String conversationId, int segmentIdx, {String? personId}) async {
   var response = await makeApiCall(
     url:
         '${Env.apiBaseUrl}v3/speech-profile/expand?memory_id=$conversationId&segment_idx=$segmentIdx&person_id=$personId',
@@ -91,7 +71,7 @@ Future<bool> deleteProfileSample(
     body: '',
   );
   if (response == null) return false;
-  debugPrint('deleteProfileSample: ${response.body}');
+  Logger.debug('deleteProfileSample: ${response.body}');
   if (response.statusCode == 200) return true;
   return false;
 }

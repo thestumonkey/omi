@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/schema/memory.dart';
 
 class CategoryChip extends StatelessWidget {
@@ -21,33 +22,39 @@ class CategoryChip extends StatelessWidget {
 
   Color _getCategoryColor() {
     switch (category) {
-      case MemoryCategory.interesting:
-        return Colors.blue;
       case MemoryCategory.system:
-        return Colors.grey;
+        return Colors.blue;
+      case MemoryCategory.interesting:
+        return Colors.amber;
+      case MemoryCategory.manual:
+        return Colors.purple;
     }
   }
 
   IconData _getCategoryIcon() {
     switch (category) {
-      case MemoryCategory.interesting:
-        return Icons.star_outline;
       case MemoryCategory.system:
-        return Icons.settings_outlined;
+        return Icons.person_outlined;
+      case MemoryCategory.interesting:
+        return Icons.lightbulb_outlined;
+      case MemoryCategory.manual:
+        return Icons.edit_outlined;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final categoryName = category.toString().split('.').last;
     // Use shorter display names for categories
     String displayName;
     switch (category) {
-      case MemoryCategory.interesting:
-        displayName = "Interesting";
-        break;
       case MemoryCategory.system:
-        displayName = "System";
+        displayName = "About You";
+        break;
+      case MemoryCategory.interesting:
+        displayName = "Insights";
+        break;
+      case MemoryCategory.manual:
+        displayName = "Manual";
         break;
     }
 
@@ -60,7 +67,9 @@ class CategoryChip extends StatelessWidget {
       height: 26,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
       decoration: BoxDecoration(
-        color: isSelected ? (onTap != null ? categoryColor : categoryColor.withOpacity(0.15)) : Colors.grey.shade800.withOpacity(0.6),
+        color: isSelected
+            ? (onTap != null ? categoryColor : categoryColor.withOpacity(0.15))
+            : Color(0xFF35343B).withOpacity(0.6),
         borderRadius: BorderRadius.circular(13),
         border: isSelected && onTap == null ? Border.all(color: categoryColor, width: 1) : null,
       ),
@@ -68,11 +77,7 @@ class CategoryChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (showIcon) ...[
-            Icon(
-              categoryIcon,
-              size: 14,
-              color: isSelected && onTap != null ? Colors.white : categoryColor,
-            ),
+            Icon(categoryIcon, size: 14, color: isSelected && onTap != null ? Colors.white : categoryColor),
             const SizedBox(width: 4),
           ],
           if (showCheckmark && isSelected) ...[
@@ -92,15 +97,9 @@ class CategoryChip extends StatelessWidget {
     );
 
     if (onTap != null) {
-      return GestureDetector(
-        onTap: onTap,
-        child: chip,
-      );
+      return GestureDetector(onTap: onTap, child: chip);
     }
 
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: chip,
-    );
+    return Align(alignment: Alignment.centerLeft, child: chip);
   }
 }

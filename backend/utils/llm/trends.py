@@ -1,10 +1,23 @@
 from typing import List
 from pydantic import BaseModel, Field
 
+import database.users as users_db
+from database.auth import get_user_name
 from models.conversation import Conversation
-from models.trend import TrendEnum, ceo_options, company_options, software_product_options, hardware_product_options, \
-    ai_product_options, TrendType
+from models.other import Person
+from models.trend import (
+    TrendEnum,
+    ceo_options,
+    company_options,
+    software_product_options,
+    hardware_product_options,
+    ai_product_options,
+    TrendType,
+)
 from utils.llm.clients import llm_mini
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Item(BaseModel):
@@ -17,8 +30,15 @@ class ExpectedOutput(BaseModel):
     items: List[Item] = Field(default=[], description="List of items.")
 
 
-def trends_extractor(memory: Conversation) -> List[Item]:
-    transcript = memory.get_transcript(False)
+def trends_extractor(uid: str, memory: Conversation) -> List[Item]:
+    person_ids = memory.get_person_ids()
+    people = []
+    if person_ids:
+        people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
+        people = [Person(**p) for p in people_data]
+
+    user_name = get_user_name(uid, use_default=False)
+    transcript = memory.get_transcript(False, people=people, user_name=user_name)
     if len(transcript) == 0:
         return []
 
@@ -48,12 +68,20 @@ def trends_extractor(memory: Conversation) -> List[Item]:
         response: ExpectedOutput = with_parser.invoke(prompt)
         filtered = []
         for item in response.items:
-            if item.topic not in [e for e in (
-                    ceo_options + company_options + software_product_options + hardware_product_options + ai_product_options)]:
+            if item.topic not in [
+                e
+                for e in (
+                    ceo_options
+                    + company_options
+                    + software_product_options
+                    + hardware_product_options
+                    + ai_product_options
+                )
+            ]:
                 continue
             filtered.append(item)
         return filtered
 
     except Exception as e:
-        print(f'Error determining memory discard: {e}')
+        logger.error(f'Error determining memory discard: {e}')
         return []

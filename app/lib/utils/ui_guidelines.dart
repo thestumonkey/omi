@@ -4,44 +4,22 @@ import 'package:flutter/material.dart';
 /// Use this class for reference when creating new UI components
 class AppStyles {
   // Text Styles
-  static const TextStyle title = TextStyle(
-    fontSize: 18,
-    fontWeight: FontWeight.w600,
-    color: Colors.white,
-  );
+  static const TextStyle title = TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white);
 
-  static const TextStyle subtitle = TextStyle(
-    fontSize: 16,
-    fontWeight: FontWeight.w500,
-    color: Colors.white,
-  );
+  static const TextStyle subtitle = TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: Colors.white);
 
-  static const TextStyle body = TextStyle(
-    fontSize: 15,
-    height: 1.4,
-    color: Colors.white,
-  );
+  static const TextStyle body = TextStyle(fontSize: 15, height: 1.4, color: Colors.white);
 
-  static const TextStyle caption = TextStyle(
-    fontSize: 14,
-    color: Colors.white70,
-  );
+  static const TextStyle caption = TextStyle(fontSize: 14, color: Colors.white70);
 
-  static const TextStyle small = TextStyle(
-    fontSize: 12,
-    color: Colors.white70,
-  );
+  static const TextStyle small = TextStyle(fontSize: 12, color: Colors.white70);
 
-  static const TextStyle label = TextStyle(
-    fontSize: 12,
-    fontWeight: FontWeight.w500,
-    color: Colors.white70,
-  );
+  static const TextStyle label = TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.white70);
 
   // Colors
   static final Color backgroundPrimary = Colors.black;
-  static final Color backgroundSecondary = Colors.grey.shade900;
-  static final Color backgroundTertiary = Colors.grey.shade800;
+  static final Color backgroundSecondary = const Color(0xFF1F1F25);
+  static final Color backgroundTertiary = Color(0xFF35343B);
 
   static const Color textPrimary = Colors.white;
   static final Color textSecondary = Colors.white.withOpacity(0.8);
@@ -69,23 +47,14 @@ class AppStyles {
   static final cardDecoration = BoxDecoration(
     color: backgroundSecondary,
     borderRadius: BorderRadius.circular(radiusLarge),
-    boxShadow: [
-      BoxShadow(
-        color: Colors.black.withOpacity(0.1),
-        blurRadius: 4,
-        offset: const Offset(0, 2),
-      ),
-    ],
+    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))],
   );
 
   static final inputDecoration = InputDecoration(
     filled: true,
     fillColor: backgroundTertiary,
     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-    border: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(radiusMedium),
-      borderSide: BorderSide.none,
-    ),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(radiusMedium), borderSide: BorderSide.none),
   );
 
   static final chipDecoration = BoxDecoration(

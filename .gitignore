@@ -1,5 +1,6 @@
 *.env
 .env*
+!.env.template
 *__pycache__/
 *venv/
 libraries/
@@ -7,10 +8,14 @@ myenv/
 venv/
 .DS_Store
 dump/
+/scripts/
 *.zip
 *.wav
 node_modules
 yarn.lock
+
+# Coordination (AI agent collab manifests)
+.coordination/
 
 # General
 .idea/
@@ -71,6 +76,12 @@ dist/
 **/macos/.generated/
 **/macos/Runner.xcworkspace
 **/macos/**/GeneratedPluginRegistrant.*
+**/macos/GoogleService-Info.plist
+**/macos/Runner/GoogleService-Info.plist
+**/macos/GoogleService-Info.plist
+**/macos/Config/*
+**/macos/Config/**/*
+**/macos/Runner/Configs/Custom.xcconfig
 
 # Linux specific
 **/linux/.dart_tool/
@@ -85,10 +96,12 @@ dist/
 # Web specific
 **/web/**/build/
 **/web/.dart_tool/
+web/app/public/firebase-messaging-sw.js
 
 # Miscellaneous
 !app/pubspec.lock
 !app/ios/Podfile.lock
+!mcp/uv.lock
 *.lock
 *.log
 *.swo
@@ -188,3 +201,21 @@ omiGlass/.expo
 # Logs
 /backend/logs/
 app/.fvm/
+app/android/.kotlin/
+.playwright-mcp/
+
+CLAUDE.md
+web/app/next-env.d.ts
+.claude/settings.local.json
+.claude/worktrees/
+LOCAL_DEV_SETUP.md
+app/macos/Config/Prod/GoogleService-Info.plist
+app/.metadata
+app/macos/DerivedData/
+app/macos/Runner/LocalDev.entitlements
+.env.local
+.backups/
+
+# Generated browser snapshots (contain PII)
+builds-snapshot.md
+*-snapshot.md

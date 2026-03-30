@@ -1,33 +1,41 @@
 import 'package:flutter/material.dart';
+
+import 'package:provider/provider.dart';
+
+import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/providers/memories_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/ui_guidelines.dart';
 
 class MemoryManagementSheet extends StatelessWidget {
   final MemoriesProvider provider;
 
-  const MemoryManagementSheet({
-    super.key,
-    required this.provider,
-  });
+  const MemoryManagementSheet({super.key, required this.provider});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppStyles.backgroundSecondary,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildHeader(context),
-            const Divider(height: 1, color: Colors.white10),
-            _buildMemoryCount(context),
-            _buildActionButtons(context),
-          ],
-        ),
-      ),
+    return Consumer<MemoriesProvider>(
+      builder: (context, provider, child) {
+        return Container(
+          decoration: BoxDecoration(
+            color: AppStyles.backgroundSecondary,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildHeader(context),
+                const Divider(height: 1, color: Colors.white10),
+                _buildFilterSection(context),
+                const Divider(height: 1, color: Colors.white10),
+                _buildMemoryCount(context),
+                _buildActionButtons(context),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -37,10 +45,7 @@ class MemoryManagementSheet extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          const Text(
-            'Memory Management',
-            style: AppStyles.subtitle,
-          ),
+          Text(context.l10n.memoryManagement, style: AppStyles.subtitle),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white70),
             onPressed: () => Navigator.pop(context),
@@ -48,6 +53,62 @@ class MemoryManagementSheet extends StatelessWidget {
             constraints: const BoxConstraints(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildFilterSection(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 16, 8),
+          child: Text(context.l10n.filterMemories, style: AppStyles.title),
+        ),
+        _buildFilterOption(context, context.l10n.filterAll, null),
+        _buildFilterOption(context, context.l10n.filterSystem, MemoryCategory.system),
+        _buildFilterOption(context, context.l10n.filterInteresting, MemoryCategory.interesting),
+        _buildFilterOption(context, context.l10n.filterManual, MemoryCategory.manual),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  Widget _buildFilterOption(BuildContext context, String label, MemoryCategory? category) {
+    // If category is null, it represents "All"
+    // For "All", it is selected if the set is empty.
+    final bool isSelected;
+    if (category == null) {
+      isSelected = provider.selectedCategories.isEmpty;
+    } else {
+      isSelected = provider.selectedCategories.contains(category);
+    }
+
+    return InkWell(
+      onTap: () {
+        if (category == null) {
+          provider.clearCategoryFilter();
+        } else {
+          provider.toggleCategoryFilter(category);
+        }
+        // Do NOT pop here to allow multiple selections
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        child: Row(
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? Colors.purpleAccent : Colors.white,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                fontSize: 16,
+              ),
+            ),
+            const Spacer(),
+            if (isSelected) const Icon(Icons.check, color: Colors.purpleAccent, size: 20),
+          ],
+        ),
       ),
     );
   }
@@ -63,14 +124,11 @@ class MemoryManagementSheet extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'You have $totalMemories total memories',
-            style: AppStyles.body,
-          ),
+          Text(context.l10n.totalMemoriesCount(totalMemories), style: AppStyles.body),
           const SizedBox(height: 8),
-          _buildMemoryCountRow(Icons.public, 'Public memories', publicMemories),
+          _buildMemoryCountRow(Icons.public, context.l10n.publicMemories, publicMemories),
           const SizedBox(height: 4),
-          _buildMemoryCountRow(Icons.lock_outline, 'Private memories', privateMemories),
+          _buildMemoryCountRow(Icons.lock_outline, context.l10n.privateMemories, privateMemories),
         ],
       ),
     );
@@ -81,17 +139,9 @@ class MemoryManagementSheet extends StatelessWidget {
       children: [
         Icon(icon, size: 16, color: Colors.white60),
         const SizedBox(width: 8),
-        Text(
-          label,
-          style: AppStyles.caption,
-        ),
+        Text(label, style: AppStyles.caption),
         const Spacer(),
-        Text(
-          count.toString(),
-          style: AppStyles.caption.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text(count.toString(), style: AppStyles.caption.copyWith(fontWeight: FontWeight.w600)),
       ],
     );
   }
@@ -104,7 +154,7 @@ class MemoryManagementSheet extends StatelessWidget {
         children: [
           _buildActionButton(
             context,
-            'Make All Memories Private',
+            context.l10n.makeAllPrivate,
             Icons.lock_outline,
             Colors.white.withOpacity(0.1),
             () => _makeAllMemoriesPrivate(context),
@@ -112,7 +162,7 @@ class MemoryManagementSheet extends StatelessWidget {
           const SizedBox(height: 12),
           _buildActionButton(
             context,
-            'Make All Memories Public',
+            context.l10n.makeAllPublic,
             Icons.public,
             Colors.white.withOpacity(0.1),
             () => _makeAllMemoriesPublic(context),
@@ -122,7 +172,7 @@ class MemoryManagementSheet extends StatelessWidget {
           const SizedBox(height: 24),
           _buildActionButton(
             context,
-            'Delete All Memories',
+            context.l10n.deleteAllMemories,
             Icons.delete_outline,
             Colors.red.withOpacity(0.1),
             () => _confirmDeleteAllMemories(context),
@@ -151,9 +201,7 @@ class MemoryManagementSheet extends StatelessWidget {
         foregroundColor: textColor,
         elevation: 0,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
       child: Row(
         children: [
@@ -161,11 +209,7 @@ class MemoryManagementSheet extends StatelessWidget {
           const SizedBox(width: 12),
           Text(
             text,
-            style: TextStyle(
-              color: textColor,
-              fontSize: 15,
-              fontWeight: FontWeight.w500,
-            ),
+            style: TextStyle(color: textColor, fontSize: 15, fontWeight: FontWeight.w500),
           ),
         ],
       ),
@@ -179,12 +223,10 @@ class MemoryManagementSheet extends StatelessWidget {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('All memories are now private'),
+          content: Text(context.l10n.allMemoriesPrivateResult),
           backgroundColor: AppStyles.backgroundTertiary,
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           duration: const Duration(seconds: 2),
         ),
@@ -199,12 +241,10 @@ class MemoryManagementSheet extends StatelessWidget {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('All memories are now public'),
+          content: Text(context.l10n.allMemoriesPublicResult),
           backgroundColor: AppStyles.backgroundTertiary,
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           duration: const Duration(seconds: 2),
         ),
@@ -216,13 +256,11 @@ class MemoryManagementSheet extends StatelessWidget {
     if (provider.memories.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('No memories to delete'),
+          content: Text(context.l10n.noMemoriesToDelete),
           backgroundColor: AppStyles.backgroundTertiary,
           duration: const Duration(seconds: 2),
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         ),
       );
@@ -234,21 +272,12 @@ class MemoryManagementSheet extends StatelessWidget {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: AppStyles.backgroundSecondary,
-        title: const Text(
-          'Clear Omi\'s Memory',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: Text(
-          'Are you sure you want to clear Omi\'s memory? This action cannot be undone.',
-          style: TextStyle(color: Colors.grey.shade300),
-        ),
+        title: Text(context.l10n.clearMemoryTitle, style: const TextStyle(color: Colors.white)),
+        content: Text(context.l10n.clearMemoryMessage, style: TextStyle(color: Colors.grey.shade300)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(
-              'Cancel',
-              style: TextStyle(color: Colors.grey.shade400),
-            ),
+            child: Text(context.l10n.cancel, style: TextStyle(color: Colors.grey.shade400)),
           ),
           TextButton(
             onPressed: () {
@@ -257,21 +286,16 @@ class MemoryManagementSheet extends StatelessWidget {
               Navigator.pop(context); // Close sheet
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: const Text('Omi\'s memory about you has been cleared'),
+                  content: Text(context.l10n.memoryClearedSuccess),
                   backgroundColor: AppStyles.backgroundTertiary,
                   duration: const Duration(seconds: 2),
                   behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                 ),
               );
             },
-            child: const Text(
-              'Clear Memory',
-              style: TextStyle(color: Colors.red),
-            ),
+            child: Text(context.l10n.clearMemoryButton, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),

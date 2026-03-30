@@ -4,7 +4,7 @@ The firmware for the OMI consumer version.
 
 ## Install
 
-Use https://docs.omi.me/docs/developer/firmware/Compile_firmware as the reference with these specifications.
+Use https://docs.omi.me/doc/developer/firmware/Compile_firmware as the reference with these specifications.
 
 Note: Open "firmware" folder in your code editor. Don't open the root omi folder (otherwise West wouldn't recognize the project and won't find your board)
 
@@ -20,51 +20,51 @@ Note: Open "firmware" folder in your code editor. Don't open the root omi folder
 
 ## WIP
 
-- Status: DEV
+- Status: running on production, missing some enhancement.
 
 - TODOs:
-  - [x] Testing new modules in the omi device (5/6)
+  - [x] Testing new modules in the omi device (7/9)
     - [x] Mic
     - [x] BLE
     - [x] Buttons
     - [x] LEDs
     - [ ] Wi-Fi, partially
     - [x] Motors
-    - [ ] Qspi flash
-    - [ ] Sd Card
+    - [x] Qspi flash
+    - [ ] IMU
+    - [x] Sd Card
   - [x] Add support for MCUBoot
     - [x] Add basic MCUBoot
     - [x] Test with the OMI app (iOS/Android)
     - [x] Test with an on-battery device (without charger)
   - [x] Initialize project, basic main loop with tests and devkit firmware as libs
   - [x] Streaming and transcribing
-    - [x] Mic (1/2)
+    - [x] Mic
       - [x] Capturing audio bytes
-      - [ ] Activating the 2nd mic
+      - [x] Activating the 2nd mic
     - [x] BLE
     - [x] Encoding (OPUS) and transmitting
     - [x] Fix the audio byte loss issue - currently about 30% https://github.com/BasedHardware/omi/pull/2217#issuecomment-2815077148 
       - [x] android, fixed by increasing the BLE connnection interval (7ms) - but tbh i don't think this is a good solution since our devkit work fine without tunning the connection interval. 100 rps, 50 bytes each is not a big deal! https://github.com/BasedHardware/omi/pull/2248#issuecomment-2820156590 
       - [x] iOS, they doesn't allow increasing the connnection interval(CI). the feasible CI on iOS is about 15ms.
-  - [x] LEDs (3/4)
+  - [x] LEDs
     - [x] Charging
     - [x] BLE connected
     - [x] BLE disconnected
-    - [ ] Fix the issue: The led during charging + device off ~ green only, does not provide correct feedback. charging still works.
+    - [x] Fix the issue: The led during charging + device off ~ green only, does not provide correct feedback. charging still works.
   - [x] Buttons
     - [x] Turn the device on/off(entering the deepsleep mode)
     - [x] Long press to chat with omi
     - [x] Test the deepsleep mode's battery draining.
-  - [ ] SD Card
-    - [ ] Store files
-    - [ ] Transfer via BLE
+  - [x] SD Card (2/3)
+    - [x] Store files
+    - [x] Transfer via BLE
     - [ ] Transfer via Wi-Fi
-  - [x] Haptic (2/3)
+  - [x] Haptic
     - [x] Haptic on turning on/off
     - [x] Long press to chat with omi
-    - [ ] Recheck the mass production version, since the current motor is not good https://github.com/BasedHardware/omi/pull/2281#issuecomment-2841105447
+    - [x] Recheck the mass production version, since the current motor is not good https://github.com/BasedHardware/omi/pull/2281#issuecomment-2841105447
   - [x] Battery (1/2)
     - [x] Percentage feedbacks via BLE
     - [ ] Fix in-accurated battery level, especially on charging
   - [x] Charger
-  - [ ] Update the OMI devkit firmware dependencies to be compatible with NCS 2.9.0

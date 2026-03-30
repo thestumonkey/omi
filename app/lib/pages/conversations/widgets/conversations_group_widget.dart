@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:omi/backend/schema/conversation.dart';
 
-import 'date_list_item.dart';
+import 'package:omi/backend/schema/conversation.dart';
 import 'conversation_list_item.dart';
+import 'date_list_item.dart';
 
 class ConversationsGroupWidget extends StatelessWidget {
   final List<ServerConversation> conversations;
@@ -19,7 +19,11 @@ class ConversationsGroupWidget extends StatelessWidget {
           DateListItem(date: date, isFirst: isFirst),
           ...conversations.map((conversation) {
             return ConversationListItem(
-                conversation: conversation, conversationIdx: conversations.indexOf(conversation), date: date);
+              key: ValueKey(conversation.id),
+              conversation: conversation,
+              conversationIdx: conversations.indexOf(conversation),
+              date: date,
+            );
           }),
           const SizedBox(height: 10),
         ],

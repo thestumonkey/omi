@@ -28,7 +28,7 @@ class AppReview {
       ratedAt: DateTime.parse(json['rated_at']).toLocal(),
       score: json['score'],
       review: json['review'],
-      username: json['user_name'] ?? '',
+      username: json['username'] ?? json['user_name'] ?? '',
       response: json['response'] ?? '',
       updatedAt: (json['updated_at'] == "" || json['updated_at'] == null)
           ? null
@@ -61,16 +61,10 @@ class AuthStep {
   String name;
   String url;
 
-  AuthStep({
-    required this.name,
-    required this.url,
-  });
+  AuthStep({required this.name, required this.url});
 
   factory AuthStep.fromJson(Map<String, dynamic> json) {
-    return AuthStep(
-      name: json['name'],
-      url: json['url'],
-    );
+    return AuthStep(name: json['name'], url: json['url']);
   }
 
   toJson() {
@@ -81,20 +75,63 @@ class AuthStep {
 class Action {
   String action;
 
-  Action({
-    required this.action,
-  });
+  Action({required this.action});
 
   factory Action.fromJson(Map<String, dynamic> json) {
-    return Action(
-      action: json['action'],
+    return Action(action: json['action']);
+  }
+
+  toJson() {
+    return {'action': action};
+  }
+}
+
+class ChatTool {
+  String name;
+  String description;
+  String endpoint;
+  String method;
+  bool authRequired;
+  String? statusMessage;
+  bool isMcp;
+
+  ChatTool({
+    required this.name,
+    required this.description,
+    required this.endpoint,
+    this.method = 'POST',
+    this.authRequired = true,
+    this.statusMessage,
+    this.isMcp = false,
+  });
+
+  factory ChatTool.fromJson(Map<String, dynamic> json) {
+    return ChatTool(
+      name: json['name'],
+      description: json['description'],
+      endpoint: json['endpoint'],
+      method: json['method'] ?? 'POST',
+      authRequired: json['auth_required'] ?? true,
+      statusMessage: json['status_message'],
+      isMcp: json['is_mcp'] ?? false,
     );
   }
 
   toJson() {
     return {
-      'action': action,
+      'name': name,
+      'description': description,
+      'endpoint': endpoint,
+      'method': method,
+      'auth_required': authRequired,
+      if (statusMessage != null) 'status_message': statusMessage,
+      'is_mcp': isMcp,
     };
+  }
+
+  static List<ChatTool> fromJsonList(List<dynamic>? jsonList) {
+    if (jsonList == null) return [];
+    return jsonList.map((e) => ChatTool.fromJson(e)).toList();
   }
 }
 
@@ -107,6 +144,8 @@ class ExternalIntegration {
   List<AuthStep> authSteps = [];
   String? appHomeUrl;
   List<Action>? actions;
+  String? chatToolsManifestUrl;
+  String? mcpServerUrl;
 
   ExternalIntegration({
     this.triggersOn,
@@ -117,6 +156,8 @@ class ExternalIntegration {
     this.authSteps = const [],
     this.appHomeUrl,
     this.actions,
+    this.chatToolsManifestUrl,
+    this.mcpServerUrl,
   });
 
   factory ExternalIntegration.fromJson(Map<String, dynamic> json) {
@@ -131,6 +172,8 @@ class ExternalIntegration {
           ? []
           : (json['auth_steps'] ?? []).map<AuthStep>((e) => AuthStep.fromJson(e)).toList(),
       actions: json['actions'] == null ? null : (json['actions'] ?? []).map<Action>((e) => Action.fromJson(e)).toList(),
+      chatToolsManifestUrl: json['chat_tools_manifest_url'],
+      mcpServerUrl: json['mcp_server_url'],
     );
   }
 
@@ -139,7 +182,9 @@ class ExternalIntegration {
       case 'memory_creation':
         return 'Conversation Creation';
       case 'transcript_processed':
-        return 'Transcript Segment Processed (every 30 seconds during conversation)';
+        return 'Transcript Segment Processed';
+      case 'audio_bytes':
+        return 'Audio Bytes Streamed';
       default:
         return 'Unknown';
     }
@@ -155,6 +200,8 @@ class ExternalIntegration {
       'setup_instructions_file_path': setupInstructionsFilePath,
       'auth_steps': authSteps.map((e) => e.toJson()).toList(),
       'actions': actions?.map((e) => e.toJson()).toList(),
+      'chat_tools_manifest_url': chatToolsManifestUrl,
+      if (mcpServerUrl != null) 'mcp_server_url': mcpServerUrl,
     };
   }
 }
@@ -163,16 +210,10 @@ class AppUsageHistory {
   DateTime date;
   int count;
 
-  AppUsageHistory({
-    required this.date,
-    required this.count,
-  });
+  AppUsageHistory({required this.date, required this.count});
 
   factory AppUsageHistory.fromJson(Map<String, dynamic> json) {
-    return AppUsageHistory(
-      date: DateTime.parse(json['date']).toLocal(),
-      count: json['count'],
-    );
+    return AppUsageHistory(date: DateTime.parse(json['date']).toLocal(), count: json['count']);
   }
 
   static List<AppUsageHistory> fromJsonList(List<dynamic> jsonList) {
@@ -180,10 +221,7 @@ class AppUsageHistory {
   }
 
   toJson() {
-    return {
-      'date': date.toUtc().toIso8601String(),
-      'count': count,
-    };
+    return {'date': date.toUtc().toIso8601String(), 'count': count};
   }
 }
 
@@ -224,6 +262,12 @@ class App {
   List<String> thumbnailUrls;
   String? username;
   bool? isPopular;
+  List<ChatTool>? chatTools;
+  DateTime? createdAt;
+  DateTime? updatedAt;
+  double? score; // Computed ranking score for sorting (temporary debug field)
+  bool official;
+  String? sourceCodeUrl;
 
   App({
     required this.id,
@@ -262,6 +306,12 @@ class App {
     this.connectedAccounts = const [],
     this.twitter,
     this.isPopular = false,
+    this.chatTools,
+    this.createdAt,
+    this.updatedAt,
+    this.score,
+    this.official = false,
+    this.sourceCodeUrl,
   });
 
   String getName() {
@@ -280,6 +330,36 @@ class App {
 
   bool worksExternally() => hasCapability('external_integration');
 
+  bool hasConversationsAccess() {
+    if (worksExternally()) {
+      final actions = externalIntegration?.actions;
+      if (actions != null) {
+        return actions.any((a) => a.action == 'create_conversation' || a.action == 'read_conversations');
+      }
+    }
+    return false;
+  }
+
+  bool hasMemoriesAccess() {
+    if (worksExternally()) {
+      final actions = externalIntegration?.actions;
+      if (actions != null) {
+        return actions.any((a) => a.action == 'create_facts' || a.action == 'read_memories');
+      }
+    }
+    return false;
+  }
+
+  bool hasTasksAccess() {
+    if (worksExternally()) {
+      final actions = externalIntegration?.actions;
+      if (actions != null) {
+        return actions.any((a) => a.action == 'read_tasks');
+      }
+    }
+    return false;
+  }
+
   factory App.fromJson(Map<String, dynamic> json) {
     return App(
       category: json['category'] ?? 'other',
@@ -294,8 +374,9 @@ class App {
       image: json['image'],
       chatPrompt: json['chat_prompt'],
       conversationPrompt: json['memory_prompt'],
-      externalIntegration:
-          json['external_integration'] != null ? ExternalIntegration.fromJson(json['external_integration']) : null,
+      externalIntegration: json['external_integration'] != null
+          ? ExternalIntegration.fromJson(json['external_integration'])
+          : null,
       reviews: AppReview.fromJsonList(json['reviews'] ?? []),
       userReview: json['user_review'] != null ? AppReview.fromJson(json['user_review']) : null,
       ratingAvg: json['rating_avg'],
@@ -321,6 +402,12 @@ class App {
       connectedAccounts: (json['connected_accounts'] as List<dynamic>?)?.cast<String>() ?? [],
       twitter: json['twitter'],
       isPopular: json['is_popular'] ?? false,
+      chatTools: ChatTool.fromJsonList(json['chat_tools']),
+      createdAt: json['created_at'] != null ? DateTime.parse(json['created_at']).toLocal() : null,
+      updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']).toLocal() : null,
+      score: json['score']?.toDouble(),
+      official: json['official'] ?? false,
+      sourceCodeUrl: json['source_code_url'],
     );
   }
 
@@ -367,6 +454,11 @@ class App {
     return category.decodeString.split('-').map((e) => e.capitalize()).join(' ');
   }
 
+  /// Returns the most recent date (updated_at preferred, falls back to created_at)
+  DateTime? getLastUpdatedDate() {
+    return updatedAt ?? createdAt;
+  }
+
   List<AppCapability> getCapabilitiesFromIds(List<AppCapability> allCapabilities) {
     return allCapabilities.where((e) => capabilities.contains(e.id)).toList();
   }
@@ -407,6 +499,8 @@ class App {
       'price': price,
       'is_user_paid': isUserPaid,
       'payment_link': paymentLink,
+      'official': official,
+      'source_code_url': sourceCodeUrl,
     };
   }
 
@@ -423,23 +517,14 @@ class App {
 class Category {
   String title;
   String id;
-  Category({
-    required this.title,
-    required this.id,
-  });
+  Category({required this.title, required this.id});
 
   factory Category.fromJson(Map<String, dynamic> json) {
-    return Category(
-      title: json['title'],
-      id: json['id'],
-    );
+    return Category(title: json['title'], id: json['id']);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
+    return {'title': title, 'id': id};
   }
 
   static List<Category> fromJsonList(List<dynamic> jsonList) {
@@ -497,12 +582,7 @@ class CapacityAction {
   String? docUrl;
   String? description;
 
-  CapacityAction({
-    required this.title,
-    required this.id,
-    this.docUrl,
-    this.description,
-  });
+  CapacityAction({required this.title, required this.id, this.docUrl, this.description});
 
   factory CapacityAction.fromJson(Map<String, dynamic> json) {
     return CapacityAction(
@@ -514,12 +594,7 @@ class CapacityAction {
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-      'doc_url': docUrl,
-      'description': description,
-    };
+    return {'title': title, 'id': id, 'doc_url': docUrl, 'description': description};
   }
 
   static List<CapacityAction> fromJsonList(List<dynamic> jsonList) {
@@ -530,23 +605,14 @@ class CapacityAction {
 class TriggerEvent {
   String title;
   String id;
-  TriggerEvent({
-    required this.title,
-    required this.id,
-  });
+  TriggerEvent({required this.title, required this.id});
 
   factory TriggerEvent.fromJson(Map<String, dynamic> json) {
-    return TriggerEvent(
-      title: json['title'],
-      id: json['id'],
-    );
+    return TriggerEvent(title: json['title'], id: json['id']);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
+    return {'title': title, 'id': id};
   }
 
   static List<TriggerEvent> fromJsonList(List<dynamic> jsonList) {
@@ -557,23 +623,14 @@ class TriggerEvent {
 class NotificationScope {
   String title;
   String id;
-  NotificationScope({
-    required this.title,
-    required this.id,
-  });
+  NotificationScope({required this.title, required this.id});
 
   factory NotificationScope.fromJson(Map<String, dynamic> json) {
-    return NotificationScope(
-      title: json['title'],
-      id: json['id'],
-    );
+    return NotificationScope(title: json['title'], id: json['id']);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
+    return {'title': title, 'id': id};
   }
 
   static List<NotificationScope> fromJsonList(List<dynamic> jsonList) {
@@ -584,20 +641,14 @@ class NotificationScope {
 class ProactiveNotification {
   List<String> scopes;
 
-  ProactiveNotification({
-    required this.scopes,
-  });
+  ProactiveNotification({required this.scopes});
 
   factory ProactiveNotification.fromJson(Map<String, dynamic> json) {
-    return ProactiveNotification(
-      scopes: json['scopes'].map<String>((e) => e.toString()).toList(),
-    );
+    return ProactiveNotification(scopes: json['scopes'].map<String>((e) => e.toString()).toList());
   }
 
   toJson() {
-    return {
-      'scopes': scopes,
-    };
+    return {'scopes': scopes};
   }
 }
 
@@ -605,23 +656,14 @@ class PaymentPlan {
   final String title;
   final String id;
 
-  PaymentPlan({
-    required this.title,
-    required this.id,
-  });
+  PaymentPlan({required this.title, required this.id});
 
   factory PaymentPlan.fromJson(Map<String, dynamic> json) {
-    return PaymentPlan(
-      title: json['title'],
-      id: json['id'],
-    );
+    return PaymentPlan(title: json['title'], id: json['id']);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
+    return {'title': title, 'id': id};
   }
 
   static List<PaymentPlan> fromJsonList(List<dynamic> jsonList) {
@@ -635,12 +677,7 @@ class AppApiKey {
   final DateTime createdAt;
   String? secret; // Only available when first created
 
-  AppApiKey({
-    required this.id,
-    required this.label,
-    required this.createdAt,
-    this.secret,
-  });
+  AppApiKey({required this.id, required this.label, required this.createdAt, this.secret});
 
   factory AppApiKey.fromJson(Map<String, dynamic> json) {
     return AppApiKey(

@@ -5,8 +5,7 @@ enum MessageSender { ai, human }
 
 enum MessageType {
   text('text'),
-  daySummary('day_summary'),
-  ;
+  daySummary('day_summary');
 
   final String value;
 
@@ -28,10 +27,7 @@ class MessageConversationStructured {
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'title': title,
-      'emoji': emoji,
-    };
+    return {'title': title, 'emoji': emoji};
   }
 }
 
@@ -51,11 +47,7 @@ class MessageConversation {
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'created_at': createdAt.toUtc().toIso8601String(),
-      'structured': structured.toJson(),
-    };
+    return {'id': id, 'created_at': createdAt.toUtc().toIso8601String(), 'structured': structured.toJson()};
   }
 }
 
@@ -107,6 +99,72 @@ class MessageFile {
   }
 }
 
+class ChartDataPoint {
+  String label;
+  double value;
+
+  ChartDataPoint(this.label, this.value);
+
+  static ChartDataPoint fromJson(Map<String, dynamic> json) {
+    return ChartDataPoint(json['label'] ?? '', (json['value'] as num).toDouble());
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'label': label, 'value': value};
+  }
+}
+
+class ChartDataset {
+  String label;
+  List<ChartDataPoint> dataPoints;
+  String? color;
+
+  ChartDataset(this.label, this.dataPoints, {this.color});
+
+  static ChartDataset fromJson(Map<String, dynamic> json) {
+    return ChartDataset(
+      json['label'] ?? 'Data',
+      ((json['data_points'] ?? []) as List).map((p) => ChartDataPoint.fromJson(p)).toList(),
+      color: json['color'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'label': label, 'data_points': dataPoints.map((p) => p.toJson()).toList(), 'color': color};
+  }
+}
+
+class ChartData {
+  String chartType; // 'line' or 'bar'
+  String title;
+  String? xLabel;
+  String? yLabel;
+  List<ChartDataset> datasets;
+
+  ChartData(this.chartType, this.title, this.datasets, {this.xLabel, this.yLabel});
+
+  static ChartData? fromJson(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    return ChartData(
+      json['chart_type'] ?? 'line',
+      json['title'] ?? '',
+      ((json['datasets'] ?? []) as List).map((d) => ChartDataset.fromJson(d)).toList(),
+      xLabel: json['x_label'],
+      yLabel: json['y_label'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'chart_type': chartType,
+      'title': title,
+      'x_label': xLabel,
+      'y_label': yLabel,
+      'datasets': datasets.map((d) => d.toJson()).toList(),
+    };
+  }
+}
+
 class ServerMessage {
   String id;
   DateTime createdAt;
@@ -121,9 +179,13 @@ class ServerMessage {
   List filesId;
 
   List<MessageConversation> memories;
-  bool askForNps = false;
+  bool askForNps;
+
+  /// User rating for this message: 1 = thumbs up, -1 = thumbs down, null = no rating
+  int? rating;
 
   List<String> thinkings = [];
+  ChartData? chartData;
 
   ServerMessage(
     this.id,
@@ -136,7 +198,9 @@ class ServerMessage {
     this.files,
     this.filesId,
     this.memories, {
-    this.askForNps = false,
+    this.askForNps = true,
+    this.rating,
+    this.chartData,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
@@ -151,7 +215,9 @@ class ServerMessage {
       ((json['files'] ?? []) as List<dynamic>).map((m) => MessageFile.fromJson(m)).toList(),
       (json['files_id'] ?? []).map((m) => m.toString()).toList(),
       ((json['memories'] ?? []) as List<dynamic>).map((m) => MessageConversation.fromJson(m)).toList(),
-      askForNps: json['ask_for_nps'] ?? false,
+      askForNps: json['ask_for_nps'] ?? true,
+      rating: json['rating'],
+      chartData: json['chart_data'] != null ? ChartData.fromJson(json['chart_data']) : null,
     );
   }
 
@@ -165,8 +231,10 @@ class ServerMessage {
       'plugin_id': appId,
       'from_integration': fromIntegration,
       'memories': memories.map((m) => m.toJson()).toList(),
-      'ask_for_nps': askForNps,
       'files': files.map((m) => m.toJson()).toList(),
+      'ask_for_nps': askForNps,
+      'rating': rating,
+      'chart_data': chartData?.toJson(),
     };
   }
 
@@ -180,18 +248,7 @@ class ServerMessage {
   }
 
   static ServerMessage empty({String? appId}) {
-    return ServerMessage(
-      '0000',
-      DateTime.now(),
-      '',
-      MessageSender.ai,
-      MessageType.text,
-      appId,
-      false,
-      [],
-      [],
-      [],
-    );
+    return ServerMessage('0000', DateTime.now(), '', MessageSender.ai, MessageType.text, appId, false, [], [], []);
   }
 
   static ServerMessage failedMessage() {
@@ -217,8 +274,7 @@ enum MessageChunkType {
   data('data'),
   done('done'),
   error('error'),
-  message('message'),
-  ;
+  message('message');
 
   final String value;
 
@@ -231,12 +287,7 @@ class ServerMessageChunk {
   String text;
   ServerMessage? message;
 
-  ServerMessageChunk(
-    this.messageId,
-    this.text,
-    this.type, {
-    this.message,
-  });
+  ServerMessageChunk(this.messageId, this.text, this.type, {this.message});
 
   static ServerMessageChunk failedMessage() {
     return ServerMessageChunk(

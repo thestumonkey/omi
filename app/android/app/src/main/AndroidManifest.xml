@@ -10,6 +10,9 @@
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="false" />
 
     <!-- New Bluetooth permissions in Android 12
     https://developer.android.com/about/versions/12/features/bluetooth-permissions -->
@@ -41,10 +44,12 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <!-- Refer https://developer.android.com/about/versions/14/changes/fgs-types-required#connected-device -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
@@ -52,7 +57,6 @@
     <!-- In the permission part of your manifest, these permission are needed if you target Android 14 phones -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
@@ -61,6 +65,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.FOREGROUND_CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
 
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
@@ -76,7 +83,7 @@
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|connectedDevice"
+            android:foregroundServiceType="location"
             android:stopWithTask="true" />
          <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
@@ -137,6 +144,30 @@
                     android:scheme="https"
                     android:pathPattern="/apps/.*" />
             </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="h.omi.me"
+                    android:scheme="https"
+                    android:path="/unlimited" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="h.omi.me"
+                    android:scheme="https"
+                    android:pathPattern="/tasks/.*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="omi" />
+            </intent-filter>
         </activity>
 
         <!-- Don't delete the meta-data below.
@@ -146,6 +177,22 @@
             android:value="2" />
 
         <meta-data android:name="com.posthog.posthog.AUTO_INIT" android:value="false" />
-        
+
+        <!-- Native BLE Companion Service — receives OS-level device presence events -->
+        <service
+            android:name="com.friend.ios.BleCompanionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
+
+        <!-- Native BLE Foreground Service — persistent BLE connection -->
+        <service
+            android:name="com.friend.ios.OmiBleForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+
     </application>
 </manifest>

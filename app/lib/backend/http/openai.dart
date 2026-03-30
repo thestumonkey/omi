@@ -3,12 +3,15 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+
+import 'package:tuple/tuple.dart';
+
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/env/env.dart';
-import 'package:tuple/tuple.dart';
+import 'package:omi/utils/logger.dart';
 
 class SummaryResult {
   final Structured structured;
@@ -18,7 +21,8 @@ class SummaryResult {
 }
 
 Future<String> triggerTestConversationPrompt(String prompt, String transcript) async {
-  return await executeGptPrompt('''
+  return await executeGptPrompt(
+    '''
         Your task is: $prompt
         
         Current Conversation: ```${transcript.trim()}```,
@@ -26,9 +30,10 @@ Future<String> triggerTestConversationPrompt(String prompt, String transcript) a
         Output your response in plain text, without markdown.
         Make sure to be concise and clear.
         '''
-      .replaceAll('     ', '')
-      .replaceAll('    ', '')
-      .trim());
+        .replaceAll('     ', '')
+        .replaceAll('    ', '')
+        .trim(),
+  );
 }
 
 Future<String> getPhotoDescription(Uint8List data) async {
@@ -39,7 +44,7 @@ Future<String> getPhotoDescription(Uint8List data) async {
         {
           'type': "text",
           'text':
-              "What’s in this image? Describe in detail. The camera quality may be low, but do your best to accurately describe what you see anyway. The image may or may not be rotated 90 degrees. Do not comment on the image quality, damage, or distortion; only describe the content. If there is any text, please include the text content (including original language and translating to English if necessary).  If there is any media/tv/book/website/screen/etc, do your best to identify what it is and what it's about."
+              "What’s in this image? Describe in detail. The camera quality may be low, but do your best to accurately describe what you see anyway. The image may or may not be rotated 90 degrees. Do not comment on the image quality, damage, or distortion; only describe the content. If there is any text, please include the text content (including original language and translating to English if necessary).  If there is any media/tv/book/website/screen/etc, do your best to identify what it is and what it's about.",
         },
         {
           'type': "image_url",
@@ -65,10 +70,7 @@ Future<dynamic> gptApiCall({
   int? maxTokens,
 }) async {
   final url = 'https://api.openai.com/v1/$urlSuffix';
-  final headers = {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Authorization': 'Bearer ${Env.openAIAPIKey}',
-  };
+  final headers = {'Content-Type': 'application/json; charset=utf-8', 'Authorization': 'Bearer ${Env.openAIAPIKey}'};
   final String body;
   if (urlSuffix == 'embeddings') {
     body = jsonEncode({'model': model, 'input': contentToEmbed});
@@ -102,10 +104,13 @@ Future<String> executeGptPrompt(String? prompt, {bool ignoreCache = false}) asyn
   var cachedResponse = prefs.gptCompletionCache(promptBase64);
   if (!ignoreCache && prefs.gptCompletionCache(promptBase64).isNotEmpty) return cachedResponse;
 
-  String response = await gptApiCall(model: 'gpt-4o', messages: [
-    {'role': 'system', 'content': prompt}
-  ]);
+  String response = await gptApiCall(
+    model: 'gpt-4o',
+    messages: [
+      {'role': 'system', 'content': prompt},
+    ],
+  );
   prefs.setGptCompletionCache(promptBase64, response);
-  debugPrint('executeGptPrompt response: $response');
+  Logger.debug('executeGptPrompt response: $response');
   return response;
 }

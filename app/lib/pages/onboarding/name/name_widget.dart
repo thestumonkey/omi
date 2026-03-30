@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:omi/backend/auth.dart';
+
 import 'package:omi/backend/preferences.dart';
-import 'package:gradient_borders/gradient_borders.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
-import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class NameWidget extends StatefulWidget {
   final Function goNext;
@@ -17,111 +16,154 @@ class NameWidget extends StatefulWidget {
 class _NameWidgetState extends State<NameWidget> {
   late TextEditingController nameController;
   var focusNode = FocusNode();
+  bool hasPrefilledName = false;
 
   @override
   void initState() {
     nameController = TextEditingController(text: SharedPreferencesUtil().givenName);
-    // focusNode.requestFocus();
+    hasPrefilledName = SharedPreferencesUtil().givenName.trim().isNotEmpty;
     super.initState();
+
+    // Auto-focus the name input field after the widget is built
+    // WidgetsBinding.instance.addPostFrameCallback((_) {
+    //   focusNode.requestFocus();
+    // });
   }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Text(
-            'How should Omi call you?',
-            style: TextStyle(color: Colors.grey.shade300, fontSize: 16),
-            textAlign: TextAlign.start,
+    return Column(
+      children: [
+        // Background area - takes remaining space
+        Expanded(
+          child: Container(), // Just takes up space for background image
+        ),
+
+        // Bottom drawer card - wraps content
+        Container(
+          width: double.infinity,
+          padding: EdgeInsets.fromLTRB(32, 26, 32, MediaQuery.of(context).padding.bottom + 8),
+          decoration: const BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
           ),
-          const SizedBox(height: 24),
-          TextField(
-            enabled: true,
-            focusNode: focusNode,
-            controller: nameController,
-            obscureText: false,
-            textAlign: TextAlign.center,
-            textAlignVertical: TextAlignVertical.center,
-            decoration: InputDecoration(
-              hintText: 'How Omi should call you?',
-              hintStyle: const TextStyle(fontSize: 14, color: Colors.grey),
-              border: GradientOutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                gradient: const LinearGradient(
-                  colors: <Color>[
-                    Color.fromARGB(255, 202, 201, 201),
-                    Color.fromARGB(255, 159, 158, 158),
-                  ],
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 16),
+
+                // Main title
+                Text(
+                  hasPrefilledName ? context.l10n.wantDifferentName : context.l10n.whatsYourName,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: hasPrefilledName ? 22 : 28,
+                    fontWeight: FontWeight.bold,
+                    height: 1.2,
+                    fontFamily: 'Manrope',
+                  ),
+                  textAlign: TextAlign.center,
                 ),
-              ),
-            ),
-            style: TextStyle(fontSize: 16, color: Colors.grey.shade200),
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  width: double.infinity,
+
+                const SizedBox(height: 8),
+
+                // // Subtitle
+                // Text(
+                //   'Tell us how you\'d like to be addressed.\nThis helps personalize your Omi experience.',
+                //   style: TextStyle(
+                //     color: Colors.white.withOpacity(0.6),
+                //     fontSize: 16,
+                //     fontFamily: 'Manrope',
+                //     height: 1.5,
+                //   ),
+                //   textAlign: TextAlign.center,
+                // ),
+                const SizedBox(height: 28),
+
+                // Name input field
+                Container(
                   decoration: BoxDecoration(
-                    border: const GradientBoxBorder(
-                      gradient: LinearGradient(colors: [
-                        Color.fromARGB(127, 208, 208, 208),
-                        Color.fromARGB(127, 188, 99, 121),
-                        Color.fromARGB(127, 86, 101, 182),
-                        Color.fromARGB(127, 126, 190, 236)
-                      ]),
-                      width: 2,
-                    ),
-                    borderRadius: BorderRadius.circular(12),
+                    color: Colors.grey[900],
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.grey[700]!, width: 1),
                   ),
-                  child: MaterialButton(
-                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                    onPressed: () async {
-                      if (nameController.text.isEmpty || nameController.text.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Please enter a valid name')),
-                        );
-                      } else {
-                        FocusManager.instance.primaryFocus?.unfocus();
-                        updateGivenName(nameController.text);
-                        widget.goNext();
-                      }
+                  child: TextField(
+                    controller: nameController,
+                    focusNode: focusNode,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontFamily: 'Manrope',
+                      fontWeight: FontWeight.w500,
+                    ),
+                    textAlign: TextAlign.center,
+                    decoration: InputDecoration(
+                      hintText: context.l10n.enterYourName,
+                      hintStyle: TextStyle(color: Colors.grey[500], fontSize: 18, fontFamily: 'Manrope'),
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                    ),
+                    onChanged: (value) {
+                      setState(() {}); // Trigger rebuild to update button state
                     },
-                    child: const Text(
-                      'Continue',
-                      style: TextStyle(
-                        decoration: TextDecoration.none,
-                      ),
+                  ),
+                ),
+
+                const SizedBox(height: 32),
+
+                // Continue button
+                SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: nameController.text.trim().isEmpty
+                        ? null
+                        : () async {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            AuthService.instance.updateGivenName(nameController.text.trim());
+                            widget.goNext();
+                          },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: nameController.text.trim().isEmpty ? Colors.grey[800] : Colors.white,
+                      foregroundColor: nameController.text.trim().isEmpty ? Colors.grey[600] : Colors.black,
+                      disabledBackgroundColor: Colors.grey[800],
+                      disabledForegroundColor: Colors.grey[600],
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                      elevation: 0,
+                    ),
+                    child: Text(
+                      context.l10n.continueButton,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, fontFamily: 'Manrope'),
                     ),
                   ),
                 ),
-              )
-            ],
+
+                // const SizedBox(height: 24),
+
+                // // Need Help link
+                // PlatformService.isIntercomSupported
+                //     ? InkWell(
+                //         onTap: () {
+                //           Intercom.instance.displayMessenger();
+                //         },
+                //         child: Text(
+                //           'Need Help?',
+                //           style: TextStyle(
+                //             color: Colors.white.withOpacity(0.6),
+                //             fontSize: 14,
+                //             fontFamily: 'Manrope',
+                //             decoration: TextDecoration.underline,
+                //           ),
+                //         ),
+                //       )
+                //     : const SizedBox.shrink(),
+              ],
+            ),
           ),
-          const SizedBox(
-            height: 12,
-          ),
-          PlatformService.isIntercomSupported
-              ? InkWell(
-                  child: Text(
-                    'Need Help?',
-                    style: TextStyle(
-                      color: Colors.grey.shade300,
-                      decoration: TextDecoration.underline,
-                    ),
-                  ),
-                  onTap: () {
-                    Intercom.instance.displayMessenger();
-                  },
-                )
-              : const SizedBox.shrink(),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

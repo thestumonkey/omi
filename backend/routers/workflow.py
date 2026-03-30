@@ -10,22 +10,32 @@ import models.integrations as integration_models
 import models.conversation as conversation_models
 from routers.conversations import process_conversation, trigger_external_integrations
 from utils.conversations.location import get_google_maps_location
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.post('/v1/integrations/workflow/memories', response_model=integration_models.EmptyResponse,
-             tags=['integration', 'workflow', 'memories'])
-def create_memory(request: Request, uid: str, api_key: Annotated[str | None, Header()],
-                  create_memory: conversation_models.ExternalIntegrationCreateConversation):
+@router.post(
+    '/v1/integrations/workflow/memories',
+    response_model=integration_models.EmptyResponse,
+    tags=['integration', 'workflow', 'memories'],
+)
+def create_memory(
+    request: Request,
+    uid: str,
+    api_key: Annotated[str | None, Header()],
+    create_memory: conversation_models.ExternalIntegrationCreateConversation,
+):
     if api_key != os.getenv('WORKFLOW_API_KEY'):
         raise HTTPException(status_code=401, detail="Invalid workflow API Key")
 
     # Time
     started_at = create_memory.started_at if create_memory.started_at is not None else datetime.now(timezone.utc)
-    finished_at = create_memory.finished_at if create_memory.finished_at is not None else started_at + \
-                                                                                          timedelta(
-                                                                                              seconds=300)  # 5 minutes
+    finished_at = (
+        create_memory.finished_at if create_memory.finished_at is not None else started_at + timedelta(seconds=300)
+    )  # 5 minutes
     create_memory.started_at = started_at
     create_memory.finished_at = finished_at
 
@@ -52,8 +62,11 @@ def create_memory(request: Request, uid: str, api_key: Annotated[str | None, Hea
     return {}
 
 
-@router.get('/v1/integrations/workflow/memories', response_model=List[conversation_models.Conversation],
-            tags=['integration', 'workflow', 'memories'])
+@router.get(
+    '/v1/integrations/workflow/memories',
+    response_model=List[conversation_models.Conversation],
+    tags=['integration', 'workflow', 'memories'],
+)
 def get_memory(request: Request, uid: str, api_key: Annotated[str | None, Header()], limit: int = 1):
     if api_key != os.getenv('WORKFLOW_API_KEY'):
         raise HTTPException(status_code=401, detail="Invalid API Key")
@@ -61,5 +74,5 @@ def get_memory(request: Request, uid: str, api_key: Annotated[str | None, Header
     # max 12
     limit = min(limit, 12)
 
-    print('get_memories', uid, limit)
+    logger.info(f'get_memories {uid} {limit}')
     return conversations_db.get_conversations(uid, limit, 0, include_discarded=False)

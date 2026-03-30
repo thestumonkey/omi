@@ -1,47 +1,186 @@
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:collection/collection.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:omi/widgets/shimmer_with_timeout.dart';
+
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
-import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/pages/chat/widgets/files_handler_widget.dart';
 import 'package:omi/pages/chat/widgets/typing_indicator.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
+import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
-import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:provider/provider.dart';
-import 'package:shimmer/shimmer.dart';
-
+import 'package:omi/widgets/text_selection_controls.dart';
+import 'chart_message_widget.dart';
 import 'markdown_message_widget.dart';
+
+/// Parse app_id from thinking text (format: "text|app_id:app_id")
+String? parseAppIdFromThinking(String thinkingText) {
+  if (thinkingText.contains('|app_id:')) {
+    var parts = thinkingText.split('|app_id:');
+    if (parts.length == 2) {
+      return parts[1];
+    }
+  }
+  return null;
+}
+
+/// Get the display text from thinking (removes app_id suffix if present)
+String getThinkingDisplayText(String thinkingText) {
+  int index = thinkingText.indexOf('|app_id:');
+  if (index >= 0) {
+    return thinkingText.substring(0, index);
+  }
+  return thinkingText;
+}
+
+/// Build app icon widget from app_id
+Widget _buildAppIcon(BuildContext context, String appId, {double size = 15, double opacity = 1.0}) {
+  final appProvider = Provider.of<AppProvider>(context, listen: false);
+  final messageProvider = Provider.of<MessageProvider>(context, listen: false);
+  // Check both public apps and user's installed chat apps (includes private MCP apps)
+  final app =
+      appProvider.apps.firstWhereOrNull((a) => a.id == appId) ??
+      messageProvider.chatApps.firstWhereOrNull((a) => a.id == appId);
+
+  if (app != null) {
+    return Opacity(
+      opacity: opacity,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(3),
+        child: CachedNetworkImage(
+          imageUrl: app.getImageUrl(),
+          httpHeaders: const {
+            "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+          },
+          imageBuilder: (context, imageProvider) => Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(3),
+              image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
+            ),
+          ),
+          placeholder: (context, url) => SizedBox(
+            width: size,
+            height: size,
+            child: Icon(Icons.apps, size: size * 0.7, color: Colors.white.withOpacity(opacity)),
+          ),
+          errorWidget: (context, url, error) =>
+              Icon(Icons.apps, size: size * 0.7, color: Colors.white.withOpacity(opacity)),
+        ),
+      ),
+    );
+  }
+
+  // Fallback to generic icon if app not found
+  return Opacity(
+    opacity: opacity,
+    child: Icon(Icons.apps, size: size, color: Colors.white.withOpacity(opacity)),
+  );
+}
+
+/// Get the integration logo path for a thinking text, if applicable
+String? _getIntegrationLogoPath(String thinkingText) {
+  final text = thinkingText.toLowerCase();
+  if (text.contains('notion')) {
+    return 'assets/integration_app_logos/notion-logo.png';
+  } else if (text.contains('whoop')) {
+    return 'assets/integration_app_logos/whoop.png';
+  } else if (text.contains('calendar')) {
+    return 'assets/integration_app_logos/google-calendar.png';
+  } else if (text.contains('gmail')) {
+    return 'assets/integration_app_logos/gmail-logo.jpeg';
+  } else if (text.contains('github')) {
+    return 'assets/integration_app_logos/github-logo.png';
+  } else if (text.contains('twitter') || text.contains('tweet')) {
+    return 'assets/integration_app_logos/x-logo.avif';
+  }
+  return null;
+}
+
+/// Get the fallback icon for thinking text (used when no integration logo)
+IconData _getThinkingIcon(String thinkingText) {
+  final text = thinkingText.toLowerCase();
+  if (text.contains('thinking')) {
+    return FontAwesomeIcons.brain;
+  } else if (text.contains('searching the web') || text.contains('searching web')) {
+    return FontAwesomeIcons.magnifyingGlass;
+  } else if (text.contains('conversations')) {
+    return FontAwesomeIcons.comments;
+  } else if (text.contains('memories')) {
+    return FontAwesomeIcons.lightbulb;
+  } else if (text.contains('action item')) {
+    return FontAwesomeIcons.listCheck;
+  } else if (text.contains('product info')) {
+    return FontAwesomeIcons.circleInfo;
+  } else if (text.contains('search')) {
+    return FontAwesomeIcons.magnifyingGlass;
+  }
+  return FontAwesomeIcons.brain; // Default brain icon
+}
+
+/// Build the thinking icon widget - either an integration logo or a fallback icon
+Widget _buildThinkingIconWidget(String thinkingText, {double size = 15, Color color = Colors.white}) {
+  final logoPath = _getIntegrationLogoPath(thinkingText);
+  if (logoPath != null) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(3),
+      child: Image.asset(
+        logoPath,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => FaIcon(_getThinkingIcon(thinkingText), size: size, color: color),
+      ),
+    );
+  }
+  return FaIcon(_getThinkingIcon(thinkingText), size: size, color: color);
+}
 
 class AIMessage extends StatefulWidget {
   final bool showTypingIndicator;
+  final bool showThinkingAfterText;
   final ServerMessage message;
   final Function(String) sendMessage;
+  final Function(String)? onAskOmi;
   final bool displayOptions;
   final App? appSender;
   final Function(ServerConversation) updateConversation;
-  final Function(int) setMessageNps;
+  final Function(int, {String? reason}) setMessageNps;
 
   const AIMessage({
     super.key,
     required this.message,
     required this.sendMessage,
+    this.onAskOmi,
     required this.displayOptions,
     required this.updateConversation,
     required this.setMessageNps,
     this.appSender,
     this.showTypingIndicator = false,
+    this.showThinkingAfterText = false,
   });
 
   @override
@@ -59,44 +198,13 @@ class _AIMessageState extends State<AIMessage> {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.max,
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        widget.appSender != null
-            ? CachedNetworkImage(
-                imageUrl: widget.appSender!.getImageUrl(),
-                imageBuilder: (context, imageProvider) => CircleAvatar(
-                  backgroundColor: Colors.white,
-                  radius: 16,
-                  backgroundImage: imageProvider,
-                ),
-                placeholder: (context, url) => const CircularProgressIndicator(),
-                errorWidget: (context, url, error) => const Icon(Icons.error),
-              )
-            : Container(
-                decoration: BoxDecoration(
-                  image: DecorationImage(
-                    image: AssetImage(Assets.images.background.path),
-                    fit: BoxFit.cover,
-                  ),
-                  borderRadius: const BorderRadius.all(Radius.circular(16.0)),
-                ),
-                height: 32,
-                width: 32,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    Image.asset(
-                      Assets.images.herologo.path,
-                      height: 24,
-                      width: 24,
-                    ),
-                  ],
-                ),
-              ),
-        const SizedBox(width: 16.0),
-        Expanded(
+        SelectionArea(
+          contextMenuBuilder: (context, selectableRegionState) {
+            return omiSelectionMenuBuilder(context, selectableRegionState, widget.onAskOmi ?? (text) {});
+          },
           child: buildMessageWidget(
             widget.message,
             widget.sendMessage,
@@ -105,6 +213,8 @@ class _AIMessageState extends State<AIMessage> {
             widget.appSender,
             widget.updateConversation,
             widget.setMessageNps,
+            onAskOmi: widget.onAskOmi,
+            showThinkingAfterText: widget.showThinkingAfterText,
           ),
         ),
       ],
@@ -119,74 +229,61 @@ Widget buildMessageWidget(
   bool displayOptions,
   App? appSender,
   Function(ServerConversation) updateConversation,
-  Function(int) sendMessageNps,
-) {
+  Function(int, {String? reason}) sendMessageNps, {
+  Function(String)? onAskOmi,
+  bool showThinkingAfterText = false,
+}) {
   if (message.memories.isNotEmpty) {
     return MemoriesMessageWidget(
-        showTypingIndicator: showTypingIndicator,
-        messageMemories: message.memories.length > 3 ? message.memories.sublist(0, 3) : message.memories,
-        messageText: message.isEmpty ? '...' : message.text.decodeString,
-        updateConversation: updateConversation,
-        message: message,
-        setMessageNps: sendMessageNps,
-        date: message.createdAt);
+      showTypingIndicator: showTypingIndicator,
+      messageMemories: message.memories.length > 3 ? message.memories.sublist(0, 3) : message.memories,
+      messageText: message.isEmpty ? '...' : message.text.decodeString,
+      updateConversation: updateConversation,
+      message: message,
+      setMessageNps: sendMessageNps,
+      date: message.createdAt,
+      onAskOmi: onAskOmi,
+    );
   } else if (message.type == MessageType.daySummary) {
     return DaySummaryWidget(
-        showTypingIndicator: showTypingIndicator, messageText: message.text.decodeString, date: message.createdAt);
+      showTypingIndicator: showTypingIndicator,
+      messageText: message.text.decodeString,
+      date: message.createdAt,
+    );
   } else if (displayOptions) {
     return InitialMessageWidget(
       showTypingIndicator: showTypingIndicator,
       messageText: message.text.decodeString,
       sendMessage: sendMessage,
+      onAskOmi: onAskOmi,
     );
   } else {
     return NormalMessageWidget(
       showTypingIndicator: showTypingIndicator,
+      showThinkingAfterText: showThinkingAfterText,
       thinkings: message.thinkings,
       messageText: message.text.decodeString,
       message: message,
       setMessageNps: sendMessageNps,
       createdAt: message.createdAt,
+      onAskOmi: onAskOmi,
     );
   }
-}
-
-Widget _getNpsWidget(BuildContext context, ServerMessage message, Function(int) setMessageNps) {
-  if (!message.askForNps) return const SizedBox();
-
-  return Padding(
-    padding: const EdgeInsetsDirectional.only(top: 8),
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.start,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Text('Was this helpful?', style: TextStyle(fontWeight: FontWeight.w500, color: Colors.grey.shade300)),
-        IconButton(
-          onPressed: () {
-            setMessageNps(0);
-            AppSnackbar.showSnackbar('Thank you for your feedback!');
-          },
-          icon: const Icon(Icons.thumb_down_alt_outlined, size: 20, color: Colors.grey),
-        ),
-        IconButton(
-          onPressed: () {
-            setMessageNps(1);
-            AppSnackbar.showSnackbar('Thank you for your feedback!');
-          },
-          icon: const Icon(Icons.thumb_up_alt_outlined, size: 20, color: Colors.grey),
-        ),
-      ],
-    ),
-  );
 }
 
 class InitialMessageWidget extends StatelessWidget {
   final bool showTypingIndicator;
   final String messageText;
   final Function(String) sendMessage;
+  final Function(String)? onAskOmi;
 
-  const InitialMessageWidget(
-      {super.key, required this.showTypingIndicator, required this.messageText, required this.sendMessage});
+  const InitialMessageWidget({
+    super.key,
+    required this.showTypingIndicator,
+    required this.messageText,
+    required this.sendMessage,
+    this.onAskOmi,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -197,13 +294,9 @@ class InitialMessageWidget extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.start,
-                children: [
-                  SizedBox(width: 4),
-                  TypingIndicator(),
-                  Spacer(),
-                ],
+                children: [SizedBox(width: 4), TypingIndicator(), Spacer()],
               )
-            : getMarkdownWidget(context, messageText),
+            : getMarkdownWidget(context, messageText, onAskOmi: onAskOmi),
         const SizedBox(height: 8),
         const SizedBox(height: 8),
         InitialOptionWidget(optionText: 'What did I do yesterday?', sendMessage: sendMessage),
@@ -244,13 +337,10 @@ class DaySummaryWidget extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.start,
-                children: [
-                  SizedBox(width: 4),
-                  TypingIndicator(),
-                  Spacer(),
-                ],
+                children: [SizedBox(width: 4), TypingIndicator(), Spacer()],
               )
             : daySummaryMessagesList(messageText),
+        if (messageText.isNotEmpty && !showTypingIndicator) MessageActionBar(messageText: messageText),
       ],
     );
   }
@@ -288,20 +378,11 @@ class DaySummaryWidget extends StatelessWidget {
           minLeadingWidth: 0,
           leading: Text(
             '${index + 1}.',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey.shade500,
-            ),
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.grey.shade500),
           ),
           title: AutoSizeText(
             sentences[index],
-            style: const TextStyle(
-              fontSize: 15.0,
-              fontWeight: FontWeight.w500,
-              height: 1.35,
-              color: Colors.white,
-            ),
+            style: const TextStyle(fontSize: 16.0, fontWeight: FontWeight.w500, height: 1.35, color: Colors.white),
             softWrap: true,
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
@@ -312,13 +393,15 @@ class DaySummaryWidget extends StatelessWidget {
   }
 }
 
-class NormalMessageWidget extends StatelessWidget {
+class NormalMessageWidget extends StatefulWidget {
   final bool showTypingIndicator;
+  final bool showThinkingAfterText;
   final String messageText;
   final List<String> thinkings;
   final ServerMessage message;
-  final Function(int) setMessageNps;
+  final Function(int, {String? reason}) setMessageNps;
   final DateTime createdAt;
+  final Function(String)? onAskOmi;
 
   const NormalMessageWidget({
     super.key,
@@ -327,78 +410,199 @@ class NormalMessageWidget extends StatelessWidget {
     required this.message,
     required this.setMessageNps,
     required this.createdAt,
+    this.showThinkingAfterText = false,
     this.thinkings = const [],
+    this.onAskOmi,
   });
 
   @override
+  State<NormalMessageWidget> createState() => _NormalMessageWidgetState();
+}
+
+class _NormalMessageWidgetState extends State<NormalMessageWidget> {
+  bool _showDots = true;
+  Timer? _dotsTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.showTypingIndicator && widget.messageText.isEmpty && widget.message.thinkings.isEmpty) {
+      _dotsTimer = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          setState(() {
+            _showDots = false;
+          });
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _dotsTimer?.cancel();
+    super.dispose();
+  }
+
+  Widget _buildChartShimmer() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      child: ShimmerWithTimeout(
+        baseColor: const Color(0xFF1A1A20),
+        highlightColor: const Color(0xFF282830),
+        timeoutSeconds: 15,
+        child: Container(
+          height: 236,
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1A20),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    var previousThinkingText = message.thinkings.length > 1
-        ? message.thinkings
-            .sublist(message.thinkings.length - 2 >= 0 ? message.thinkings.length - 2 : 0)
-            .first
-            .decodeString
-        : null;
-    var thinkingText = message.thinkings.isNotEmpty ? message.thinkings.last.decodeString : null;
+    var thinkingTextRaw = widget.message.thinkings.isNotEmpty ? widget.message.thinkings.last.decodeString : null;
+
+    // Parse app_id and display text from thinking messages
+    String? currentAppId = thinkingTextRaw != null ? parseAppIdFromThinking(thinkingTextRaw) : null;
+    var thinkingText = thinkingTextRaw != null ? getThinkingDisplayText(thinkingTextRaw) : null;
+
+    // Show "thinking" text if we have thinking text, or if dots timer expired and no thinking text yet
+    bool shouldShowThinking =
+        thinkingText != null || (!_showDots && widget.showTypingIndicator && widget.messageText.isEmpty);
+    String displayThinkingText = thinkingText ?? 'Thinking';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisAlignment: MainAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        showTypingIndicator && messageText.isEmpty
-            ? Container(
-                margin: EdgeInsets.only(top: previousThinkingText != null ? 0 : 8),
+        FilesHandlerWidget(message: widget.message),
+        widget.showTypingIndicator && widget.messageText.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
                 child: Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    thinkingText != null
+                    shouldShowThinking
                         ? Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisAlignment: MainAxisAlignment.start,
                               children: [
-                                previousThinkingText != null
-                                    ? Text(
-                                        overflow: TextOverflow.fade,
-                                        maxLines: 1,
-                                        softWrap: false,
-                                        previousThinkingText,
-                                        style: const TextStyle(color: Colors.white60, fontSize: 14),
-                                      )
-                                    : const SizedBox.shrink(),
-                                Shimmer.fromColors(
-                                  baseColor: Colors.white,
-                                  highlightColor: Colors.grey,
-                                  child: Text(
-                                    overflow: TextOverflow.fade,
-                                    maxLines: 1,
-                                    softWrap: false,
-                                    thinkingText,
-                                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                                  ),
-                                )
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // Icon stays outside shimmer to preserve colors (app icon or integration logo)
+                                    if (currentAppId != null) ...[
+                                      _buildAppIcon(context, currentAppId, size: 15),
+                                      const SizedBox(width: 6),
+                                    ] else ...[
+                                      _buildThinkingIconWidget(displayThinkingText, size: 15),
+                                      const SizedBox(width: 6),
+                                    ],
+                                    // Shimmer only applies to text
+                                    Flexible(
+                                      child: ShimmerWithTimeout(
+                                        baseColor: Colors.white,
+                                        highlightColor: Colors.grey,
+                                        child: Text(
+                                          overflow: TextOverflow.fade,
+                                          maxLines: 1,
+                                          softWrap: false,
+                                          displayThinkingText,
+                                          style: const TextStyle(color: Colors.white, fontSize: 15),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ],
                             ),
                           )
-                        : const SizedBox(
-                            height: 16,
-                            child: TypingIndicator(),
-                          ),
+                        : const TypingIndicator(),
                   ],
-                ))
-            : const SizedBox.shrink(),
-        !(showTypingIndicator && messageText.isEmpty)
-            ? Container(
-                margin: const EdgeInsets.only(bottom: 4.0),
-                child: Text(
-                  formatChatTimestamp(createdAt),
-                  style: TextStyle(
-                    color: Colors.grey.shade500,
-                    fontSize: 12,
-                  ),
                 ),
               )
             : const SizedBox.shrink(),
-        messageText.isEmpty ? const SizedBox.shrink() : getMarkdownWidget(context, messageText),
-        _getNpsWidget(context, message, setMessageNps),
+        // !(showTypingIndicator && messageText.isEmpty)
+        //     ? Container(
+        //         margin: const EdgeInsets.only(bottom: 4.0),
+        //         child: Text(
+        //           formatChatTimestamp(createdAt),
+        //           style: TextStyle(
+        //             color: Colors.grey.shade500,
+        //             fontSize: 12,
+        //           ),
+        //         ),
+        //       )
+        //     : const SizedBox.shrink(),
+        widget.messageText.isEmpty
+            ? const SizedBox.shrink()
+            : Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                child: Builder(
+                  builder: (context) {
+                    String? selectedText;
+                    return SelectionArea(
+                      onSelectionChanged: (SelectedContent? selectedContent) {
+                        selectedText = selectedContent?.plainText;
+                      },
+                      contextMenuBuilder: (context, selectableRegionState) {
+                        return omiSelectionMenuBuilder(context, selectableRegionState, (text) {
+                          widget.onAskOmi?.call(text);
+                        }, selectedText: selectedText);
+                      },
+                      child: getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
+                    );
+                  },
+                ),
+              ),
+        if (widget.showTypingIndicator && widget.messageText.isNotEmpty && widget.showThinkingAfterText)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (currentAppId != null) ...[
+                  _buildAppIcon(context, currentAppId, size: 15),
+                  const SizedBox(width: 6),
+                ] else ...[
+                  _buildThinkingIconWidget(displayThinkingText, size: 15),
+                  const SizedBox(width: 6),
+                ],
+                Flexible(
+                  child: ShimmerWithTimeout(
+                    baseColor: Colors.white,
+                    highlightColor: Colors.grey,
+                    child: Text(
+                      overflow: TextOverflow.fade,
+                      maxLines: 1,
+                      softWrap: false,
+                      displayThinkingText,
+                      style: const TextStyle(color: Colors.white, fontSize: 15),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (widget.message.chartData != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: ChartMessageWidget(chartData: widget.message.chartData!),
+          )
+        else if (widget.showTypingIndicator && widget.message.thinkings.any((t) => t.toLowerCase().contains('chart')))
+          _buildChartShimmer(),
+        if (widget.messageText.isNotEmpty && !widget.showTypingIndicator)
+          MessageActionBar(
+            messageText: widget.messageText,
+            setMessageNps: widget.setMessageNps,
+            currentNps: widget.message.rating,
+          ),
       ],
     );
   }
@@ -410,8 +614,9 @@ class MemoriesMessageWidget extends StatefulWidget {
   final String messageText;
   final Function(ServerConversation) updateConversation;
   final ServerMessage message;
-  final Function(int) setMessageNps;
+  final Function(int, {String? reason}) setMessageNps;
   final DateTime date;
+  final Function(String)? onAskOmi;
 
   const MemoriesMessageWidget({
     super.key,
@@ -422,6 +627,7 @@ class MemoriesMessageWidget extends StatefulWidget {
     required this.message,
     required this.setMessageNps,
     required this.date,
+    this.onAskOmi,
   });
 
   @override
@@ -430,44 +636,161 @@ class MemoriesMessageWidget extends StatefulWidget {
 
 class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
   late List<bool> conversationDetailLoading;
+  bool _showDots = true;
+  Timer? _dotsTimer;
 
   @override
   void initState() {
     conversationDetailLoading = List.filled(widget.messageMemories.length, false);
+    if (widget.showTypingIndicator && widget.messageText == '...' && widget.message.thinkings.isEmpty) {
+      _dotsTimer = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          setState(() {
+            _showDots = false;
+          });
+        }
+      });
+    }
     super.initState();
   }
 
   @override
+  void dispose() {
+    _dotsTimer?.cancel();
+    super.dispose();
+  }
+
+  Widget _buildChartShimmer() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      child: ShimmerWithTimeout(
+        baseColor: const Color(0xFF1A1A20),
+        highlightColor: const Color(0xFF282830),
+        timeoutSeconds: 15,
+        child: Container(
+          height: 236,
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1A20),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    var thinkingTextRaw = widget.message.thinkings.isNotEmpty ? widget.message.thinkings.last.decodeString : null;
+
+    // Parse app_id and display text from thinking messages
+    String? currentAppId = thinkingTextRaw != null ? parseAppIdFromThinking(thinkingTextRaw) : null;
+    var thinkingText = thinkingTextRaw != null ? getThinkingDisplayText(thinkingTextRaw) : null;
+
+    // Show "thinking" text if we have thinking text, or if dots timer expired and no thinking text yet
+    bool shouldShowThinking =
+        thinkingText != null || (!_showDots && widget.showTypingIndicator && widget.messageText == '...');
+    String displayThinkingText = thinkingText ?? 'Thinking';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 4.0),
-          child: Text(
-            formatChatTimestamp(widget.date),
-            style: TextStyle(
-              color: Colors.grey.shade500,
-              fontSize: 12,
-            ),
-          ),
-        ),
-        widget.showTypingIndicator
+        // Padding(
+        //   padding: const EdgeInsets.only(bottom: 4.0),
+        //   child: Text(
+        //     formatChatTimestamp(widget.date),
+        //     style: TextStyle(
+        //       color: Colors.grey.shade500,
+        //       fontSize: 12,
+        //     ),
+        //   ),
+        // ),
+        widget.showTypingIndicator && widget.messageText == '...'
+            ? Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    shouldShowThinking
+                        ? Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.start,
+                              children: [
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // Icon stays outside shimmer to preserve colors (app icon or integration logo)
+                                    if (currentAppId != null) ...[
+                                      _buildAppIcon(context, currentAppId, size: 15),
+                                      const SizedBox(width: 6),
+                                    ] else ...[
+                                      _buildThinkingIconWidget(displayThinkingText, size: 15),
+                                      const SizedBox(width: 6),
+                                    ],
+                                    // Shimmer only applies to text
+                                    Flexible(
+                                      child: ShimmerWithTimeout(
+                                        baseColor: Colors.white,
+                                        highlightColor: Colors.grey,
+                                        child: Text(
+                                          overflow: TextOverflow.fade,
+                                          maxLines: 1,
+                                          softWrap: false,
+                                          displayThinkingText,
+                                          style: const TextStyle(color: Colors.white, fontSize: 15),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          )
+                        : const TypingIndicator(),
+                  ],
+                ),
+              )
+            : widget.showTypingIndicator
             ? const Row(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.start,
-                children: [
-                  SizedBox(width: 4),
-                  TypingIndicator(),
-                  Spacer(),
-                ],
+                children: [SizedBox(width: 4), TypingIndicator(), Spacer()],
               )
-            : getMarkdownWidget(context, widget.messageText),
+            : Builder(
+                builder: (context) {
+                  String? selectedText;
+                  return SelectionArea(
+                    onSelectionChanged: (SelectedContent? selectedContent) {
+                      selectedText = selectedContent?.plainText;
+                    },
+                    contextMenuBuilder: (context, selectableRegionState) {
+                      return omiSelectionMenuBuilder(context, selectableRegionState, (text) {
+                        widget.onAskOmi?.call(text);
+                      }, selectedText: selectedText);
+                    },
+                    child: getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
+                  );
+                },
+              ),
+        if (widget.messageText.isNotEmpty && widget.messageText != '...' && !widget.showTypingIndicator)
+          MessageActionBar(
+            messageText: widget.messageText,
+            setMessageNps: widget.setMessageNps,
+            currentNps: widget.message.rating,
+          ),
+        if (widget.message.chartData != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: ChartMessageWidget(chartData: widget.message.chartData!),
+          )
+        else if (widget.showTypingIndicator && widget.message.thinkings.any((t) => t.toLowerCase().contains('chart')))
+          _buildChartShimmer(),
         const SizedBox(height: 16),
         for (var data in widget.messageMemories.indexed) ...[
           Padding(
-            padding: const EdgeInsetsDirectional.fromSTEB(0.0, 0.0, 0.0, 4.0),
+            padding: const EdgeInsetsDirectional.fromSTEB(0.0, 4.0, 0.0, 4.0),
             child: GestureDetector(
               onTap: () async {
                 final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
@@ -478,16 +801,12 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                   idx = memProvider.groupedConversations[date]?.indexWhere((element) => element.id == data.$2.id) ?? -1;
 
                   if (idx != -1) {
-                    context.read<ConversationDetailProvider>().updateConversation(idx, date);
+                    context.read<ConversationDetailProvider>().updateConversation(data.$2.id, date);
                     var m = memProvider.groupedConversations[date]![idx];
                     MixpanelManager().chatMessageConversationClicked(m);
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (c) => ConversationDetailPage(
-                          conversation: m,
-                        ),
-                      ),
-                    );
+                    await Navigator.of(
+                      context,
+                    ).push(MaterialPageRoute(builder: (c) => ConversationDetailPage(conversation: m)));
                   } else {
                     if (conversationDetailLoading[data.$1]) return;
                     setState(() => conversationDetailLoading[data.$1] = true);
@@ -496,25 +815,22 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                     (idx, date) = memProvider.addConversationWithDateGrouped(m);
                     MixpanelManager().chatMessageConversationClicked(m);
                     setState(() => conversationDetailLoading[data.$1] = false);
-                    context.read<ConversationDetailProvider>().updateConversation(idx, date);
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (c) => ConversationDetailPage(
-                          conversation: m,
-                        ),
-                      ),
-                    );
+                    context.read<ConversationDetailProvider>().updateConversation(m.id, date);
+                    await Navigator.of(
+                      context,
+                    ).push(MaterialPageRoute(builder: (c) => ConversationDetailPage(conversation: m)));
                     if (SharedPreferencesUtil().modifiedConversationDetails?.id == m.id) {
                       ServerConversation modifiedDetails = SharedPreferencesUtil().modifiedConversationDetails!;
                       widget.updateConversation(SharedPreferencesUtil().modifiedConversationDetails!);
                       var copy = List<MessageConversation>.from(widget.messageMemories);
                       copy[data.$1] = MessageConversation(
-                          modifiedDetails.id,
-                          modifiedDetails.createdAt,
-                          MessageConversationStructured(
-                            modifiedDetails.structured.title,
-                            modifiedDetails.structured.emoji,
-                          ));
+                        modifiedDetails.id,
+                        modifiedDetails.createdAt,
+                        MessageConversationStructured(
+                          modifiedDetails.structured.title,
+                          modifiedDetails.structured.emoji,
+                        ),
+                      );
                       widget.messageMemories.clear();
                       widget.messageMemories.addAll(copy);
                       SharedPreferencesUtil().modifiedConversationDetails = null;
@@ -523,20 +839,17 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                   }
                 } else {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Please check your internet connection and try again'),
-                      duration: Duration(seconds: 2),
+                    SnackBar(
+                      content: Text(context.l10n.pleaseCheckInternetConnection),
+                      duration: const Duration(seconds: 2),
                     ),
                   );
                 }
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12),
                 width: double.maxFinite,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade900,
-                  borderRadius: BorderRadius.circular(12.0),
-                ),
+                decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(16.0)),
                 child: Row(
                   children: [
                     Expanded(
@@ -550,19 +863,20 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                     const SizedBox(width: 8),
                     conversationDetailLoading[data.$1]
                         ? const SizedBox(
-                            height: 24,
-                            width: 24,
+                            height: 16,
+                            width: 16,
                             child: CircularProgressIndicator(
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                            ))
-                        : const Icon(Icons.arrow_right_alt)
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white54),
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: Colors.white54),
                   ],
                 ),
               ),
             ),
           ),
         ],
-        _getNpsWidget(context, widget.message, widget.setMessageNps),
       ],
     );
   }
@@ -576,15 +890,356 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
   }
 }
 
+/// Feedback reason options for thumbs down
+enum FeedbackReason {
+  tooVerbose('too_verbose', 'Too verbose'),
+  incorrectOrHallucination('incorrect_or_hallucination', 'Incorrect / hallucination'),
+  notHelpfulOrIrrelevant('not_helpful_or_irrelevant', 'Not helpful / irrelevant'),
+  didntFollowInstructions('didnt_follow_instructions', "Didn't follow instructions"),
+  other('other', 'Other');
+
+  final String key;
+  final String label;
+
+  const FeedbackReason(this.key, this.label);
+}
+
+/// Bottom sheet for collecting feedback on chat messages
+class FeedbackBottomSheet extends StatefulWidget {
+  final Function(String reason, String? comment) onSubmit;
+
+  const FeedbackBottomSheet({super.key, required this.onSubmit});
+
+  @override
+  State<FeedbackBottomSheet> createState() => _FeedbackBottomSheetState();
+}
+
+class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
+  FeedbackReason? _selectedReason;
+  final TextEditingController _commentController = TextEditingController();
+  final FocusNode _commentFocusNode = FocusNode();
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    _commentFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _handleSubmit() {
+    if (_selectedReason == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(context.l10n.pleaseSelectReason),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    HapticFeedback.mediumImpact();
+    final comment = _commentController.text.trim();
+    widget.onSubmit(_selectedReason!.key, comment.isEmpty ? null : comment);
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF1C1C1E),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Handle bar
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(color: Colors.grey.shade600, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+
+            // Header with title and submit button
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'What went wrong?',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+                TextButton(
+                  onPressed: _selectedReason != null ? _handleSubmit : null,
+                  child: Text(
+                    'Submit',
+                    style: TextStyle(
+                      color: _selectedReason != null ? Colors.blue : Colors.grey.shade600,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Reason options
+            const Text(
+              'Select a reason',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+
+            // Reason chips
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: FeedbackReason.values.map((reason) {
+                final isSelected = _selectedReason == reason;
+                return GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() {
+                      _selectedReason = reason;
+                    });
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: isSelected ? Colors.blue.withOpacity(0.2) : const Color(0xFF2C2C2E),
+                      borderRadius: BorderRadius.circular(20),
+                      border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
+                    ),
+                    child: Text(
+                      reason.label,
+                      style: TextStyle(
+                        color: isSelected ? Colors.blue : Colors.white,
+                        fontSize: 14,
+                        fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 20),
+
+            // Comment input
+            const Text(
+              'Additional feedback (optional)',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              decoration: BoxDecoration(color: const Color(0xFF2C2C2E), borderRadius: BorderRadius.circular(12)),
+              child: TextField(
+                controller: _commentController,
+                focusNode: _commentFocusNode,
+                style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+                decoration: InputDecoration(
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                  hintText: context.l10n.tellUsMoreWhatWentWrong,
+                  hintStyle: const TextStyle(color: Colors.grey, fontSize: 15),
+                ),
+                maxLines: 3,
+                minLines: 2,
+                maxLength: 500,
+                buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
+                textCapitalization: TextCapitalization.sentences,
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Show the feedback bottom sheet
+Future<void> showFeedbackBottomSheet(
+  BuildContext context, {
+  required Function(String reason, String? comment) onSubmit,
+}) async {
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (context) => FeedbackBottomSheet(onSubmit: onSubmit),
+  );
+}
+
+class MessageActionBar extends StatefulWidget {
+  final String messageText;
+  final Function(int, {String? reason})? setMessageNps;
+  final int? currentNps;
+
+  const MessageActionBar({super.key, required this.messageText, this.setMessageNps, this.currentNps});
+
+  @override
+  State<MessageActionBar> createState() => _MessageActionBarState();
+}
+
+class _MessageActionBarState extends State<MessageActionBar> {
+  int? _selectedNps;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedNps = widget.currentNps;
+  }
+
+  @override
+  void didUpdateWidget(MessageActionBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Update local state if the widget's currentNps changed (e.g., from server fetch)
+    if (oldWidget.currentNps != widget.currentNps) {
+      setState(() {
+        _selectedNps = widget.currentNps;
+      });
+    }
+  }
+
+  /// Show bottom sheet with thumbs down reason options and comment field
+  void _showThumbsDownReasonPicker() {
+    showFeedbackBottomSheet(
+      context,
+      onSubmit: (reason, comment) {
+        setState(() {
+          _selectedNps = -1;
+        });
+        // Combine reason and comment for the API call
+        String feedbackReason = reason;
+        if (comment != null && comment.isNotEmpty) {
+          feedbackReason = '$reason: $comment';
+        }
+        widget.setMessageNps?.call(-1, reason: feedbackReason);
+
+        // Show confirmation snackbar
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Thanks for your feedback!', style: TextStyle(color: Colors.white)),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, left: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Copy button
+          _buildActionButton(
+            icon: FontAwesomeIcons.copy,
+            onTap: () async {
+              HapticFeedback.lightImpact();
+              await Clipboard.setData(ClipboardData(text: widget.messageText));
+              MixpanelManager().track('Chat Message Copied', properties: {'message': widget.messageText});
+
+              // Implicit positive feedback - user copied the message (silent, no UI change)
+              if (_selectedNps == null) {
+                widget.setMessageNps?.call(1, reason: 'user_copied_message');
+              }
+
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      context.l10n.messageCopied,
+                      style: const TextStyle(color: Colors.white, fontSize: 12.0),
+                    ),
+                    duration: const Duration(milliseconds: 1500),
+                  ),
+                );
+              }
+            },
+          ),
+          const SizedBox(width: 20),
+          // Thumbs up button
+          _buildActionButton(
+            icon: _selectedNps == 1 ? FontAwesomeIcons.solidThumbsUp : FontAwesomeIcons.thumbsUp,
+            isSelected: _selectedNps == 1,
+            onTap: () {
+              HapticFeedback.lightImpact();
+              setState(() {
+                _selectedNps = _selectedNps == 1 ? null : 1;
+              });
+              widget.setMessageNps?.call(_selectedNps ?? 0);
+            },
+          ),
+          const SizedBox(width: 20),
+          // Thumbs down button
+          _buildActionButton(
+            icon: _selectedNps == -1 ? FontAwesomeIcons.solidThumbsDown : FontAwesomeIcons.thumbsDown,
+            isSelected: _selectedNps == -1,
+            onTap: () {
+              HapticFeedback.lightImpact();
+              if (_selectedNps == -1) {
+                // Already thumbs down, toggle off
+                setState(() {
+                  _selectedNps = null;
+                });
+                widget.setMessageNps?.call(0);
+              } else {
+                // Show reason picker for thumbs down
+                _showThumbsDownReasonPicker();
+              }
+            },
+          ),
+          const SizedBox(width: 20),
+          // Share button
+          _buildActionButton(
+            icon: FontAwesomeIcons.share,
+            onTap: () async {
+              HapticFeedback.lightImpact();
+              await Share.share(widget.messageText);
+              MixpanelManager().track('Chat Message Shared', properties: {'message': widget.messageText});
+
+              // Implicit positive feedback - user shared the message (silent, no UI change)
+              if (_selectedNps == null) {
+                widget.setMessageNps?.call(1, reason: 'user_shared_message');
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton({required IconData icon, required VoidCallback onTap, bool isSelected = false}) {
+    return InkWell(
+      splashColor: Colors.transparent,
+      focusColor: Colors.transparent,
+      hoverColor: Colors.transparent,
+      highlightColor: Colors.transparent,
+      onTap: onTap,
+      child: FaIcon(icon, color: isSelected ? Colors.white : Colors.grey.shade600, size: 14),
+    );
+  }
+}
+
 class CopyButton extends StatelessWidget {
   final String messageText;
   final bool isUserMessage;
 
-  const CopyButton({
-    super.key,
-    required this.messageText,
-    this.isUserMessage = false,
-  });
+  const CopyButton({super.key, required this.messageText, this.isUserMessage = false});
 
   @override
   Widget build(BuildContext context) {
@@ -601,10 +1256,7 @@ class CopyButton extends StatelessWidget {
             const SnackBar(
               content: Text(
                 'Message copied to clipboard.',
-                style: TextStyle(
-                  color: Color.fromARGB(255, 255, 255, 255),
-                  fontSize: 12.0,
-                ),
+                style: TextStyle(color: Color.fromARGB(255, 255, 255, 255), fontSize: 12.0),
               ),
               duration: Duration(milliseconds: 2000),
             ),
@@ -616,19 +1268,10 @@ class CopyButton extends StatelessWidget {
           children: [
             Padding(
               padding: const EdgeInsetsDirectional.fromSTEB(0.0, 0.0, 4.0, 0.0),
-              child: Icon(
-                Icons.content_copy,
-                color: Theme.of(context).textTheme.bodySmall!.color,
-                size: 10.0,
-              ),
+              child: Icon(Icons.content_copy, color: Theme.of(context).textTheme.bodySmall!.color, size: 10.0),
             ),
-            Text(
-              'Copy message',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(
-              width: 8,
-            ),
+            Text('Copy message', style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(width: 8),
           ],
         ),
       ),
@@ -648,10 +1291,7 @@ class InitialOptionWidget extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10),
         width: double.maxFinite,
-        decoration: BoxDecoration(
-          color: Colors.grey.shade900,
-          borderRadius: BorderRadius.circular(12.0),
-        ),
+        decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(12.0)),
         child: Text(optionText, style: Theme.of(context).textTheme.bodyMedium),
       ),
       onTap: () {

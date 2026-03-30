@@ -2,29 +2,18 @@
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+
 import 'package:upgrader/upgrader.dart';
+
+import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class MyUpgrader extends Upgrader {
   MyUpgrader({super.debugLogging, super.debugDisplayOnce});
-
-  @override
-  bool isUpdateAvailable() {
-    final storeVersion = currentAppStoreVersion;
-    final installedVersion = currentInstalledVersion;
-    // print('storeVersion=$storeVersion');
-    // print('installedVersion=$installedVersion');
-    return super.isUpdateAvailable();
-  }
 }
 
 class MyUpgradeAlert extends UpgradeAlert {
-  MyUpgradeAlert({
-    super.key,
-    super.upgrader,
-    super.child,
-    super.dialogStyle,
-  });
+  MyUpgradeAlert({super.key, super.upgrader, super.child, super.dialogStyle});
 
   /// Override the [createState] method to provide a custom class
   /// with overridden methods.
@@ -44,56 +33,57 @@ class MyUpgradeAlertState extends UpgradeAlertState {
     required UpgraderMessages messages,
   }) {
     showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          if (widget.dialogStyle == UpgradeDialogStyle.cupertino) {
-            return CupertinoAlertDialog(
-              key: key,
-              title: const Text(
-                'New Version Available  🎉',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-              ),
-              content: SingleChildScrollView(child: ListBody(children: <Widget>[Text(message)])),
-              actions: <Widget>[
-                TextButton(
-                  child: Text('No', style: TextStyle(color: Colors.grey.shade200, fontSize: 16)),
-                  onPressed: () {
-                    onUserIgnored(context, true);
-                    MixpanelManager().upgradeModalDismissed();
-                  },
-                ),
-                TextButton(
-                  child: const Text('Upgrade', style: TextStyle(color: Colors.white, fontSize: 16)),
-                  onPressed: () {
-                    onUserUpdated(context, !widget.upgrader.blocked());
-                    MixpanelManager().upgradeModalClicked();
-                  },
-                ),
-              ],
-            );
-          }
-          return AlertDialog(
+      context: context,
+      builder: (BuildContext context) {
+        if (widget.dialogStyle == UpgradeDialogStyle.cupertino) {
+          return CupertinoAlertDialog(
             key: key,
-            title: const Text(
-              'New Version Available  🎉',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            title: Text(
+              context.l10n.newVersionAvailable,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
             ),
             content: SingleChildScrollView(child: ListBody(children: <Widget>[Text(message)])),
             actions: <Widget>[
               TextButton(
-                child: Text('No', style: TextStyle(color: Colors.grey.shade200, fontSize: 16)),
+                child: Text(context.l10n.no, style: TextStyle(color: Colors.grey.shade200, fontSize: 16)),
                 onPressed: () {
                   onUserIgnored(context, true);
+                  MixpanelManager().upgradeModalDismissed();
                 },
               ),
               TextButton(
-                child: const Text('Upgrade', style: TextStyle(color: Colors.white, fontSize: 16)),
+                child: Text(context.l10n.upgrade, style: const TextStyle(color: Colors.white, fontSize: 16)),
                 onPressed: () {
                   onUserUpdated(context, !widget.upgrader.blocked());
+                  MixpanelManager().upgradeModalClicked();
                 },
               ),
             ],
           );
-        });
+        }
+        return AlertDialog(
+          key: key,
+          title: Text(
+            context.l10n.newVersionAvailable,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+          ),
+          content: SingleChildScrollView(child: ListBody(children: <Widget>[Text(message)])),
+          actions: <Widget>[
+            TextButton(
+              child: Text(context.l10n.no, style: TextStyle(color: Colors.grey.shade200, fontSize: 16)),
+              onPressed: () {
+                onUserIgnored(context, true);
+              },
+            ),
+            TextButton(
+              child: Text(context.l10n.upgrade, style: const TextStyle(color: Colors.white, fontSize: 16)),
+              onPressed: () {
+                onUserUpdated(context, !widget.upgrader.blocked());
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 }

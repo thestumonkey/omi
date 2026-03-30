@@ -3,27 +3,35 @@ from typing import Optional, List
 from models.app import App
 from models.chat import Message, MessageSender
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
-from .clients import llm_persona_mini_stream, llm_persona_medium_stream, llm_medium, llm_mini
+from .clients import llm_persona_mini_stream, llm_persona_medium_stream, llm_medium_experiment
+from .usage_tracker import track_usage, Features
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def initial_persona_chat_message(uid: str, app: Optional[App] = None, messages: List[Message] = []) -> str:
-    print("initial_persona_chat_message")
+    logger.info("initial_persona_chat_message")
     chat_messages = [SystemMessage(content=app.persona_prompt)]
     for msg in messages:
         if msg.sender == MessageSender.ai:
             chat_messages.append(AIMessage(content=msg.text))
         else:
             chat_messages.append(HumanMessage(content=msg.text))
-    chat_messages.append(HumanMessage(
-        content='lets begin. you write the first message, one short provocative question relevant to your identity. never respond with **. while continuing the convo, always respond w short msgs, lowercase.'))
+    chat_messages.append(
+        HumanMessage(
+            content='lets begin. you write the first message, one short provocative question relevant to your identity. never respond with **. while continuing the convo, always respond w short msgs, lowercase.'
+        )
+    )
     llm_call = llm_persona_mini_stream
     if app.is_influencer:
         llm_call = llm_persona_medium_stream
-    return llm_call.invoke(chat_messages).content
+    with track_usage(uid, Features.PERSONA):
+        return llm_call.invoke(chat_messages).content
 
 
-def answer_persona_question_stream(app: App, messages: List[Message], callbacks: []) -> str:
-    print("answer_persona_question_stream")
+def answer_persona_question_stream(uid: str, app: App, messages: List[Message], callbacks: []) -> str:
+    logger.info("answer_persona_question_stream")
     chat_messages = [SystemMessage(content=app.persona_prompt)]
     for msg in messages:
         if msg.sender == MessageSender.ai:
@@ -33,7 +41,8 @@ def answer_persona_question_stream(app: App, messages: List[Message], callbacks:
     llm_call = llm_persona_mini_stream
     if app.is_influencer:
         llm_call = llm_persona_medium_stream
-    return llm_call.invoke(chat_messages, {'callbacks': callbacks}).content
+    with track_usage(uid, Features.PERSONA):
+        return llm_call.invoke(chat_messages, {'callbacks': callbacks}).content
 
 
 def condense_memories(memories, name):
@@ -63,7 +72,7 @@ The output must be as concise as possible while retaining all necessary informat
 Facts:
 {combined_memories}
     """
-    response = llm_medium.invoke(prompt)
+    response = llm_medium_experiment.invoke(prompt)
     return response.content
 
 
@@ -77,7 +86,7 @@ Facts:
 
 Create a natural, memorable description that captures this person's essence. Focus on the most unique and interesting aspects. Make it conversational and engaging."""
 
-    response = llm_medium.invoke(prompt)
+    response = llm_medium_experiment.invoke(prompt)
     description = response.content
     return description
 
@@ -85,7 +94,7 @@ Create a natural, memorable description that captures this person's essence. Foc
 def condense_conversations(conversations):
     combined_conversations = "\n".join(conversations)
     prompt = f"""
-You are an AI tasked with condensing context from the recent 100 conversations of a user to accurately replicate their communication style, personality, decision-making patterns, and contextual knowledge for 1:1 cloning. Each conversation includes a summary and a full transcript.  
+You are an AI tasked with condensing context from the recent {len(conversations)} conversations of a user to accurately replicate their communication style, personality, decision-making patterns, and contextual knowledge for 1:1 cloning. Each conversation includes a summary and a full transcript.  
 
 **Requirements:**  
 1. Prioritize information based on:  
@@ -112,7 +121,7 @@ The output must be as concise as possible while retaining all necessary context 
 Conversations:
 {combined_conversations}
     """
-    response = llm_medium.invoke(prompt)
+    response = llm_medium_experiment.invoke(prompt)
     return response.content
 
 
@@ -149,7 +158,7 @@ Generate the condensed context now.
 Tweets:
 {tweets}
     """
-    response = llm_medium.invoke(prompt)
+    response = llm_medium_experiment.invoke(prompt)
     return response.content
 
 
@@ -191,21 +200,11 @@ Tweets:
 def generate_persona_intro_message(prompt: str, name: str):
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user",
-         "content": f"Generate a short, funny 5-8 word message that would make someone want to chat with you. Be casual and witty, but don't mention being AI or a clone. Just be {name}. The message should feel natural and make people curious to chat with you."}
+        {
+            "role": "user",
+            "content": f"Generate a short, funny 5-8 word message that would make someone want to chat with you. Be casual and witty, but don't mention being AI or a clone. Just be {name}. The message should feel natural and make people curious to chat with you.",
+        },
     ]
 
-    response = llm_medium.invoke(messages)
+    response = llm_medium_experiment.invoke(messages)
     return response.content.strip('"').strip()
-
-
-def generate_description(app_name: str, description: str) -> str:
-    prompt = f"""
-    You are an AI assistant specializing in crafting detailed and engaging descriptions for apps.
-    You will be provided with the app's name and a brief description which might not be that good. Your task is to expand on the given information, creating a captivating and detailed app description that highlights the app's features, functionality, and benefits.
-    The description should be concise, professional, and not more than 40 words, ensuring clarity and appeal. Respond with only the description, tailored to the app's concept and purpose.
-    App Name: {app_name}
-    Description: {description}
-    """
-    prompt = prompt.replace('    ', '').strip()
-    return llm_mini.invoke(prompt).content

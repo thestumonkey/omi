@@ -1,11 +1,6 @@
-import { SearchParamsTypes } from '@/src/types/params.types';
 import { Metadata } from 'next';
 import './styles.css';
 import { redirect } from 'next/navigation';
-
-interface MemoriesPageProps {
-  searchParams: SearchParamsTypes;
-}
 
 export const metadata: Metadata = {
   title: 'Community Memories',
@@ -13,7 +8,7 @@ export const metadata: Metadata = {
     'Relive the moments that matter, discover new stories, and connect with others through our shared community memories.',
 };
 
-export default function MemoriesPage({ searchParams }: MemoriesPageProps) {
+export default function MemoriesPage() {
   redirect('/dreamforce');
   // const previewId = searchParams.previewId;
   // return (
