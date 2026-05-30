@@ -1,17 +1,16 @@
 import hashlib
-import json
 import os
 import uuid
 
-from google.cloud import firestore
+# Storage seam: a Firestore-API-compatible client backed by MongoDB.
+# Every database/*.py module does `from ._client import db`, so this single
+# line repoints the entire data layer off Firestore. See mongo_firestore.py.
+from database.mongo_firestore import MongoFirestore
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    # create google-credentials.json
-    with open('google-credentials.json', 'w') as f:
-        json.dump(service_account_info, f)
-
-db = firestore.Client()
+db = MongoFirestore(
+    os.environ.get('MONGODB_URL', 'mongodb://localhost:27017'),
+    os.environ.get('MONGODB_DB', 'omi'),
+)
 
 
 def get_users_uid():
