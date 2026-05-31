@@ -197,23 +197,28 @@ async def _get_or_create_user(claims: dict[str, Any], db: AsyncSession) -> User:
     )
     user = result.scalar_one_or_none()
 
-    # Migration path: user existed under a previous IdP (different sub, same email)
+    # Migration path: a user may exist under a previous IdP (different sub).
+    #
+    # SECURITY: only auto-link when the IdP asserts the email is VERIFIED, and
+    # NEVER match on username/name. Usernames and unverified emails are mutable,
+    # attacker-chosen values — matching them lets anyone register a Casdoor
+    # account carrying a victim's name/email and silently inherit the victim's
+    # row (account takeover). This requires Casdoor email verification
+    # (rule: "Verify") so the `email_verified` claim is trustworthy. Prefer
+    # gating this block behind a one-time backfill flag and removing it once
+    # migration is complete.
     if user is None:
         email = claims.get("email", "")
-        username = claims.get("name", "")
-        for field, value in [("email", email), ("username", username)]:
-            if not value:
-                continue
-            col = User.email if field == "email" else User.username
+        email_verified = claims.get("email_verified") is True
+        if email and email_verified:
             result = await db.execute(
-                select(User).where(col == value).options(selectinload(User.roles))
+                select(User).where(User.email == email).options(selectinload(User.roles))
             )
             user = result.scalar_one_or_none()
             if user is not None:
                 user.oidc_sub = sub
                 await db.commit()
                 logger.info("Migrated existing user %s to new oidc_sub", user.username)
-                break
 
     if user is None:
         user = User(
