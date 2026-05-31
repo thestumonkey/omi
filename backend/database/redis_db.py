@@ -915,3 +915,16 @@ def try_acquire_conversation_goal_lock(uid: str, conversation_id: str, ttl: int 
     """Idempotency lock: one goal extraction per conversation. Returns True if acquired."""
     result = r.set(f'users:{uid}:conv_goal_lock:{conversation_id}', '1', ex=ttl, nx=True)
     return result is not None
+
+
+# Casdoor/OIDC migration: user-name cache used by database.auth.get_user_name.
+def cache_user_name(uid: str, name: str, ttl: int = 60 * 60 * 24 * 7):
+    r.set(f'users:{uid}:name', name)
+    r.expire(f'users:{uid}:name', ttl)
+
+
+def get_cached_user_name(uid: str) -> str:
+    name = r.get(f'users:{uid}:name')
+    if not name:
+        return 'User'
+    return name.decode()
