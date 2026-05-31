@@ -5,8 +5,8 @@ import time
 from fastapi import Depends, Header, HTTPException, WebSocketException
 from fastapi import Request
 from starlette.websockets import WebSocket
-from firebase_admin import auth
-from firebase_admin.auth import InvalidIdTokenError
+from utils.oidc import verify_oidc_token
+from database.auth import get_user_from_uid
 import logging
 import redis as redis_pkg
 
@@ -19,9 +19,12 @@ from utils.rate_limit_config import RATE_POLICIES, RATE_LIMIT_SHADOW, get_effect
 logger = logging.getLogger(__name__)
 
 
+class InvalidIdTokenError(Exception):
+    """Local replacement for firebase_admin.auth.InvalidIdTokenError (Casdoor/OIDC migration)."""
+
+
 def get_user(uid: str):
-    user = auth.get_user(uid)
-    return user
+    return get_user_from_uid(uid)
 
 
 def verify_token(token: str) -> str:
@@ -42,14 +45,14 @@ def verify_token(token: str) -> str:
     if admin_key and token.startswith(admin_key):
         return token[len(admin_key) :]
 
-    # Verify Firebase token
+    # Verify Casdoor/OIDC token
     try:
-        decoded_token = auth.verify_id_token(token)
-        return decoded_token['uid']
-    except InvalidIdTokenError:
+        decoded_token = verify_oidc_token(token)
+        return decoded_token['sub']
+    except Exception as e:
         if os.getenv('LOCAL_DEVELOPMENT') == 'true':
             return '123'
-        raise
+        raise InvalidIdTokenError(str(e))
 
 
 def get_current_user_uid(
