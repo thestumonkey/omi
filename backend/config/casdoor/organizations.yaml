@@ -1,0 +1,20 @@
+# Casdoor Organization Definitions
+# Apply with: just casdoor-setup
+
+admin_org: admin   # owns the records (visible in Casdoor UI)
+user_org: omi      # where end-users register
+
+organizations:
+  - name: omi
+    displayName: "Omi"
+    phonePrefix: "1"
+    enableSoftDeletion: false
+    isProfilePublic: false
+    languages:
+      - en
+    countryCodes:
+      - US
+    passwordOptions:
+      - AtLeast6
+    tags: []
+    userTypes: []

@@ -1,0 +1,6 @@
+# Casdoor Group Definitions
+# Apply with: just casdoor-setup
+
+groups:
+  - name: admin
+    displayName: "Admin"

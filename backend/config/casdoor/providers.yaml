@@ -1,0 +1,21 @@
+# Casdoor OAuth Provider Definitions
+# External identity providers (Google, GitHub, Discord, etc.)
+# Apply with: make casdoor-setup-dev
+#
+# Provider types: Google, GitHub, Apple, Facebook, Twitter, Microsoft,
+#                 LinkedIn, Discord, Slack, GitLab, Bitbucket, ...
+# Add clientId/clientSecret to .env and reference via env vars below.
+
+providers: []
+
+# providers:
+#   - name: google
+#     displayName: "Google"
+#     type: Google
+#     clientId: ${GOOGLE_CLIENT_ID}
+#     clientSecret: ${GOOGLE_CLIENT_SECRET}
+#   - name: discord
+#     displayName: "Discord"
+#     type: Discord
+#     clientId: ${DISCORD_CLIENT_ID}
+#     clientSecret: ${DISCORD_CLIENT_SECRET}
