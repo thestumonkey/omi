@@ -2,7 +2,7 @@ from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from firebase_admin import auth
+from utils.oidc import verify_oidc_token
 
 import database.mcp_api_key as mcp_api_key_db
 import database.dev_api_key as dev_api_key_db
@@ -21,10 +21,10 @@ async def get_current_user_id(
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         id_token = credentials.credentials
-        decoded_token = auth.verify_id_token(id_token)
-        return decoded_token["uid"]
+        decoded_token = verify_oidc_token(id_token)
+        return decoded_token["sub"]
     except Exception as e:
-        logger.error(f"Error verifying Firebase ID token: {e}")
+        logger.error(f"Error verifying OIDC token: {e}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 
