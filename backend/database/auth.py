@@ -1,72 +1,107 @@
-from firebase_admin import auth
+"""
+User profile lookup via Casdoor.
 
-from database._client import db
-from database.redis_db import cache_user_name
-import logging
+Uses Casdoor's management API for user profile lookups.
+Requires CASDOOR_ENDPOINT, CASDOOR_CLIENT_ID, and CASDOOR_CLIENT_SECRET env vars.
 
-logger = logging.getLogger(__name__)
+Casdoor's sub claim format is "{org_name}/{username}", so we can parse it
+directly to build the user lookup id.
+"""
+
+import os
+
+import requests
+
+from database.redis_db import cache_user_name, get_cached_user_name
 
 
-def get_user_from_uid(uid: str):
-    try:
-        user = auth.get_user(uid) if uid else None
-    except Exception as e:
-        logger.error(e)
-        user = None
-    if not user:
-        return None
-
+def _casdoor_params() -> dict:
+    """Query params for Casdoor admin API authentication."""
     return {
-        'uid': user.uid,
-        'email': user.email,
-        'email_verified': user.email_verified,
-        'phone_number': user.phone_number,
-        'display_name': user.display_name,
-        'photo_url': user.photo_url,
-        'disabled': user.disabled,
+        "clientId": os.environ.get("CASDOOR_CLIENT_ID", ""),
+        "clientSecret": os.environ.get("CASDOOR_CLIENT_SECRET", ""),
     }
 
 
-def _get_firestore_user_name(uid: str):
-    """Fallback: get user name from Firestore user profile."""
+def get_user_from_uid(uid: str) -> dict | None:
+    """Fetch user profile from Casdoor by their sub (uid).
+
+    The Casdoor sub is "{org_name}/{username}", used directly as the user id.
+    """
+    if not uid:
+        return None
+
+    base = os.environ.get("CASDOOR_ENDPOINT", "").rstrip("/")
+    if not base:
+        return None
+
     try:
-        user_doc = db.collection('users').document(uid).get()
-        if user_doc.exists:
-            name = user_doc.to_dict().get('name')
-            if name and isinstance(name, str):
-                return name.split(' ')[0]
+        params = _casdoor_params()
+        params["id"] = uid  # Casdoor id format: "org/username"
+        resp = requests.get(
+            f"{base}/api/get-user",
+            params=params,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        user = body.get("data") if isinstance(body, dict) else None
+        if not user:
+            return None
+
+        return {
+            "uid": uid,
+            "email": user.get("email"),
+            "email_verified": True,
+            "phone_number": user.get("phone"),
+            "display_name": user.get("displayName") or user.get("name"),
+            "photo_url": user.get("avatar"),
+            "disabled": not user.get("isEnabled", True),
+        }
     except Exception as e:
-        logger.error(f"Firestore user name lookup failed: {e}")
-    return None
+        print(f"Error fetching user {uid} from Casdoor: {e}")
+        return None
 
 
-def get_user_name(uid: str, use_default: bool = True):
-    default_name = 'The User' if use_default else None
+def get_user_name(uid: str, use_default: bool = True) -> str | None:
+    if cached_name := get_cached_user_name(uid):
+        return cached_name
+
+    default_name = "The User" if use_default else None
     user = get_user_from_uid(uid)
     if not user:
-        # Fallback to Firestore profile
-        firestore_name = _get_firestore_user_name(uid)
-        if firestore_name:
-            cache_user_name(uid, firestore_name, ttl=60 * 60)
-            return firestore_name
         return default_name
 
-    display_name = user.get('display_name')
-    if not display_name:
-        # Fallback to Firestore profile
-        firestore_name = _get_firestore_user_name(uid)
-        if firestore_name:
-            cache_user_name(uid, firestore_name, ttl=60 * 60)
-            return firestore_name
-        return default_name
-
-    display_name = display_name.split(' ')[0]
-    if display_name == 'AnonymousUser':
-        firestore_name = _get_firestore_user_name(uid)
-        if firestore_name:
-            display_name = firestore_name
-        else:
-            display_name = default_name
+    display_name = user.get("display_name") or default_name
+    if display_name and display_name != "AnonymousUser":
+        display_name = display_name.split(" ")[0]
 
     cache_user_name(uid, display_name, ttl=60 * 60)
     return display_name
+
+
+def delete_account(uid: str):
+    """Delete a user from Casdoor."""
+    base = os.environ.get("CASDOOR_ENDPOINT", "").rstrip("/")
+    if not base:
+        return {"message": "Auth provider not configured"}
+
+    # Parse org and username from sub format "org/username"
+    parts = uid.split("/", 1)
+    if len(parts) != 2:
+        return {"message": f"Invalid uid format: {uid}"}
+    owner, name = parts
+
+    try:
+        params = _casdoor_params()
+        resp = requests.delete(
+            f"{base}/api/delete-user",
+            params=params,
+            json={"owner": owner, "name": name},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return {"message": "User deleted"}
+    except Exception as e:
+        print(f"Error deleting user {uid} from Casdoor: {e}")
+        return {"message": f"Failed to delete user: {e}"}
