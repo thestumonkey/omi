@@ -1,261 +1,146 @@
-from utils.executors import critical_executor, run_blocking
-import os
-import uuid
+"""
+Auth router — OIDC sign-in flow via Casdoor.
+
+Flow:
+  1. App calls GET /v1/auth/authorize?redirect_uri=omi://...
+  2. Backend stores a session in Redis and redirects user to Casdoor.
+  3. Casdoor authenticates the user and redirects back to GET /v1/auth/callback.
+  4. Backend exchanges the code for Casdoor tokens, stores them in Redis
+     under a short-lived auth code, and redirects to the app's redirect_uri.
+  5. App calls POST /v1/auth/token with the auth code to get the id_token.
+  6. App uses that id_token as a Bearer token on all subsequent requests.
+"""
+
 import json
-import hashlib
-import time
-import jwt
+import os
+import socket
+import uuid
 from typing import Optional
-from urllib.parse import quote, urlparse
-from cryptography.hazmat.primitives import serialization
-from jwt.algorithms import RSAAlgorithm
-from fastapi import APIRouter, Request, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from urllib.parse import quote
+
+import requests
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 import pathlib
-import firebase_admin.auth
-from database.redis_db import set_auth_session, get_auth_session, set_auth_code, get_auth_code, delete_auth_code
-from utils.http_client import get_auth_client
-from utils.log_sanitizer import sanitize
-import logging
 
-logger = logging.getLogger(__name__)
+from database.redis_db import (
+    delete_auth_code,
+    get_auth_code,
+    get_auth_session,
+    set_auth_code,
+    set_auth_session,
+)
 
 router = APIRouter(
     prefix="/v1/auth",
     tags=["authentication"],
 )
 
-# Set up Jinja2 templates
 templates_path = pathlib.Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_path))
 
 
-# Loopback hosts permitted for CLI/native-app OAuth flows per RFC 8252 §7.3.
-_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
-_DEFAULT_MOBILE_REDIRECT = "omi://auth/callback"
-
-# Schemes that must NOT receive an OAuth code:
-#   - ``https``: would leak the code to an arbitrary remote host. (Loopback OAuth
-#     is HTTP, not HTTPS, per RFC 8252.)
-#   - ``javascript``, ``data``, ``vbscript``: browser-executable URLs. A code
-#     leaked into one of these would be exfiltrated by the rendered page.
-#   - ``file``: local file URL — could end up read by another process.
-#   - ``blob``, ``filesystem``, ``about``: browser-internal pseudo-schemes.
-_FORBIDDEN_REDIRECT_SCHEMES = {
-    "https",
-    "javascript",
-    "data",
-    "vbscript",
-    "file",
-    "blob",
-    "filesystem",
-    "about",
-}
+def _casdoor_base() -> str:
+    return os.environ["CASDOOR_ENDPOINT"].rstrip("/")
 
 
-def _validate_redirect_uri(redirect_uri: str) -> None:
-    """Reject redirect URIs that could deliver the OAuth code to an attacker.
+def _casdoor_internal_base() -> str:
+    """Internal cluster URL for server-to-server calls.
 
-    Allow:
-
-    * **Custom app schemes** (``omi://``, ``omi-computer://``,
-      ``omi-computer-dev://``, ``omi-fix-rewind://``, ``com.omi.app://``,
-      etc.). The Omi mobile app, the macOS desktop app, and per-bundle
-      developer test builds register their own URL schemes with the OS
-      via ``CFBundleURLSchemes`` / Android intent filters; this is the
-      standard native-app OAuth callback mechanism per RFC 8252.
-
-    * **HTTP loopback** (``http://localhost[:PORT]/...``,
-      ``http://127.0.0.1[:PORT]/...``, ``http://[::1][:PORT]/...``) for the
-      CLI's loopback callback server.
-
-    Reject:
-
-    * **https://** and any other web-fetchable scheme — they could exfiltrate
-      the auth code off-device.
-    * **http://** to anything other than loopback.
-    * Browser-executable schemes (``javascript:``, ``data:``, etc.).
-    * Empty / unparseable input.
-
-    Security note: the auth ``code`` is a one-time secret. If we accepted
-    arbitrary URLs, an attacker who induced a user to start a flow could
-    harvest the code at their own host. Restricting to native-app custom
-    schemes + loopback is the RFC 8252 §7 mitigation.
+    Prefers CASDOOR_INTERNAL_URL (e.g. K8s cluster DNS) when the host is
+    resolvable; falls back to the public CASDOOR_ENDPOINT for Docker/Cloud Run
+    environments where the internal hostname does not exist.
     """
-    if not redirect_uri:
-        raise HTTPException(status_code=400, detail="redirect_uri is required")
-
-    parsed = urlparse(redirect_uri)
-    scheme = (parsed.scheme or "").strip().lower()
-
-    if not scheme:
-        raise HTTPException(status_code=400, detail="redirect_uri must include a scheme")
-
-    if scheme == "http":
-        hostname = (parsed.hostname or "").strip().lower()
-        if hostname not in _LOOPBACK_HOSTNAMES:
-            raise HTTPException(
-                status_code=400,
-                detail="HTTP redirect_uri must point at loopback (localhost, 127.0.0.1, or ::1)",
-            )
-        return
-
-    if scheme in _FORBIDDEN_REDIRECT_SCHEMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"redirect_uri scheme '{scheme}' is not permitted",
-        )
-
-    # Custom app scheme. Per RFC 3986, a scheme is
-    # ``ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )``. Be a little stricter
-    # than urllib here — require the scheme to start with a letter and contain
-    # only the RFC-allowed characters, so we don't accept garbage like ``://x``.
-    if not _is_valid_scheme(scheme):
-        raise HTTPException(
-            status_code=400,
-            detail=f"redirect_uri scheme '{scheme}' is malformed",
-        )
-
-    return
+    external = _casdoor_base()
+    internal = os.environ.get("CASDOOR_INTERNAL_URL", "").rstrip("/")
+    if not internal:
+        return external
+    try:
+        host = internal.split("//")[-1].split("/")[0].split(":")[0]
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(2)
+        try:
+            socket.getaddrinfo(host, None)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+        return internal
+    except (socket.gaierror, OSError, socket.timeout):
+        print(f"auth: internal Casdoor URL '{internal}' unreachable, using '{external}'")
+        return external
 
 
-_ASCII_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
-_ASCII_ALNUM = _ASCII_LETTERS | frozenset("0123456789")
+def _client_id() -> str:
+    return os.environ["CASDOOR_CLIENT_ID"]
 
 
-def _is_valid_scheme(scheme: str) -> bool:
-    """RFC 3986 scheme validity check: ASCII ALPHA, then ASCII ALPHA/DIGIT/+/-/.
+def _client_secret() -> str:
+    return os.environ["CASDOOR_CLIENT_SECRET"]
 
-    We deliberately use explicit ASCII sets instead of ``str.isalpha`` /
-    ``str.isalnum`` — those are Unicode-aware and would happily accept
-    non-ASCII letters (``ñ``, ``й``, etc.) that RFC 3986 forbids in scheme names.
-    """
-    if not scheme:
-        return False
-    lowered = scheme.lower()
-    if lowered[0] not in _ASCII_LETTERS:
-        return False
-    return all(c in _ASCII_ALNUM or c in "+-." for c in lowered)
+
+def _callback_url() -> str:
+    base = os.environ["BASE_API_URL"].rstrip("/")
+    return f"{base}/v1/auth/callback"
+
+
+# ── 1. Start sign-in ─────────────────────────────────────────────────────────
 
 
 @router.get("/authorize")
 async def auth_authorize(
     request: Request,
-    provider: str,  # 'google', 'apple'
     redirect_uri: str,
     state: Optional[str] = None,
 ):
-    """
-    User authentication authorization endpoint for the main Omi app
-    Supports both initial sign-in and account linking flows
-    """
-    if provider not in ['google', 'apple']:
-        raise HTTPException(status_code=400, detail="Unsupported provider")
-
-    # Strict allowlist on where we'll deliver the auth code post-callback.
-    _validate_redirect_uri(redirect_uri)
-
-    # Store session for auth flow
+    """Redirect the user to Casdoor to authenticate."""
     session_id = str(uuid.uuid4())
-    session_data = {
-        'provider': provider,
-        'redirect_uri': redirect_uri,
-        'state': state,
-        'flow_type': 'user_auth',  # Distinguish from app oauth
-    }
+    set_auth_session(session_id, {"redirect_uri": redirect_uri, "state": state}, 300)
 
-    # Store in Redis with 5-minute expiration
-    await run_blocking(critical_executor, set_auth_session, session_id, session_data, 300)
-
-    # Redirect to provider OAuth
-    if provider == 'google':
-        return await _google_auth_redirect(session_id)
-    elif provider == 'apple':
-        return await _apple_auth_redirect(session_id)
+    auth_url = (
+        f"{_casdoor_base()}/login/oauth/authorize?"
+        f"client_id={quote(_client_id())}&"
+        f"redirect_uri={quote(_callback_url())}&"
+        f"response_type=code&"
+        f"scope={quote('openid email profile offline_access')}&"
+        f"state={quote(session_id)}"
+    )
+    return RedirectResponse(url=auth_url)
 
 
-@router.get("/callback/google")
-async def auth_callback_google(
+# ── 2. Casdoor callback ──────────────────────────────────────────────────────
+
+
+@router.get("/callback")
+async def auth_callback(
     request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
 ):
-    """
-    Google authentication callback handler (GET method)
-    """
+    """Receive code from Casdoor, exchange for tokens, redirect to app."""
     if error:
         raise HTTPException(status_code=400, detail=f"Auth error: {error}")
 
-    # Retrieve session
-    session_data = await run_blocking(critical_executor, get_auth_session, state)
+    session_data = get_auth_session(state)
     if not session_data:
-        raise HTTPException(status_code=400, detail="Invalid auth session")
+        raise HTTPException(status_code=400, detail="Invalid or expired auth session")
 
-    # Exchange code for OAuth credentials
-    oauth_credentials = await _exchange_provider_code_for_oauth_credentials('google', code, session_data)
+    tokens = _exchange_code_for_tokens(code)
 
-    # Create temporary auth code bound to the original redirect_uri
     auth_code = str(uuid.uuid4())
-    app_redirect_uri = session_data.get('redirect_uri', _DEFAULT_MOBILE_REDIRECT)
-    code_data = json.dumps({'credentials': oauth_credentials, 'redirect_uri': app_redirect_uri})
-    await run_blocking(critical_executor, set_auth_code, auth_code, code_data, 300)
+    set_auth_code(auth_code, json.dumps(tokens), 300)
 
-    # Redirect to HTML page that will handle the eventual scheme/loopback redirect.
-    # The original ``redirect_uri`` was validated by ``_validate_redirect_uri`` at
-    # ``/authorize`` time and cannot be overridden by the caller here.
     return templates.TemplateResponse(
         "auth_callback.html",
         {
             "request": request,
             "code": auth_code,
-            "state": session_data['state'] or '',
-            "redirect_uri": app_redirect_uri,
+            "state": session_data.get("state") or "",
         },
     )
 
 
-@router.post("/callback/apple")
-async def auth_callback_apple_post(
-    request: Request,
-    code: str = Form(...),
-    state: str = Form(...),
-    error: Optional[str] = Form(None),
-):
-    """
-    Apple authentication callback handler (POST method)
-    Apple uses form_post response_mode, so we need a separate POST endpoint
-    """
-    if error:
-        raise HTTPException(status_code=400, detail=f"Auth error: {error}")
-
-    # Retrieve session
-    session_data = await run_blocking(critical_executor, get_auth_session, state)
-    if not session_data:
-        raise HTTPException(status_code=400, detail="Invalid auth session")
-
-    # Exchange code for OAuth credentials
-    oauth_credentials = await _exchange_provider_code_for_oauth_credentials('apple', code, session_data)
-
-    # Create temporary auth code bound to the original redirect_uri
-    auth_code = str(uuid.uuid4())
-    app_redirect_uri = session_data.get('redirect_uri', _DEFAULT_MOBILE_REDIRECT)
-    code_data = json.dumps({'credentials': oauth_credentials, 'redirect_uri': app_redirect_uri})
-    await run_blocking(critical_executor, set_auth_code, auth_code, code_data, 300)
-
-    # Redirect to HTML page that will handle the eventual scheme/loopback redirect.
-    # The original ``redirect_uri`` was validated by ``_validate_redirect_uri`` at
-    # ``/authorize`` time and cannot be overridden by the caller here.
-    return templates.TemplateResponse(
-        "auth_callback.html",
-        {
-            "request": request,
-            "code": auth_code,
-            "state": session_data['state'] or '',
-            "redirect_uri": app_redirect_uri,
-        },
-    )
+# ── 3. Token exchange ────────────────────────────────────────────────────────
 
 
 @router.post("/token")
@@ -264,396 +149,80 @@ async def auth_token(
     grant_type: str = Form(...),
     code: str = Form(...),
     redirect_uri: str = Form(...),
-    use_custom_token: bool = Form(False),
 ):
-    """
-    Exchange auth code for OAuth credentials
-    Used for both initial sign-in and account linking flows
-
-    Args:
-        use_custom_token: If True, also generate Firebase custom token (default: True)
-    """
-    if grant_type != 'authorization_code':
+    """Exchange a short-lived auth code for the Casdoor id_token."""
+    if grant_type != "authorization_code":
         raise HTTPException(status_code=400, detail="Unsupported grant type")
 
-    # Get auth code data from Redis
-    raw_code_data = await run_blocking(critical_executor, get_auth_code, code)
-    if not raw_code_data:
+    tokens_json = get_auth_code(code)
+    if not tokens_json:
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
-    # Clean up used code
-    await run_blocking(critical_executor, delete_auth_code, code)
+    delete_auth_code(code)
 
     try:
-        code_data = json.loads(raw_code_data)
-
-        # Support both new format (with redirect_uri binding) and legacy format
-        if 'credentials' in code_data:
-            # New format: auth code bound to redirect_uri — fail closed if redirect_uri missing
-            stored_redirect_uri = code_data.get('redirect_uri')
-            if not stored_redirect_uri:
-                logger.error("auth code in new format but missing redirect_uri — rejecting (fail closed)")
-                raise HTTPException(status_code=400, detail="malformed auth code")
-            if redirect_uri != stored_redirect_uri:
-                logger.warning(
-                    f"redirect_uri mismatch: expected={sanitize(stored_redirect_uri)}, got={sanitize(redirect_uri)}"
-                )
-                raise HTTPException(status_code=400, detail="redirect_uri mismatch")
-            oauth_credentials_json = code_data['credentials']
-            oauth_credentials = (
-                json.loads(oauth_credentials_json)
-                if isinstance(oauth_credentials_json, str)
-                else oauth_credentials_json
-            )
-        else:
-            # Legacy format: raw OAuth credentials (backwards compatible)
-            oauth_credentials = code_data
-
-        provider = oauth_credentials.get('provider')
-        id_token = oauth_credentials.get('id_token')
-        access_token = oauth_credentials.get('access_token')
-
-        response = {
-            "provider": provider,
-            "id_token": id_token,
-            "access_token": access_token,
-            "provider_id": oauth_credentials.get('provider_id'),
+        tokens = json.loads(tokens_json)
+        return {
+            "id_token": tokens["id_token"],
+            "access_token": tokens.get("access_token"),
+            "refresh_token": tokens.get("refresh_token"),
             "token_type": "Bearer",
-            "expires_in": 3600,
+            "expires_in": tokens.get("expires_in", 3600),
         }
-
-        # Generate custom token if requested
-        if use_custom_token:
-            try:
-                custom_token = await _generate_custom_token(provider, id_token, access_token)
-                response["custom_token"] = custom_token
-            except Exception as e:
-                logger.error(f"Error generating custom token: {e}")
-                # Don't fail the request, just log and continue without custom token
-
-        return response
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error parsing OAuth credentials: {e}")
-        raise HTTPException(status_code=400, detail="Invalid OAuth credentials")
+        print(f"Error parsing stored tokens: {e}")
+        raise HTTPException(status_code=400, detail="Invalid token data")
 
 
-async def _google_auth_redirect(session_id: str):
-    """
-    Redirect to Google OAuth for authentication
-    """
-    client_id = os.getenv('GOOGLE_CLIENT_ID')
-    api_base_url = os.getenv('BASE_API_URL')
+# ── 4. Token refresh ─────────────────────────────────────────────────────────
 
-    if not client_id:
-        raise HTTPException(status_code=500, detail="Google client ID not configured")
-    if not api_base_url:
-        raise HTTPException(status_code=500, detail="BASE_API_URL not configured")
 
-    callback_url = f"{api_base_url}/v1/auth/callback/google"
-
-    google_auth_url = (
-        f"https://accounts.google.com/o/oauth2/v2/auth?"
-        f"client_id={quote(client_id)}&"
-        f"redirect_uri={quote(callback_url)}&"
-        f"response_type=code&"
-        f"scope={quote('openid email profile')}&"
-        f"state={quote(session_id)}"
+@router.post("/refresh")
+async def auth_refresh(refresh_token: str = Form(...)):
+    """Use a refresh_token to get a new id_token from Casdoor."""
+    token_url = f"{_casdoor_internal_base()}/api/login/oauth/access_token"
+    response = requests.post(
+        token_url,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": _client_id(),
+            "client_secret": _client_secret(),
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Failed to refresh token")
 
-    return RedirectResponse(url=google_auth_url)
-
-
-async def _apple_auth_redirect(session_id: str):
-    """
-    Redirect to Apple OAuth for authentication
-    """
-    client_id = os.getenv('APPLE_CLIENT_ID')
-    api_base_url = os.getenv('BASE_API_URL')
-
-    if not client_id:
-        raise HTTPException(status_code=500, detail="Apple client ID not configured")
-    if not api_base_url:
-        raise HTTPException(status_code=500, detail="BASE_API_URL not configured")
-
-    callback_url = f"{api_base_url}/v1/auth/callback/apple"
-
-    apple_auth_url = (
-        f"https://appleid.apple.com/auth/authorize?"
-        f"client_id={client_id}&"
-        f"redirect_uri={callback_url}&"
-        f"response_type=code&"
-        f"scope=name email&"
-        f"response_mode=form_post&"
-        f"state={session_id}"
-    )
-
-    return RedirectResponse(url=apple_auth_url)
-
-
-async def _exchange_provider_code_for_oauth_credentials(provider: str, code: str, session_data: dict) -> str:
-    """
-    Exchange provider-specific code for OAuth credentials
-    """
-    if provider == 'google':
-        return await _exchange_google_code_for_oauth_credentials(code, session_data)
-    elif provider == 'apple':
-        return await _exchange_apple_code_for_oauth_credentials(code, session_data)
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported provider")
-
-
-async def _exchange_google_code_for_oauth_credentials(code: str, session_data: dict) -> str:
-    """
-    Exchange Google authorization code for Google OAuth tokens
-    """
-    client_id = os.getenv('GOOGLE_CLIENT_ID')
-    client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-    api_base_url = os.getenv('BASE_API_URL')
-
-    if not all([client_id, client_secret, api_base_url]):
-        raise HTTPException(status_code=500, detail="Google OAuth not properly configured")
-
-    callback_url = f"{api_base_url}/v1/auth/callback/google"
-
-    # Exchange code for Google tokens
-    token_url = "https://oauth2.googleapis.com/token"
-    token_data = {
-        'code': code,
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'redirect_uri': callback_url,
-        'grant_type': 'authorization_code',
+    tokens = response.json()
+    return {
+        "id_token": tokens["id_token"],
+        "access_token": tokens.get("access_token"),
+        "refresh_token": tokens.get("refresh_token"),
+        "token_type": "Bearer",
+        "expires_in": tokens.get("expires_in", 3600),
     }
 
-    client = get_auth_client()
-    token_response = await client.post(token_url, data=token_data)
-    if token_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to exchange Google code")
 
-    token_json = token_response.json()
-    id_token = token_json.get('id_token')
-    access_token = token_json.get('access_token')
-
-    if not id_token or not access_token:
-        raise HTTPException(status_code=400, detail="Invalid Google token response")
-
-    # Return OAuth credentials for client-side Firebase authentication
-    oauth_credentials = {
-        'provider': 'google',
-        'id_token': id_token,
-        'access_token': access_token,
-        'provider_id': 'google.com',
-    }
-
-    return json.dumps(oauth_credentials)
+# ── Internal helpers ─────────────────────────────────────────────────────────
 
 
-async def _exchange_apple_code_for_oauth_credentials(code: str, session_data: dict) -> str:
-    """
-    Exchange Apple authorization code for Apple OAuth tokens
-    """
-    try:
-        # Get Apple configuration
-        client_id = os.getenv('APPLE_CLIENT_ID')
-        team_id = os.getenv('APPLE_TEAM_ID')
-        key_id = os.getenv('APPLE_KEY_ID')
-        private_key_content = os.getenv('APPLE_PRIVATE_KEY')
+def _exchange_code_for_tokens(code: str) -> dict:
+    """Exchange a Casdoor authorization code for tokens."""
+    token_url = f"{_casdoor_internal_base()}/api/login/oauth/access_token"
+    response = requests.post(
+        token_url,
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": _callback_url(),
+            "client_id": _client_id(),
+            "client_secret": _client_secret(),
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if response.status_code != 200:
+        print(f"Casdoor token exchange failed: {response.text}")
+        raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
 
-        if not all([client_id, team_id, key_id, private_key_content]):
-            raise HTTPException(
-                status_code=500, detail="Apple authentication not properly configured. Missing environment variables."
-            )
-
-        # Generate client secret JWT
-        client_secret = _generate_apple_client_secret(client_id, team_id, key_id, private_key_content)
-
-        # Exchange authorization code for Apple tokens
-        api_base_url = os.getenv('BASE_API_URL')
-        if not api_base_url:
-            raise HTTPException(status_code=500, detail="BASE_API_URL not configured")
-
-        callback_url = f"{api_base_url}/v1/auth/callback/apple"
-
-        token_url = "https://appleid.apple.com/auth/token"
-        token_data = {
-            'client_id': client_id,
-            'client_secret': client_secret,
-            'code': code,
-            'grant_type': 'authorization_code',
-            'redirect_uri': callback_url,
-        }
-
-        client = get_auth_client()
-        token_response = await client.post(
-            token_url, data=token_data, headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-
-        if token_response.status_code != 200:
-            logger.error(f"Apple token exchange failed: {sanitize(token_response.text)}")
-            raise HTTPException(status_code=400, detail="Failed to exchange Apple authorization code")
-
-        token_json = token_response.json()
-        id_token = token_json.get('id_token')
-        access_token = token_json.get('access_token')  # Apple typically returns access_token
-
-        if not id_token:
-            raise HTTPException(status_code=400, detail="No ID token received from Apple")
-
-        # Return OAuth credentials for client-side Firebase authentication
-        oauth_credentials = {
-            'provider': 'apple',
-            'id_token': id_token,
-            'access_token': access_token,
-            'provider_id': 'apple.com',
-        }
-
-        return json.dumps(oauth_credentials)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error exchanging Apple code for tokens: {e}")
-        raise HTTPException(status_code=500, detail="Failed to exchange Apple code for tokens")
-
-
-async def _generate_custom_token(provider: str, id_token: str, access_token: str = None) -> str:
-    """
-    Generate Firebase custom token by signing in with OAuth credentials
-    This ensures we get the same Firebase UID that client-side auth would create
-    Works with any bundle ID - perfect for multiple developers
-    """
-    try:
-        # Get Firebase API Key from environment
-        firebase_api_key = os.getenv('FIREBASE_API_KEY')
-        if not firebase_api_key:
-            raise Exception("FIREBASE_API_KEY not configured")
-
-        # Sign in with OAuth credential using Firebase Auth REST API
-        sign_in_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={firebase_api_key}"
-
-        # Prepare the postBody based on provider
-        if provider == 'google':
-            post_body = f'id_token={id_token}&providerId=google.com'
-            if access_token:
-                post_body += f'&access_token={access_token}'
-        elif provider == 'apple':
-            post_body = f'id_token={id_token}&providerId=apple.com'
-            if access_token:
-                post_body += f'&access_token={access_token}'
-        else:
-            raise Exception(f"Unsupported provider: {provider}")
-
-        payload = {
-            'postBody': post_body,
-            'requestUri': 'http://localhost',
-            'returnIdpCredential': True,
-            'returnSecureToken': True,
-        }
-
-        # Call Firebase Auth REST API to sign in
-        client = get_auth_client()
-        response = await client.post(sign_in_url, json=payload)
-
-        if response.status_code != 200:
-            logger.error(f"Firebase sign-in failed: {sanitize(response.text)}")
-            raise Exception(f"Firebase sign-in failed: status={response.status_code}")
-
-        result = response.json()
-        firebase_uid = result.get('localId')
-
-        if not firebase_uid:
-            raise Exception("No Firebase UID returned from sign-in")
-
-        logger.info(f"Firebase sign-in successful for {provider}, UID: {firebase_uid}")
-
-        # Create custom token for this UID
-        custom_token = firebase_admin.auth.create_custom_token(firebase_uid)
-
-        return custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
-
-    except Exception as e:
-        logger.error(f"Error in _generate_custom_token: {e}")
-        raise
-
-
-def _generate_apple_client_secret(client_id: str, team_id: str, key_id: str, private_key_content: str) -> str:
-    """
-    Generate Apple client secret JWT as per Apple's requirements
-    https://developer.apple.com/documentation/signinwithapplerestapi/generate_and_validate_tokens
-    """
-    try:
-        # Load the private key from PEM content
-        private_key = serialization.load_pem_private_key(
-            private_key_content.encode('utf-8'),
-            password=None,
-        )
-
-        # Create the JWT payload
-        now = int(time.time())
-        payload = {
-            'iss': team_id,
-            'iat': now,
-            'exp': now + 3600,  # Token expires in 1 hour
-            'aud': 'https://appleid.apple.com',
-            'sub': client_id,
-        }
-
-        # Create the JWT headers
-        headers = {
-            'alg': 'ES256',
-            'kid': key_id,
-        }
-
-        # Generate the client secret
-        client_secret = jwt.encode(payload, private_key, algorithm='ES256', headers=headers)
-
-        return client_secret
-
-    except Exception as e:
-        logger.error(f"Error generating Apple client secret: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate Apple client secret")
-
-
-async def _verify_apple_id_token(id_token: str, client_id: str) -> dict:
-    """
-    Verify Apple ID token and extract user information
-    """
-    try:
-        # Get Apple's public keys
-        client = get_auth_client()
-        apple_keys_response = await client.get('https://appleid.apple.com/auth/keys')
-        if apple_keys_response.status_code != 200:
-            raise Exception("Failed to fetch Apple's public keys")
-
-        apple_keys = apple_keys_response.json()
-
-        # Decode the token header to get the key ID
-        unverified_header = jwt.get_unverified_header(id_token)
-        key_id = unverified_header.get('kid')
-
-        if not key_id:
-            raise Exception("No key ID found in token header")
-
-        # Find the matching public key
-        public_key = None
-        for key in apple_keys['keys']:
-            if key['kid'] == key_id:
-                public_key = RSAAlgorithm.from_jwk(key)
-                break
-
-        if not public_key:
-            raise Exception("No matching public key found")
-
-        # Verify and decode the token
-        decoded_token = jwt.decode(
-            id_token, public_key, algorithms=['RS256'], audience=client_id, issuer='https://appleid.apple.com'
-        )
-
-        return decoded_token
-
-    except Exception as e:
-        logger.error(f"Error verifying Apple ID token: {e}")
-        raise HTTPException(status_code=400, detail="Invalid Apple ID token")
+    return response.json()
