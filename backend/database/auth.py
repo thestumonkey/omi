@@ -9,6 +9,7 @@ directly to build the user lookup id.
 """
 
 import os
+from datetime import datetime
 
 import requests
 
@@ -78,6 +79,31 @@ def get_user_name(uid: str, use_default: bool = True) -> str | None:
 
     cache_user_name(uid, display_name, ttl=60 * 60)
     return display_name
+
+
+def get_user_creation_time(uid: str) -> int | None:
+    """Account creation time in epoch milliseconds (matches Firebase's
+    user_metadata.creation_timestamp convention), sourced from Casdoor's
+    createdTime. Returns None when unavailable — callers fail open."""
+    if not uid:
+        return None
+    base = os.environ.get("CASDOOR_ENDPOINT", "").rstrip("/")
+    if not base:
+        return None
+    try:
+        params = _casdoor_params()
+        params["id"] = uid
+        resp = requests.get(f"{base}/api/get-user", params=params, timeout=5)
+        resp.raise_for_status()
+        user = (resp.json() or {}).get("data")
+        created = user.get("createdTime") if user else None
+        if not created:
+            return None
+        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except Exception as e:
+        print(f"Error fetching creation time for {uid} from Casdoor: {e}")
+        return None
 
 
 def delete_account(uid: str):
