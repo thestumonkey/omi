@@ -5,19 +5,13 @@ import os
 
 logging.basicConfig(level=logging.INFO)
 
-import firebase_admin
 from fastapi import FastAPI
 
 from routers import pusher, metrics
 from utils.http_client import close_all_clients
 from utils.executors import drain_background_tasks, log_executor_health
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    credentials = firebase_admin.credentials.Certificate(service_account_info)
-    firebase_admin.initialize_app(credentials)
-else:
-    firebase_admin.initialize_app()
+# Firebase init removed — storage is S3/MinIO, FCM is stubbed, auth is Casdoor/OIDC.
 
 app = FastAPI()
 app.include_router(pusher.router)
