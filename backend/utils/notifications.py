@@ -4,7 +4,11 @@ import json
 import math
 import uuid
 from typing import List
-from firebase_admin import messaging, auth
+
+try:
+    from firebase_admin import messaging
+except ImportError:
+    import utils.fcm_stub as messaging  # type: ignore[assignment]  # no-op FCM when firebase-admin absent
 import database.notifications as notification_db
 from utils.executors import db_executor, run_blocking
 from database.redis_db import (
@@ -22,6 +26,22 @@ from .llm.notifications import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class _UserRecord:
+    """Attribute-accessible view over a Casdoor user dict, mirroring the
+    firebase_admin UserRecord fields this module reads (display_name, email)."""
+
+    def __init__(self, data: dict):
+        data = data or {}
+        self.display_name = data.get("display_name") or data.get("name")
+        self.email = data.get("email")
+
+
+def _get_user_record(user_id: str) -> _UserRecord:
+    """Casdoor replacement for firebase_admin.auth.get_user(uid)."""
+    return _UserRecord(get_user_from_uid(user_id))
+
 
 # iOS bundle ID for APNs
 IOS_BUNDLE_ID = 'com.friend-app-with-wearable.ios12'
@@ -197,7 +217,7 @@ async def send_subscription_paid_personalized_notification(user_id: str, data: d
     """Send a personalized notification to all user's devices when unlimited subscription is purchased"""
     # Get user name from Firebase Auth
     try:
-        user = auth.get_user(user_id)
+        user = _get_user_record(user_id)
         name = user.display_name
         if not name and user.email:
             name = user.email.split('@')[0].capitalize()
@@ -222,7 +242,7 @@ async def send_credit_limit_notification(user_id: str):
 
     # Get user name from Firebase Auth
     try:
-        user = auth.get_user(user_id)
+        user = _get_user_record(user_id)
         name = user.display_name
         if not name and user.email:
             name = user.email.split('@')[0].capitalize()
@@ -252,7 +272,7 @@ async def send_silent_user_notification(user_id: str):
 
     # Get user name from Firebase Auth
     try:
-        user = auth.get_user(user_id)
+        user = _get_user_record(user_id)
         name = user.display_name
         if not name and user.email:
             name = user.email.split('@')[0].capitalize()
@@ -277,7 +297,7 @@ def send_training_data_submitted_notification(user_id: str):
     """Send a notification when user submits their training data opt-in request."""
     # Get user name from Firebase Auth
     try:
-        user = auth.get_user(user_id)
+        user = _get_user_record(user_id)
         name = user.display_name
         if not name and user.email:
             name = user.email.split('@')[0].capitalize()
