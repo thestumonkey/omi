@@ -14,7 +14,6 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-import firebase_admin
 import google.auth
 import google.auth.transport.requests
 import httpx
@@ -23,20 +22,17 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from firebase_admin import auth, credentials, firestore
 from google.cloud.firestore_v1 import Query
+
+from database._client import db
+from utils.oidc import verify_oidc_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Firebase init — uses GOOGLE_APPLICATION_CREDENTIALS or ADC
-cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-if cred_path:
-    firebase_admin.initialize_app(credentials.Certificate(cred_path))
-else:
-    firebase_admin.initialize_app()
-
-db = firestore.client()
+# Identity via Casdoor OIDC; user/session data via the shared Firestore->Mongo
+# shim (db, imported above). NOTE: agent VM provisioning below still uses GCE
+# (google.auth) by design — agent-proxy is a GCE-native bridge service.
 
 app = FastAPI()
 logger.info("[agent-proxy] starting up")
@@ -388,7 +384,7 @@ async def agent_ws(websocket: WebSocket):
 
     token = auth_header[7:].strip()
     try:
-        uid = auth.verify_id_token(token)["uid"]
+        uid = verify_oidc_token(token)["sub"]
     except Exception as e:
         logger.warning(f"[agent-proxy] WS rejected: invalid token: {e}")
         await websocket.close(code=4001, reason="Invalid token")
