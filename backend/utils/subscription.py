@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import HTTPException
-from firebase_admin import auth as firebase_auth
+from database.auth import get_user_creation_time
 import stripe
 
 import database.users as users_db
@@ -122,8 +122,7 @@ def _is_trial_expired_uncached(uid: str) -> bool:
             return False
         if users_db.is_byok_active(uid):
             return False
-        user_record = firebase_auth.get_user(uid)
-        creation_ms = user_record.user_metadata.creation_timestamp
+        creation_ms = get_user_creation_time(uid)
         if not creation_ms:
             return False
         age_seconds = time.time() - (creation_ms / 1000)
@@ -199,8 +198,7 @@ def get_trial_metadata(uid: str) -> TrialMetadata:
                 plan_after_trial=get_plan_display_name(PlanType.basic),
             )
 
-        user_record = firebase_auth.get_user(uid)
-        creation_ms = user_record.user_metadata.creation_timestamp
+        creation_ms = get_user_creation_time(uid)
         if not creation_ms:
             # No creation timestamp — treat as active trial (fail-open).
             return TrialMetadata(
