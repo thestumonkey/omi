@@ -12,8 +12,11 @@ from concurrent.futures import as_completed, wait, FIRST_COMPLETED
 from utils.executors import postprocess_executor, storage_executor
 
 import opuslib
-from google.cloud import storage
-from google.oauth2 import service_account
+
+# Storage seam: an S3/MinIO-backed, GCS-compatible client. See minio_storage.py.
+from utils.other.minio_storage import MinioStorageClient
+
+# NotFound exception types kept from google.cloud.exceptions (no credentials/network).
 from google.cloud.exceptions import NotFound as BlobNotFound
 from google.cloud.exceptions import NotFound
 
@@ -44,12 +47,7 @@ OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_DURATION_MS // 1000  # 320 sampl
 # Valid private cloud sync extensions (longest first for correct matching)
 PRIVATE_CLOUD_EXTENSIONS = ['.batch.enc', '.batch.bin', '.opus.enc', '.opus', '.enc', '.bin']
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    storage_client = storage.Client(credentials=credentials)
-else:
-    storage_client = storage.Client()
+storage_client = MinioStorageClient()
 
 speech_profiles_bucket = os.getenv('BUCKET_SPEECH_PROFILES')
 postprocessing_audio_bucket = os.getenv('BUCKET_POSTPROCESSING')
