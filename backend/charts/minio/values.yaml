@@ -1,0 +1,29 @@
+image:
+  repository: minio/minio
+  tag: latest
+
+replicas: 1
+
+storage:
+  size: 50Gi
+  storageClassName: ""
+
+service:
+  apiPort: 9000
+  consolePort: 9001
+
+# Credentials come from the backend secret (same keys the app reads as
+# S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY) so MinIO and the app share one source.
+auth:
+  existingSecret: dev-omi-backend-secrets
+  accessKeyKey: S3_ACCESS_KEY_ID
+  secretKeyKey: S3_SECRET_ACCESS_KEY
+
+# Buckets the omi backend expects (BUCKET_* env). Created by the post-start job.
+buckets:
+  - omi-speech-profiles
+  - omi-postprocessing
+  - omi-memories-recordings
+  - omi-private-cloud-sync
+  - omi-plugins-logos
+  - omi-app-thumbnails

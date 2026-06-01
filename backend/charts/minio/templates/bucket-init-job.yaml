@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-minio-bucket-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          env:
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.accessKeyKey }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.secretKeyKey }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              until mc alias set omi http://{{ .Release.Name }}-minio:{{ .Values.service.apiPort }} "$ACCESS_KEY" "$SECRET_KEY"; do
+                echo "waiting for minio..."; sleep 3
+              done
+              {{- range .Values.buckets }}
+              mc mb --ignore-existing omi/{{ . }}
+              {{- end }}
+              echo "buckets ready"
