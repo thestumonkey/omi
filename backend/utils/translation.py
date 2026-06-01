@@ -119,10 +119,22 @@ _non_lexical_utterances_pattern = re.compile(
     r'\b(' + '|'.join(re.escape(word) for word in _non_lexical_utterances) + r')\b', re.IGNORECASE
 )
 
-# Initialize the translation client globally
-_client = translate_v3.TranslationServiceClient()
+# Lazily-initialized Google Translate client. Built on first use so the app
+# boots without GOOGLE_APPLICATION_CREDENTIALS — translation is an optional
+# feature (gated on user language) and only needs credentials when invoked.
+# TODO: swap for a self-hosted translator (e.g. LibreTranslate) to fully drop
+# the Google dependency.
+_client = None
 _parent = f"projects/{PROJECT_ID}/locations/global"
 _mime_type = "text/plain"
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = translate_v3.TranslationServiceClient()
+    return _client
+
 
 # Initialize langdetect for consistent results
 DetectorFactory.seed = 0
@@ -492,7 +504,7 @@ class TranslationService:
                 chunk_indices = uncached_indices[chunk_start:chunk_end]
 
                 try:
-                    response = _client.translate_text(
+                    response = _get_client().translate_text(
                         contents=chunk,
                         parent=_parent,
                         mime_type=_mime_type,
@@ -586,7 +598,7 @@ class TranslationService:
                 chunk_hashes = uncached_hashes[chunk_start:chunk_end]
 
                 try:
-                    response = _client.translate_text(
+                    response = _get_client().translate_text(
                         contents=chunk,
                         parent=_parent,
                         mime_type=_mime_type,
@@ -643,7 +655,7 @@ class TranslationService:
             return result
 
         try:
-            response = _client.translate_text(
+            response = _get_client().translate_text(
                 contents=[text],
                 parent=_parent,
                 mime_type=_mime_type,
