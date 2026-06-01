@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter, transactional
+from google.cloud.firestore_v1 import FieldFilter
+from database.mongo_firestore import transactional  # shim transactional (drives MongoFirestore.Transaction)
 
 from ._client import db, document_id_from_seed
 from database.redis_db import try_acquire_user_platform_write_lock
