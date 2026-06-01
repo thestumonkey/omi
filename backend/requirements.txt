@@ -45,7 +45,6 @@ fastapi-cli==0.0.5
 fastapi-utilities==0.2.0
 filetype==1.2.0
 filelock==3.20.3
-firebase-admin==6.5.0
 flatbuffers==24.3.25
 fonttools==4.60.2
 frozenlist==1.4.1
@@ -59,7 +58,6 @@ google-auth==2.32.0
 google-auth-httplib2==0.2.0
 google-cloud-core==2.4.1
 google-cloud-firestore==2.20.0
-google-cloud-storage==2.18.0
 google-crc32c==1.5.0
 google-resumable-media==2.7.1
 googleapis-common-protos==1.63.2
