@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Dict, List
 
-from firebase_admin import firestore
+from google.cloud import firestore
 from google.api_core.retry import Retry
 
 from models.trend import Trend, valid_items
@@ -68,4 +68,4 @@ def save_trends(memory_id: str, trends: List[Trend]):
             topic_doc_ref = topics_coll_ref.document(topic_id)
 
             topic_doc_ref.set({"id": topic_id, "topic": topic}, merge=True)
-            topic_doc_ref.update({'memory_ids': firestore.firestore.ArrayUnion([memory_id])})
+            topic_doc_ref.update({'memory_ids': firestore.ArrayUnion([memory_id])})
