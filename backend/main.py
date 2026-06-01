@@ -9,7 +9,6 @@ load_dotenv()  # No-op if .env doesn't exist (production); loads local dev secre
 
 logging.basicConfig(level=logging.INFO)
 
-import firebase_admin
 from fastapi import FastAPI
 
 from routers import (
@@ -72,12 +71,7 @@ log_langsmith_status()
 # Validate Stripe price IDs so misconfigured plans fail loud
 validate_stripe_price_ids()
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    credentials = firebase_admin.credentials.Certificate(service_account_info)
-    firebase_admin.initialize_app(credentials)
-else:
-    firebase_admin.initialize_app()
+# Firebase init removed — auth is Casdoor/OIDC, storage is S3/MinIO, FCM is stubbed.
 
 # starlette 0.40 added a default 1 MB cap per multipart form part. Voice
 # messages, audio uploads, and persona/app images legitimately exceed that.
