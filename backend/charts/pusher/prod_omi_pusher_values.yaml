@@ -60,7 +60,6 @@ service:
   backendConfig: prod-pusher-backend-config
   port: 8080
   annotations:
-    cloud.google.com/neg: '{"ingress": true}'
     cloud.google.com/backend-config: '{"default": "prod-pusher-backend-config"}'  # Link to BackendConfig
 
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
@@ -147,11 +146,38 @@ env:
     value: "true"
   - name: BUCKET_TEMPORAL_SYNC_LOCAL
     value: "syncing-local"
-  - name: GOOGLE_APPLICATION_CREDENTIALS
+  # --- Self-hosted stack (replaces Firebase/Firestore/GCS) ---
+  - name: MONGODB_URL
     valueFrom:
       secretKeyRef:
         name: prod-omi-backend-secrets
-        key: GOOGLE_APPLICATION_CREDENTIALS
+        key: MONGODB_URL
+  - name: MONGODB_DB
+    value: "omi"
+  - name: S3_ENDPOINT_URL
+    value: "http://omi-minio:9000"
+  - name: S3_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: prod-omi-backend-secrets
+        key: S3_ACCESS_KEY_ID
+  - name: S3_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: prod-omi-backend-secrets
+        key: S3_SECRET_ACCESS_KEY
+  - name: CASDOOR_ENDPOINT
+    value: "https://door.spangled-kettle.ts.net"
+  - name: CASDOOR_CLIENT_ID
+    valueFrom:
+      secretKeyRef:
+        name: prod-omi-backend-secrets
+        key: CASDOOR_CLIENT_ID
+  - name: CASDOOR_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: prod-omi-backend-secrets
+        key: CASDOOR_CLIENT_SECRET
   - name: ENCRYPTION_SECRET
     valueFrom:
       secretKeyRef:
@@ -239,8 +265,6 @@ env:
       secretKeyRef:
         name: prod-omi-backend-secrets
         key: OPENROUTER_API_KEY
-  - name: GOOGLE_CLOUD_PROJECT
-    value: "based-hardware"
   - name: CONVERSATION_SUMMARIZED_APP_IDS
     valueFrom:
       secretKeyRef:
