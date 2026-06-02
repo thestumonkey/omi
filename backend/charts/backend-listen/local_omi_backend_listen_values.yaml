@@ -53,9 +53,7 @@ service:
   type: ClusterIP
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 8080
-  annotations:
-    cloud.google.com/neg: '{"exposed_ports": {"8080":{"name": "dev-backend-listen-neg"}}}'
-
+  annotations: {}
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false
@@ -141,11 +139,6 @@ env:
       configMapKeyRef:
         name: omi-backend-config
         key: HOSTED_SPEECH_PROFILE_API_URL
-  - name: GOOGLE_CLOUD_PROJECT
-    valueFrom:
-      configMapKeyRef:
-        name: omi-backend-config
-        key: GOOGLE_CLOUD_PROJECT
   - name: PINECONE_INDEX_NAME
     valueFrom:
       configMapKeyRef:
@@ -218,16 +211,19 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: WORKFLOW_API_KEY
-  - name: GOOGLE_APPLICATION_CREDENTIALS
+  # --- S3/MinIO storage (replaces GCS) ---
+  - name: S3_ENDPOINT_URL
+    value: "http://omi-minio:9000"
+  - name: S3_ACCESS_KEY_ID
     valueFrom:
       secretKeyRef:
         name: dev-omi-backend-secrets
-        key: GOOGLE_APPLICATION_CREDENTIALS
-  - name: SERVICE_ACCOUNT_JSON
+        key: S3_ACCESS_KEY_ID
+  - name: S3_SECRET_ACCESS_KEY
     valueFrom:
       secretKeyRef:
         name: dev-omi-backend-secrets
-        key: SERVICE_ACCOUNT_JSON
+        key: S3_SECRET_ACCESS_KEY
   - name: ENCRYPTION_SECRET
     valueFrom:
       secretKeyRef:
