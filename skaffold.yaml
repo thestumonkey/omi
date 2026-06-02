@@ -1,0 +1,38 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: omi-backend
+
+build:
+  artifacts:
+    - image: 192.168.1.42:32000/backend-listen
+      docker:
+        dockerfile: backend/Dockerfile
+      platforms:
+        - linux/amd64
+      sync:
+        manual:
+          - src: "backend/**/*.py"
+            dest: /app
+            strip: backend/
+          - src: "backend/*.py"
+            dest: /app
+            strip: backend/
+  local:
+    push: true
+    useBuildkit: true
+  insecureRegistries:
+    - 192.168.1.42:32000
+
+deploy:
+  helm:
+    releases:
+      - name: omi-backend
+        chartPath: backend/charts/backend-listen
+        namespace: omi
+        createNamespace: true
+        valuesFiles:
+          - backend/charts/backend-listen/local_omi_backend_listen_values.yaml
+        setValueTemplates:
+          image.repository: "{{.IMAGE_REPO_192_168_1_42_32000_backend_listen}}"
+          image.tag: "{{.IMAGE_TAG_192_168_1_42_32000_backend_listen}}"

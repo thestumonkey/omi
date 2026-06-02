@@ -1,0 +1,415 @@
+# Default values for backend-listen.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This will set the replicaset count more information can be found here: https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/
+replicaCount: 1
+
+# This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
+image:
+  repository: 192.168.1.43:5000/backend-listen
+  tag: "local"
+  pullPolicy: Always
+
+# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+# This is to override the chart name.
+nameOverride: ""
+fullnameOverride: "omi-backend"
+
+# This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# This is for setting Kubernetes Annotations to a Pod.
+# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
+podAnnotations: {}
+# This is for setting Kubernetes Labels to a Pod.
+# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
+podLabels: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+# This is for setting up a service more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/
+service:
+  # This sets the service type more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
+  type: ClusterIP
+  # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
+  port: 8080
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports": {"8080":{"name": "dev-backend-listen-neg"}}}'
+
+# This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+
+env:
+  # ── Config (non-sensitive) ── from ConfigMap omi-backend-config ──────────
+  - name: BASE_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: BASE_API_URL
+  - name: CASDOOR_ENDPOINT
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: CASDOOR_ENDPOINT
+  - name: CASDOOR_INTERNAL_URL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: CASDOOR_INTERNAL_URL
+  - name: CASDOOR_ORG_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: CASDOOR_ORG_NAME
+  - name: CASDOOR_APP_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: CASDOOR_APP_NAME
+  - name: CASDOOR_CLIENT_ID
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: CASDOOR_CLIENT_ID
+  - name: REDIS_DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: REDIS_DB_HOST
+  - name: REDIS_DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: REDIS_DB_PORT
+  - name: MONGODB_DB
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: MONGODB_DB
+  - name: TYPESENSE_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: TYPESENSE_HOST
+  - name: TYPESENSE_HOST_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: TYPESENSE_HOST_PORT
+  # HOSTED_PUSHER_API_URL: not set — backend uses local processing fallback
+  - name: HOSTED_VAD_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: HOSTED_VAD_API_URL
+  - name: HOSTED_SPEECH_PROFILE_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: HOSTED_SPEECH_PROFILE_API_URL
+  - name: GOOGLE_CLOUD_PROJECT
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: GOOGLE_CLOUD_PROJECT
+  - name: PINECONE_INDEX_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: PINECONE_INDEX_NAME
+  - name: ENABLE_TRANSLATION
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: ENABLE_TRANSLATION
+  - name: DEEPGRAM_SELF_HOSTED_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: DEEPGRAM_SELF_HOSTED_ENABLED
+  - name: NO_SOCKET_TIMEOUT
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: NO_SOCKET_TIMEOUT
+
+  # ── Secrets ── from Secret dev-omi-backend-secrets ───────────────────────
+  - name: DEEPGRAM_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: DEEPGRAM_API_KEY
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: OPENAI_API_KEY
+  - name: GITHUB_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: GITHUB_TOKEN
+  - name: BUCKET_SPEECH_PROFILES
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: BUCKET_SPEECH_PROFILES
+  - name: BUCKET_PLUGINS_LOGOS
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: BUCKET_PLUGINS_LOGOS
+  - name: BUCKET_POSTPROCESSING
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: BUCKET_POSTPROCESSING
+  - name: PINECONE_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: PINECONE_API_KEY
+  - name: REDIS_DB_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: REDIS_DB_PASSWORD
+  - name: ADMIN_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: ADMIN_KEY
+  - name: WORKFLOW_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: WORKFLOW_API_KEY
+  - name: GOOGLE_APPLICATION_CREDENTIALS
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: GOOGLE_APPLICATION_CREDENTIALS
+  - name: SERVICE_ACCOUNT_JSON
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: SERVICE_ACCOUNT_JSON
+  - name: ENCRYPTION_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: ENCRYPTION_SECRET
+  - name: HUGGINGFACE_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: HUGGINGFACE_TOKEN
+  - name: TYPESENSE_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TYPESENSE_API_KEY
+  - name: MONGODB_URL
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: MONGODB_URL
+  - name: CASDOOR_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: CASDOOR_CLIENT_SECRET
+  # - name: GOOGLE_CLOUD_PROJECT_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: GOOGLE_CLOUD_PROJECT_KEY
+  - name: HUGGINGFACE_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: HUGGINGFACE_TOKEN
+  
+  # - name: DD_SERVICE
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_SERVICE
+  # - name: DD_ENV
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_ENV
+  # - name: DD_TRACE_SAMPLE_RATE
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_TRACE_SAMPLE_RATE
+  # - name: DD_SITE
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_SITE
+  # - name: DD_TRACE_PROPAGATION_STYLE
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_TRACE_PROPAGATION_STYLE
+  # - name: DD_TRACE_ENABLED
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_TRACE_ENABLED
+  # - name: DD_VERSION
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_VERSION
+  # - name: DD_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_API_KEY
+  # - name: LANGCHAIN_TRACING_V2
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: LANGCHAIN_TRACING_V2
+  # - name: LANGCHAIN_ENDPOINT
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: LANGCHAIN_ENDPOINT
+  # - name: LANGCHAIN_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: LANGCHAIN_API_KEY
+  # - name: LANGCHAIN_PROJECT
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: LANGCHAIN_PROJECT
+  # - name: DD_LOGS_ENABLED
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DD_LOGS_ENABLED
+  # - name: STRIPE_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: STRIPE_API_KEY
+  # - name: STRIPE_WEBHOOK_SECRET
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: STRIPE_WEBHOOK_SECRET
+  # - name: MARKETPLACE_APP_REVIEWERS
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: MARKETPLACE_APP_REVIEWERS
+  # - name: DEEPGRAM_SELF_HOSTED_URL
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: dev-omi-backend-secrets
+  #       key: DEEPGRAM_SELF_HOSTED_URL
+
+resources:
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  requests:
+    cpu: 1
+    memory: 4Gi
+  limits:
+    cpu: 2
+    memory: 6Gi
+
+# This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+livenessProbe:
+  httpGet:
+    path: /v1/health
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /v1/health
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 10
+
+startupProbe:
+  httpGet:
+    path: /v1/health
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 5
+
+# This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 1
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 70
+
+# Additional volumes on the output Deployment definition.
+volumes: []
+# - name: foo
+#   secret:
+#     secretName: mysecret
+#     optional: false
+
+# Additional volumeMounts on the output Deployment definition.
+volumeMounts: []
+# - name: foo
+#   mountPath: "/etc/foo"
+#   readOnly: true
+
+nodeSelector:
+  kubernetes.io/hostname: anubis
+
+tolerations: []
+
+strategy:
+  type: Recreate
+
