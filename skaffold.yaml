@@ -36,3 +36,10 @@ deploy:
         setValueTemplates:
           image.repository: "{{.IMAGE_REPO_192_168_1_42_32000_backend_listen}}"
           image.tag: "{{.IMAGE_TAG_192_168_1_42_32000_backend_listen}}"
+      # Self-hosted S3-compatible object storage. Release name "omi" -> Service
+      # "omi-minio", matching S3_ENDPOINT_URL in the backend Deployment.
+      - name: omi
+        chartPath: backend/charts/minio
+        namespace: omi
+        valuesFiles:
+          - backend/charts/minio/local_omi_minio_values.yaml

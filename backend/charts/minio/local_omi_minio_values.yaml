@@ -1,0 +1,28 @@
+# Local (self-hosted) MinIO values for the omi backend.
+# Install as helm release name "omi" so the Service is named "omi-minio",
+# matching S3_ENDPOINT_URL=http://omi-minio:9000 in the backend Deployment.
+
+storage:
+  size: 50Gi
+  # Longhorn = replicated/durable in-cluster storage (survives node reschedule),
+  # unlike microk8s-hostpath which pins data to a single node.
+  storageClassName: longhorn
+
+# Credentials are shared with the backend via the same secret keys, so MinIO's
+# root user == the app's S3_ACCESS_KEY_ID and the buckets are readable by both.
+auth:
+  existingSecret: dev-omi-backend-secrets
+  accessKeyKey: S3_ACCESS_KEY_ID
+  secretKeyKey: S3_SECRET_ACCESS_KEY
+
+# Buckets MUST match the live BUCKET_* values the backend reads from the secret,
+# otherwise uploads fail with NoSuchBucket:
+#   BUCKET_SPEECH_PROFILES -> omi-chakra
+#   BUCKET_POSTPROCESSING  -> omi-chakra-convos
+#   BUCKET_PLUGINS_LOGOS   -> omi-chakra-apps
+# omi-private-cloud-sync is the storage.py default for BUCKET_PRIVATE_CLOUD_SYNC.
+buckets:
+  - omi-chakra
+  - omi-chakra-convos
+  - omi-chakra-apps
+  - omi-private-cloud-sync
