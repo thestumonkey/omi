@@ -6431,195 +6431,65 @@ impl FirestoreService {
     pub async fn get_desktop_releases(
         &self,
     ) -> Result<Vec<crate::routes::updates::ReleaseInfo>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/desktop_releases",
-            self.base_url()
-        );
-
-        let response = self
-            .build_request(reqwest::Method::GET, &url)
-            .await?
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            // If collection doesn't exist, return empty list
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Ok(vec![]);
-            }
-            let error_text = response.text().await?;
-            return Err(format!("Firestore error: {}", error_text).into());
-        }
-
-        let data: Value = response.json().await?;
-        let mut releases = Vec::new();
-
-        if let Some(documents) = data.get("documents").and_then(|d| d.as_array()) {
-            for doc in documents {
-                if let Ok(release) = self.parse_release(doc) {
-                    releases.push(release);
-                }
-            }
-        }
-
-        // Sort by build number descending (newest first)
+        // Top-level `desktop_releases` collection (shared shim format).
+        let docs = self.mongo.query("desktop_releases", Document::new(), None, 0, None).await?;
+        let mut releases: Vec<crate::routes::updates::ReleaseInfo> =
+            docs.iter().filter_map(parse_release_bson).collect();
+        // Newest first.
         releases.sort_by(|a, b| b.build_number.cmp(&a.build_number));
-
         Ok(releases)
     }
 
-    /// Parse Firestore document to ReleaseInfo
-    fn parse_release(
-        &self,
-        doc: &Value,
-    ) -> Result<crate::routes::updates::ReleaseInfo, Box<dyn std::error::Error + Send + Sync>> {
-        let fields = doc.get("fields").ok_or("Missing fields")?;
-
-        let changelog = if let Some(arr) = fields.get("changelog").and_then(|c| c.get("arrayValue")).and_then(|a| a.get("values")).and_then(|v| v.as_array()) {
-            arr.iter()
-                .filter_map(|v| v.get("stringValue").and_then(|s| s.as_str()))
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-
-        // channel: None = unpromoted (staging), Some("stable") = promoted stable
-        let channel = self.parse_string(fields, "channel");
-
-        Ok(crate::routes::updates::ReleaseInfo {
-            version: self.parse_string(fields, "version").unwrap_or_default(),
-            build_number: self.parse_int(fields, "build_number").unwrap_or(0) as u32,
-            download_url: self.parse_string(fields, "download_url").unwrap_or_default(),
-            ed_signature: self.parse_string(fields, "ed_signature").unwrap_or_default(),
-            published_at: self.parse_string(fields, "published_at").unwrap_or_default(),
-            changelog,
-            is_live: self.parse_bool(fields, "is_live").unwrap_or(false),
-            is_critical: self.parse_bool(fields, "is_critical").unwrap_or(false),
-            channel,
-        })
-    }
-
-    /// Create a new desktop release in Firestore
+    /// Create a new desktop release.
     pub async fn create_desktop_release(
         &self,
         release: &crate::routes::updates::ReleaseInfo,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let doc_id = format!("v{}+{}", release.version, release.build_number);
-
-        let url = format!(
-            "{}/desktop_releases/{}",
-            self.base_url(),
-            doc_id
-        );
-
-        // Build changelog array
-        let changelog_values: Vec<Value> = release.changelog
-            .iter()
-            .map(|s| json!({"stringValue": s}))
-            .collect();
-
-        // Channel field: always a string. None/empty → "staging" (unpromoted default)
-        let channel_value = match &release.channel {
-            Some(ch) if !ch.is_empty() => json!({"stringValue": ch}),
-            _ => json!({"stringValue": "staging"}),
+        let path = format!("desktop_releases/{}", doc_id);
+        // None/empty channel → "staging" (unpromoted default).
+        let channel = match &release.channel {
+            Some(ch) if !ch.is_empty() => ch.clone(),
+            _ => "staging".to_string(),
         };
-
-        let doc = json!({
-            "fields": {
-                "version": {"stringValue": release.version},
-                "build_number": {"integerValue": release.build_number.to_string()},
-                "download_url": {"stringValue": release.download_url},
-                "ed_signature": {"stringValue": release.ed_signature},
-                "published_at": {"stringValue": release.published_at},
-                "changelog": {"arrayValue": {"values": changelog_values}},
-                "is_live": {"booleanValue": release.is_live},
-                "is_critical": {"booleanValue": release.is_critical},
-                "channel": channel_value
-            }
-        });
-
-        let response = self
-            .build_request(reqwest::Method::PATCH, &url)
-            .await?
-            .json(&doc)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Firestore create error: {}", error_text).into());
-        }
-
+        let changelog: Vec<Bson> = release.changelog.iter().map(|s| Bson::String(s.clone())).collect();
+        let fields = doc! {
+            "version": &release.version,
+            "build_number": release.build_number as i64,
+            "download_url": &release.download_url,
+            "ed_signature": &release.ed_signature,
+            "published_at": &release.published_at,
+            "changelog": Bson::Array(changelog),
+            "is_live": release.is_live,
+            "is_critical": release.is_critical,
+            "channel": channel,
+        };
+        self.mongo.set(&path, fields).await?;
         tracing::info!("Created desktop release: {}", doc_id);
         Ok(doc_id)
     }
 
-    /// Promote a desktop release to the next channel: staging → beta → stable
-    /// Returns (old_channel, new_channel)
+    /// Promote a desktop release to the next channel: staging → beta → stable.
+    /// Returns (old_channel, new_channel).
     pub async fn promote_desktop_release(
         &self,
         doc_id: &str,
     ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-        // Fetch the current document
-        let url = format!(
-            "{}/desktop_releases/{}",
-            self.base_url(),
-            doc_id
-        );
-
-        let response = self
-            .build_request(reqwest::Method::GET, &url)
+        let path = format!("desktop_releases/{}", doc_id);
+        let doc = self
+            .mongo
+            .get(&path)
             .await?
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Release not found: {}", error_text).into());
-        }
-
-        let doc: Value = response.json().await?;
-        let fields = doc.get("fields").ok_or("Missing fields in document")?;
-        let current_channel = self.parse_string(fields, "channel").unwrap_or_default();
-
-        // Determine next channel
-        let (old_channel, new_channel_value) = match current_channel.as_str() {
-            "staging" | "" => ("staging".to_string(), json!({"stringValue": "beta"})),
-            "beta" => ("beta".to_string(), json!({"stringValue": "stable"})),
+            .ok_or_else(|| format!("Release not found: {}", doc_id))?;
+        let current_channel = doc.get_str("channel").unwrap_or("").to_string();
+        let (old_channel, new_channel) = match current_channel.as_str() {
+            "staging" | "" => ("staging".to_string(), "beta".to_string()),
+            "beta" => ("beta".to_string(), "stable".to_string()),
             "stable" => return Err("Release is already on stable channel, cannot promote further".into()),
             other => return Err(format!("Unknown channel '{}', cannot promote", other).into()),
         };
-
-        let new_channel = new_channel_value.get("stringValue").and_then(|v| v.as_str()).unwrap().to_string();
-
-        // PATCH only the channel field
-        let patch_url = format!(
-            "{}/desktop_releases/{}?updateMask.fieldPaths=channel",
-            self.base_url(),
-            doc_id
-        );
-
-        let patch_doc = json!({
-            "fields": {
-                "channel": new_channel_value
-            }
-        });
-
-        let response = self
-            .build_request(reqwest::Method::PATCH, &patch_url)
-            .await?
-            .json(&patch_doc)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Failed to update channel: {}", error_text).into());
-        }
-
+        self.mongo.apply(&path, doc! {"$set": {"channel": &new_channel}}, false).await?;
         tracing::info!("Promoted release {}: {} → {}", doc_id, old_channel, new_channel);
-
         Ok((old_channel, new_channel))
     }
 
@@ -9458,94 +9328,37 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<Option<crate::models::agent::AgentVm>, Box<dyn std::error::Error + Send + Sync>> {
-        let doc = self.get_user_document(uid).await?;
-        let empty = json!({});
-        let fields = doc.get("fields").unwrap_or(&empty);
-
-        let agent_vm = fields.get("agentVm");
-        if agent_vm.is_none() {
-            return Ok(None);
-        }
-
-        let map_value = agent_vm
-            .and_then(|v| v.get("mapValue"))
-            .and_then(|v| v.get("fields"));
-
-        if map_value.is_none() {
-            return Ok(None);
-        }
-
-        let f = map_value.unwrap();
-
-        let vm_name = f
-            .get("vmName")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
+        // MongoDB user doc; `agentVm` is a plain nested document.
+        let doc = match self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let vm = match doc.get_document("agentVm").ok() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let vm_name = vm.get_str("vmName").unwrap_or("").to_string();
         if vm_name.is_empty() {
             return Ok(None);
         }
-
-        let zone = f
-            .get("zone")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("us-central1-a")
-            .to_string();
-
-        let ip = f
-            .get("ip")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let status_str = f
-            .get("status")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("provisioning");
-
-        let status = match status_str {
+        let status = match vm.get_str("status").unwrap_or("provisioning") {
             "ready" => crate::models::agent::AgentVmStatus::Ready,
             "stopped" => crate::models::agent::AgentVmStatus::Stopped,
             "error" => crate::models::agent::AgentVmStatus::Error,
             _ => crate::models::agent::AgentVmStatus::Provisioning,
         };
-
-        let auth_token = f
-            .get("authToken")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let created_at = f
-            .get("createdAt")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let last_query_at = f
-            .get("lastQueryAt")
-            .and_then(|v| v.get("stringValue"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
         Ok(Some(crate::models::agent::AgentVm {
             vm_name,
-            zone,
-            ip,
+            zone: vm.get_str("zone").unwrap_or("us-central1-a").to_string(),
+            ip: vm.get_str("ip").ok().map(String::from),
             status,
-            auth_token,
-            created_at,
-            last_query_at,
+            auth_token: vm.get_str("authToken").unwrap_or("").to_string(),
+            created_at: vm.get_str("createdAt").unwrap_or("").to_string(),
+            last_query_at: vm.get_str("lastQueryAt").ok().map(String::from),
         }))
     }
 
-    /// Set agent VM info on a user's document
+    /// Set agent VM info on a user's document (`agentVm` nested field).
     pub async fn set_agent_vm(
         &self,
         uid: &str,
@@ -9556,49 +9369,37 @@ impl FirestoreService {
         auth_token: &str,
         created_at: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut vm_fields = json!({
-            "vmName": {"stringValue": vm_name},
-            "zone": {"stringValue": zone},
-            "status": {"stringValue": status.to_string()},
-            "authToken": {"stringValue": auth_token},
-            "createdAt": {"stringValue": created_at}
-        });
-
+        let mut vm = doc! {
+            "vmName": vm_name,
+            "zone": zone,
+            "status": status.to_string(),
+            "authToken": auth_token,
+            "createdAt": created_at,
+        };
         if let Some(ip_val) = ip {
-            vm_fields.as_object_mut().unwrap().insert(
-                "ip".to_string(),
-                json!({"stringValue": ip_val}),
-            );
+            vm.insert("ip", ip_val);
         }
-
-        let fields = json!({
-            "agentVm": {
-                "mapValue": {
-                    "fields": vm_fields
-                }
-            }
-        });
-
-        self.update_user_fields(uid, fields, &["agentVm"]).await
+        self.mongo
+            .apply(&format!("{}/{}", USERS_COLLECTION, uid), doc! {"$set": {"agentVm": vm}}, true)
+            .await?;
+        Ok(())
     }
 
-    /// Delete the agentVm field from a user's document.
-    /// Used when the GCE VM no longer exists in GCP.
-    pub async fn delete_agent_vm(
-        &self,
-        uid: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Omitting agentVm from the body while including it in the update mask
-        // causes Firestore to delete the field.
-        self.update_user_fields(uid, json!({}), &["agentVm"]).await
+    /// Delete the `agentVm` field from a user's document (GCE VM gone).
+    pub async fn delete_agent_vm(&self, uid: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.mongo
+            .apply(&format!("{}/{}", USERS_COLLECTION, uid), doc! {"$unset": {"agentVm": ""}}, false)
+            .await?;
+        Ok(())
     }
 
     // =========================================================================
     // SCREEN ACTIVITY
     // =========================================================================
 
-    /// Batch write screen activity rows to Firestore users/{uid}/screen_activity/{id}.
-    /// Uses Firestore commit API for batch writes (max 500 per commit).
+    /// Upsert screen activity rows to MongoDB users/{uid}/screen_activity/{id}.
+    /// (Python's screen_activity.py is still Firestore — a known straggler; both
+    /// use the shared shim collection `screen_activity`, so they align once it's migrated.)
     pub async fn upsert_screen_activity(
         &self,
         uid: &str,
@@ -9607,66 +9408,24 @@ impl FirestoreService {
         if rows.is_empty() {
             return Ok(0);
         }
-
         let mut written = 0;
-
-        for chunk in rows.chunks(500) {
-            let writes: Vec<Value> = chunk
-                .iter()
-                .map(|row| {
-                    let doc_name = format!(
-                        "projects/{}/databases/(default)/documents/{}/{}/{}/{}",
-                        self.project_id,
-                        USERS_COLLECTION,
-                        uid,
-                        SCREEN_ACTIVITY_SUBCOLLECTION,
-                        row.id
-                    );
-
-                    // Truncate OCR text to 1000 chars
-                    let ocr_truncated: String = row.ocr_text.chars().take(1000).collect();
-
-                    json!({
-                        "update": {
-                            "name": doc_name,
-                            "fields": {
-                                "timestamp": {"stringValue": &row.timestamp},
-                                "appName": {"stringValue": &row.app_name},
-                                "windowTitle": {"stringValue": &row.window_title},
-                                "ocrText": {"stringValue": ocr_truncated},
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            let commit_url = format!(
-                "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents:commit",
-                self.project_id
+        for row in rows {
+            let path = format!(
+                "{}/{}/{}/{}",
+                USERS_COLLECTION, uid, SCREEN_ACTIVITY_SUBCOLLECTION, row.id
             );
-
-            let body = json!({ "writes": writes });
-
-            let response = self
-                .build_request(reqwest::Method::POST, &commit_url)
-                .await?
-                .json(&body)
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                let error_text = response.text().await?;
-                return Err(format!("Firestore screen_activity batch commit error: {}", error_text).into());
-            }
-
-            written += chunk.len();
+            // Truncate OCR text to 1000 chars (parity with the Firestore version).
+            let ocr_truncated: String = row.ocr_text.chars().take(1000).collect();
+            let fields = doc! {
+                "timestamp": &row.timestamp,
+                "appName": &row.app_name,
+                "windowTitle": &row.window_title,
+                "ocrText": ocr_truncated,
+            };
+            self.mongo.set(&path, fields).await?;
+            written += 1;
         }
-
-        tracing::info!(
-            "Screen activity Firestore write uid={} count={}",
-            uid,
-            written
-        );
+        tracing::info!("Screen activity Mongo write uid={} count={}", uid, written);
         Ok(written)
     }
 }
@@ -9840,6 +9599,25 @@ fn parse_effective_plan_bson(doc: Option<&Document>) -> String {
         Some(pe) if pe >= chrono::Utc::now().timestamp() => plan,
         _ => "basic".to_string(),
     }
+}
+
+/// Parse a desktop_releases document (shared shim format) into `ReleaseInfo`.
+fn parse_release_bson(d: &Document) -> Option<crate::routes::updates::ReleaseInfo> {
+    let changelog = d
+        .get_array("changelog")
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    Some(crate::routes::updates::ReleaseInfo {
+        version: d.get_str("version").unwrap_or("").to_string(),
+        build_number: bson_i32(d, "build_number").unwrap_or(0) as u32,
+        download_url: d.get_str("download_url").unwrap_or("").to_string(),
+        ed_signature: d.get_str("ed_signature").unwrap_or("").to_string(),
+        published_at: d.get_str("published_at").unwrap_or("").to_string(),
+        changelog,
+        is_live: d.get_bool("is_live").unwrap_or(false),
+        is_critical: d.get_bool("is_critical").unwrap_or(false),
+        channel: d.get_str("channel").ok().map(String::from),
+    })
 }
 
 #[cfg(test)]
@@ -10229,5 +10007,83 @@ mod tests {
             }
         });
         assert_eq!(parse_effective_plan_from_doc(&doc), "enterprise");
+    }
+
+    /// End-to-end desktop_releases + agent_vm + screen_activity round-trip against
+    /// a real MongoDB. Ignored by default — run with
+    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored releases_and_agent_vm_mongo_roundtrip`.
+    #[tokio::test]
+    #[ignore]
+    async fn releases_and_agent_vm_mongo_roundtrip() {
+        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
+        std::env::set_var("MONGODB_URL", &url);
+        std::env::set_var("MONGODB_DB", "omi_rel_test");
+        let fs = FirestoreService::new("test-project".to_string(), None).await.unwrap();
+
+        // desktop_releases: create -> get -> promote
+        let rel = crate::routes::updates::ReleaseInfo {
+            version: "1.2.3".to_string(),
+            build_number: 99,
+            download_url: "https://x/y.zip".to_string(),
+            ed_signature: "sig".to_string(),
+            published_at: "2026-06-08T00:00:00Z".to_string(),
+            changelog: vec!["a".to_string(), "b".to_string()],
+            is_live: true,
+            is_critical: false,
+            channel: None,
+        };
+        let id = fs.create_desktop_release(&rel).await.unwrap();
+        assert_eq!(id, "v1.2.3+99");
+        let list = fs.get_desktop_releases().await.unwrap();
+        let got = list.iter().find(|r| r.build_number == 99).expect("release present");
+        assert_eq!(got.version, "1.2.3");
+        assert_eq!(got.changelog, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(got.channel.as_deref(), Some("staging")); // defaulted on create
+        let (old, new) = fs.promote_desktop_release(&id).await.unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("staging", "beta"));
+        fs.mongo.delete(&format!("desktop_releases/{}", id)).await.unwrap();
+
+        // agent_vm: set -> get -> delete
+        let uid = "u_vm_test";
+        let upath = format!("users/{}", uid);
+        fs.mongo.delete(&upath).await.unwrap();
+        assert!(fs.get_agent_vm(uid).await.unwrap().is_none());
+        fs.set_agent_vm(
+            uid,
+            "vm-1",
+            "us-central1-a",
+            Some("10.0.0.1"),
+            crate::models::agent::AgentVmStatus::Ready,
+            "tok",
+            "2026-06-08T00:00:00Z",
+        )
+        .await
+        .unwrap();
+        let vm = fs.get_agent_vm(uid).await.unwrap().expect("vm present");
+        assert_eq!(vm.vm_name, "vm-1");
+        assert_eq!(vm.ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(vm.status, crate::models::agent::AgentVmStatus::Ready);
+        fs.delete_agent_vm(uid).await.unwrap();
+        assert!(fs.get_agent_vm(uid).await.unwrap().is_none());
+
+        // screen_activity: upsert
+        let rows = vec![crate::models::screen_activity::ScreenActivityRow {
+            id: 1717000000,
+            timestamp: "2026-06-08 10:00:00.000".to_string(),
+            app_name: "Safari".to_string(),
+            window_title: "Inbox".to_string(),
+            ocr_text: "hello".to_string(),
+            embedding: None,
+        }];
+        assert_eq!(fs.upsert_screen_activity(uid, &rows).await.unwrap(), 1);
+        let sa = fs
+            .mongo
+            .get(&format!("users/{}/screen_activity/{}", uid, 1717000000i64))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sa.get_str("appName").unwrap(), "Safari");
+        fs.mongo.delete(&format!("users/{}/screen_activity/{}", uid, 1717000000i64)).await.unwrap();
+        fs.mongo.delete(&upath).await.unwrap();
     }
 }
