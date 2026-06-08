@@ -2,6 +2,7 @@
 // Uses Firestore REST API for simplicity and compatibility
 
 use base64::Engine;
+use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::Client;
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::MongoStore;
 use crate::encryption;
 
 use crate::models::{
@@ -85,6 +87,61 @@ pub struct FirestoreService {
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     /// Encryption secret for decrypting user data with enhanced protection level
     encryption_secret: Option<Vec<u8>>,
+    /// MongoDB store — the self-hosted data backend (Phase 2 migration). Functions
+    /// are ported off Firestore REST onto this incrementally; both coexist during
+    /// the migration. Documents use the shared shim format (see mongo_store).
+    mongo: MongoStore,
+}
+
+/// Read an optional string field from a MongoDB document.
+fn bson_str(d: &Document, key: &str) -> Option<String> {
+    d.get_str(key).ok().map(String::from)
+}
+
+/// Read an optional UTC timestamp (BSON datetime) from a MongoDB document.
+fn bson_dt(d: &Document, key: &str) -> Option<DateTime<Utc>> {
+    d.get_datetime(key).ok().map(|dt| dt.to_chrono())
+}
+
+/// Read an optional i32, tolerating int32/int64/double storage.
+fn bson_i32(d: &Document, key: &str) -> Option<i32> {
+    match d.get(key) {
+        Some(Bson::Int32(v)) => Some(*v),
+        Some(Bson::Int64(v)) => Some(*v as i32),
+        Some(Bson::Double(v)) => Some(*v as i32),
+        _ => None,
+    }
+}
+
+/// Parse an action-item document (shared shim format) into `ActionItemDB`.
+/// The leaf id is the `_k` reserved field; user fields are top-level.
+fn parse_action_item_bson(d: &Document) -> Option<ActionItemDB> {
+    Some(ActionItemDB {
+        id: d.get_str("_k").ok()?.to_string(),
+        description: d.get_str("description").unwrap_or("").to_string(),
+        completed: d.get_bool("completed").unwrap_or(false),
+        created_at: bson_dt(d, "created_at").unwrap_or_else(Utc::now),
+        updated_at: bson_dt(d, "updated_at"),
+        due_at: bson_dt(d, "due_at"),
+        completed_at: bson_dt(d, "completed_at"),
+        conversation_id: bson_str(d, "conversation_id"),
+        source: bson_str(d, "source"),
+        priority: bson_str(d, "priority"),
+        metadata: bson_str(d, "metadata"),
+        deleted: d.get_bool("deleted").ok(),
+        deleted_by: bson_str(d, "deleted_by"),
+        deleted_at: bson_dt(d, "deleted_at"),
+        deleted_reason: bson_str(d, "deleted_reason"),
+        kept_task_id: bson_str(d, "kept_task_id"),
+        category: bson_str(d, "category"),
+        goal_id: bson_str(d, "goal_id"),
+        relevance_score: bson_i32(d, "relevance_score"),
+        sort_order: bson_i32(d, "sort_order"),
+        indent_level: bson_i32(d, "indent_level"),
+        from_staged: d.get_bool("from_staged").ok(),
+        recurrence_rule: bson_str(d, "recurrence_rule"),
+        recurrence_parent_id: bson_str(d, "recurrence_parent_id"),
+    })
 }
 
 impl FirestoreService {
@@ -98,12 +155,21 @@ impl FirestoreService {
         // Load service account credentials from GOOGLE_APPLICATION_CREDENTIALS
         let credentials = Self::load_credentials()?;
 
+        // Connect to the self-hosted MongoDB (shared with the Python backend).
+        // `with_uri_str` resolves lazily, so this succeeds even if Mongo is
+        // momentarily unreachable; the first query surfaces a connection error.
+        let mongo_url = std::env::var("MONGODB_URL").unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
+        let mongo_db = std::env::var("MONGODB_DB").unwrap_or_else(|_| "omi".to_string());
+        let mongo = MongoStore::connect(&mongo_url, &mongo_db).await?;
+        tracing::info!("MongoStore connected (db={})", mongo_db);
+
         let service = Self {
             client,
             project_id,
             credentials,
             cached_token: Arc::new(RwLock::new(None)),
             encryption_secret,
+            mongo,
         };
 
         // Pre-fetch an access token
@@ -1866,250 +1932,71 @@ impl FirestoreService {
         sort_by: Option<&str>,
         include_deleted: Option<bool>,
     ) -> Result<Vec<ActionItemDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let parent = format!("{}/{}/{}", self.base_url(), USERS_COLLECTION, uid);
+        // MongoDB (shared shim format). Unlike Firestore, `deleted != true` filters
+        // correctly at the DB level (it also matches docs where the field is
+        // absent), so the Firestore post-query dedup loop is unnecessary here.
+        let parent = format!("{}/{}/{}", USERS_COLLECTION, uid, ACTION_ITEMS_SUBCOLLECTION);
 
-        // Build filters
-        let mut filters: Vec<Value> = Vec::new();
-
+        let mut filter = Document::new();
         if let Some(completed) = completed_filter {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "completed"},
-                    "op": "EQUAL",
-                    "value": {"booleanValue": completed}
-                }
-            }));
+            filter.insert("completed", completed);
         }
-
-        // Conversation ID filter
         if let Some(conv_id) = conversation_id {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "conversation_id"},
-                    "op": "EQUAL",
-                    "value": {"stringValue": conv_id}
-                }
-            }));
+            filter.insert("conversation_id", conv_id);
         }
-
-        // Date range filters for created_at
-        if let Some(start) = start_date {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "created_at"},
-                    "op": "GREATER_THAN_OR_EQUAL",
-                    "value": {"timestampValue": start}
-                }
-            }));
-        }
-
-        if let Some(end) = end_date {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "created_at"},
-                    "op": "LESS_THAN_OR_EQUAL",
-                    "value": {"timestampValue": end}
-                }
-            }));
-        }
-
-        // Date range filters for due_at
-        if let Some(due_start) = due_start_date {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "due_at"},
-                    "op": "GREATER_THAN_OR_EQUAL",
-                    "value": {"timestampValue": due_start}
-                }
-            }));
-        }
-
-        if let Some(due_end) = due_end_date {
-            filters.push(json!({
-                "fieldFilter": {
-                    "field": {"fieldPath": "due_at"},
-                    "op": "LESS_THAN_OR_EQUAL",
-                    "value": {"timestampValue": due_end}
-                }
-            }));
-        }
-
-        // Build the where clause
-        let where_clause = if filters.is_empty() {
-            None
-        } else if filters.len() == 1 {
-            Some(filters.into_iter().next().unwrap())
+        if include_deleted == Some(true) {
+            filter.insert("deleted", true);
         } else {
-            Some(json!({
-                "compositeFilter": {
-                    "op": "AND",
-                    "filters": filters
-                }
-            }))
-        };
-
-        // Build order by clause based on sort_by parameter
-        let order_by = match sort_by {
-            Some("due_at") => json!([
-                {"field": {"fieldPath": "due_at"}, "direction": "ASCENDING"},
-                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
-            ]),
-            Some("priority") => json!([
-                {"field": {"fieldPath": "priority"}, "direction": "DESCENDING"},
-                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
-            ]),
-            _ => json!([
-                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
-            ]),
-        };
-
-        // Fetch from Firestore in a loop to handle post-query deleted filtering.
-        // Since `deleted` can't be reliably filtered in Firestore (most docs lack the field),
-        // we filter in Rust. But this means a single Firestore page may yield fewer items
-        // than requested after filtering, so we keep fetching until we have enough or Firestore
-        // is exhausted.
-        let mut action_items: Vec<ActionItemDB> = Vec::new();
-        let mut current_offset = offset;
-        let fetch_batch = limit.max(500); // fetch in large batches to minimize round-trips
-
-        loop {
-            let mut structured_query = json!({
-                "from": [{"collectionId": ACTION_ITEMS_SUBCOLLECTION}],
-                "orderBy": order_by.clone(),
-                "limit": fetch_batch,
-                "offset": current_offset
-            });
-
-            if let Some(ref where_filter) = where_clause {
-                structured_query["where"] = where_filter.clone();
-            }
-
-            let query = json!({
-                "structuredQuery": structured_query
-            });
-
-            let response = self
-                .build_request(reqwest::Method::POST, &format!("{}:runQuery", parent))
-                .await?
-                .json(&query)
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                let error_text = response.text().await?;
-                tracing::error!("Firestore query error for action_items: {}", error_text);
-                return Err(format!("Firestore query error: {}", error_text).into());
-            }
-
-            let results: Vec<Value> = response.json().await?;
-            let fetched_count = results.iter().filter(|doc| doc.get("document").is_some()).count();
-
-            let batch: Vec<ActionItemDB> = results
-                .into_iter()
-                .filter_map(|doc| {
-                    doc.get("document")
-                        .and_then(|d| self.parse_action_item(d).ok())
-                })
-                // Filter based on deleted status
-                .filter(|item| {
-                    if include_deleted == Some(true) {
-                        item.deleted == Some(true)
-                    } else {
-                        item.deleted != Some(true)
-                    }
-                })
-                .collect();
-
-            action_items.extend(batch);
-            current_offset += fetched_count;
-
-            // Stop if Firestore returned fewer than requested (no more data)
-            if fetched_count < fetch_batch {
-                break;
-            }
-
-            // Stop if we have enough items
-            if action_items.len() >= limit {
-                action_items.truncate(limit);
-                break;
-            }
+            filter.insert("deleted", doc! {"$ne": true});
         }
 
-        // Enrich action items that have conversation_id but no source
-        self.enrich_action_items_with_source(uid, &mut action_items).await;
+        // created_at / due_at range filters (inputs are RFC3339 strings).
+        let parse = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|dt| bson::DateTime::from_chrono(dt.with_timezone(&Utc)));
+        let mut created_range = Document::new();
+        if let Some(v) = start_date.and_then(parse) {
+            created_range.insert("$gte", v);
+        }
+        if let Some(v) = end_date.and_then(parse) {
+            created_range.insert("$lte", v);
+        }
+        if !created_range.is_empty() {
+            filter.insert("created_at", created_range);
+        }
+        let mut due_range = Document::new();
+        if let Some(v) = due_start_date.and_then(parse) {
+            due_range.insert("$gte", v);
+        }
+        if let Some(v) = due_end_date.and_then(parse) {
+            due_range.insert("$lte", v);
+        }
+        if !due_range.is_empty() {
+            filter.insert("due_at", due_range);
+        }
 
-        // Post-query sort matching Python backend behavior (used by iOS/Flutter app):
-        // 1. Items WITH due_at come first (sorted by due_at ascending)
-        // 2. Items WITHOUT due_at come last
-        // 3. Tie-breaker: created_at descending (newest first)
-        action_items.sort_by(|a, b| {
-            match (&a.due_at, &b.due_at) {
-                (Some(due_a), Some(due_b)) => {
-                    due_a.cmp(due_b).then_with(|| b.created_at.cmp(&a.created_at))
-                }
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => b.created_at.cmp(&a.created_at),
-            }
+        // Sort mirrors the Firestore order_by choices.
+        let sort = match sort_by {
+            Some("due_at") => doc! {"due_at": 1, "created_at": -1},
+            Some("priority") => doc! {"priority": -1, "created_at": -1},
+            _ => doc! {"created_at": -1},
+        };
+
+        let docs = self
+            .mongo
+            .query(&parent, filter, Some(sort), offset as u64, Some(limit as i64))
+            .await?;
+
+        let mut action_items: Vec<ActionItemDB> = docs.iter().filter_map(parse_action_item_bson).collect();
+
+        // Final ordering parity with the Python app: items WITH due_at first
+        // (ascending), then by created_at descending.
+        action_items.sort_by(|a, b| match (&a.due_at, &b.due_at) {
+            (Some(due_a), Some(due_b)) => due_a.cmp(due_b).then_with(|| b.created_at.cmp(&a.created_at)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.created_at.cmp(&a.created_at),
         });
 
         Ok(action_items)
-    }
-
-    /// Batch fetch conversations and populate source field on action items
-    /// For items with conversation_id but no source, derives source as "transcription:{conversation.source}"
-    async fn enrich_action_items_with_source(&self, uid: &str, action_items: &mut [ActionItemDB]) {
-        use std::collections::{HashMap, HashSet};
-
-        // Collect unique conversation IDs from items that need enrichment
-        // (have conversation_id but no source)
-        let conversation_ids: HashSet<&str> = action_items
-            .iter()
-            .filter(|item| item.source.is_none() && item.conversation_id.is_some())
-            .filter_map(|item| item.conversation_id.as_deref())
-            .collect();
-
-        if conversation_ids.is_empty() {
-            return;
-        }
-
-        tracing::debug!(
-            "Enriching {} action items with source from {} conversations",
-            action_items.iter().filter(|i| i.source.is_none()).count(),
-            conversation_ids.len()
-        );
-
-        // Fetch conversations in parallel (limit to avoid too many concurrent requests)
-        let mut source_map: HashMap<String, String> = HashMap::new();
-
-        // Batch fetch - fetch up to 10 at a time
-        let ids: Vec<&str> = conversation_ids.into_iter().collect();
-        for chunk in ids.chunks(10) {
-            let futures: Vec<_> = chunk
-                .iter()
-                .map(|id| self.get_conversation(uid, id))
-                .collect();
-
-            let results = futures::future::join_all(futures).await;
-
-            for (id, result) in chunk.iter().zip(results) {
-                if let Ok(Some(conv)) = result {
-                    // Format as "transcription:{source}" to match expected values
-                    // e.g., "transcription:omi", "transcription:desktop"
-                    let source_str = format!("transcription:{:?}", conv.source).to_lowercase();
-                    source_map.insert(id.to_string(), source_str);
-                }
-            }
-        }
-
-        // Populate source field on action items that don't have one
-        for item in action_items.iter_mut() {
-            if item.source.is_none() {
-                if let Some(conv_id) = &item.conversation_id {
-                    item.source = source_map.get(conv_id).cloned();
-                }
-            }
-        }
     }
 
     /// Get a single action item by ID
@@ -2398,86 +2285,75 @@ impl FirestoreService {
         recurrence_rule: Option<&str>,
         recurrence_parent_id: Option<&str>,
     ) -> Result<ActionItemDB, Box<dyn std::error::Error + Send + Sync>> {
-        let item_id = uuid::Uuid::new_v4().to_string();
+        // MongoDB (shared shim format). Matches Python action_items.create_action_item:
+        // random hex id, created_at/updated_at = now (UTC), completed = false.
+        let item_id = uuid::Uuid::new_v4().simple().to_string();
         let now = Utc::now();
+        let path = format!("{}/{}/{}/{}", USERS_COLLECTION, uid, ACTION_ITEMS_SUBCOLLECTION, item_id);
 
-        let url = format!(
-            "{}/{}/{}/{}/{}",
-            self.base_url(),
-            USERS_COLLECTION,
-            uid,
-            ACTION_ITEMS_SUBCOLLECTION,
-            item_id
-        );
-
-        let mut fields = json!({
-            "description": {"stringValue": description},
-            "completed": {"booleanValue": false},
-            "created_at": {"timestampValue": now.to_rfc3339()},
-            "updated_at": {"timestampValue": now.to_rfc3339()}
-        });
-
+        let mut fields = doc! {
+            "description": description,
+            "completed": false,
+            "created_at": bson::DateTime::from_chrono(now),
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
         if let Some(due) = due_at {
-            fields["due_at"] = json!({"timestampValue": due.to_rfc3339()});
+            fields.insert("due_at", bson::DateTime::from_chrono(due));
         }
-
         if let Some(src) = source {
-            fields["source"] = json!({"stringValue": src});
+            fields.insert("source", src);
         }
-
         if let Some(pri) = priority {
-            fields["priority"] = json!({"stringValue": pri});
+            fields.insert("priority", pri);
         }
-
         if let Some(meta) = metadata {
-            fields["metadata"] = json!({"stringValue": meta});
+            fields.insert("metadata", meta);
         }
-
         if let Some(cat) = category {
-            fields["category"] = json!({"stringValue": cat});
+            fields.insert("category", cat);
         }
-
         if let Some(score) = relevance_score {
-            fields["relevance_score"] = json!({"integerValue": score.to_string()});
+            fields.insert("relevance_score", score);
         }
-
         if let Some(staged) = from_staged {
-            fields["from_staged"] = json!({"booleanValue": staged});
+            fields.insert("from_staged", staged);
         }
-
         if let Some(rule) = recurrence_rule {
-            fields["recurrence_rule"] = json!({"stringValue": rule});
+            fields.insert("recurrence_rule", rule);
         }
-
         if let Some(pid) = recurrence_parent_id {
-            fields["recurrence_parent_id"] = json!({"stringValue": pid});
+            fields.insert("recurrence_parent_id", pid);
         }
 
-        let doc = json!({"fields": fields});
+        self.mongo.set(&path, fields).await?;
 
-        let response = self
-            .build_request(reqwest::Method::PATCH, &url)
-            .await?
-            .json(&doc)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Firestore create error: {}", error_text).into());
-        }
-
-        // Parse and return the created document
-        let created_doc: Value = response.json().await?;
-        let action_item = self.parse_action_item(&created_doc)?;
-
-        tracing::info!(
-            "Created action item {} for user {} with source={:?}",
-            item_id,
-            uid,
-            source
-        );
-        Ok(action_item)
+        tracing::info!("Created action item {} for user {} with source={:?}", item_id, uid, source);
+        Ok(ActionItemDB {
+            id: item_id,
+            description: description.to_string(),
+            completed: false,
+            created_at: now,
+            updated_at: Some(now),
+            due_at,
+            completed_at: None,
+            conversation_id: None,
+            source: source.map(String::from),
+            priority: priority.map(String::from),
+            metadata: metadata.map(String::from),
+            deleted: None,
+            deleted_by: None,
+            deleted_at: None,
+            deleted_reason: None,
+            kept_task_id: None,
+            category: category.map(String::from),
+            goal_id: None,
+            relevance_score,
+            sort_order: None,
+            indent_level: None,
+            from_staged,
+            recurrence_rule: recurrence_rule.map(String::from),
+            recurrence_parent_id: recurrence_parent_id.map(String::from),
+        })
     }
 
     /// Batch update relevance scores for multiple action items using Firestore commit API.
@@ -9968,6 +9844,76 @@ mod tests {
         assert_eq!(id.len(), 20);
         assert_eq!(id, document_id_from_seed("test content"));
         assert_ne!(id, document_id_from_seed("different content"));
+    }
+
+    /// End-to-end action_items round-trip against a real MongoDB (shared shim
+    /// format). Ignored by default (CI has no Mongo); run with
+    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored action_items_mongo_roundtrip`.
+    #[tokio::test]
+    #[ignore]
+    async fn action_items_mongo_roundtrip() {
+        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
+        std::env::set_var("MONGODB_URL", &url);
+        std::env::set_var("MONGODB_DB", "omi_at_test");
+        let fs = FirestoreService::new("test-project".to_string(), None)
+            .await
+            .expect("FirestoreService::new");
+        let uid = "u_at_test";
+
+        let created = fs
+            .create_action_item(
+                uid,
+                "buy milk",
+                None,
+                Some("sentry_feedback"),
+                Some("high"),
+                None,
+                Some("work"),
+                Some(5),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        assert_eq!(created.description, "buy milk");
+        assert!(!created.completed);
+
+        // Read it back through the Mongo query path.
+        let items = fs
+            .get_action_items(uid, 50, 0, None, None, None, None, None, None, None, None)
+            .await
+            .expect("get");
+        let found = items.iter().find(|i| i.id == created.id).expect("created item present");
+        assert_eq!(found.description, "buy milk");
+        assert_eq!(found.source.as_deref(), Some("sentry_feedback"));
+        assert_eq!(found.priority.as_deref(), Some("high"));
+        assert_eq!(found.category.as_deref(), Some("work"));
+        assert_eq!(found.relevance_score, Some(5));
+        assert!(!found.completed);
+
+        // completed=true filter must exclude our incomplete item.
+        let completed = fs
+            .get_action_items(uid, 50, 0, Some(true), None, None, None, None, None, None, None)
+            .await
+            .expect("get completed");
+        assert!(!completed.iter().any(|i| i.id == created.id));
+
+        // Stored doc uses the shim format (collection `action_items`, _k = leaf id).
+        let raw = fs
+            .mongo
+            .get(&format!("users/{}/action_items/{}", uid, created.id))
+            .await
+            .unwrap()
+            .expect("raw doc");
+        assert_eq!(raw.get_str("_k").unwrap(), created.id);
+        assert_eq!(raw.get_str("_p").unwrap(), format!("users/{}/action_items", uid));
+
+        // cleanup
+        fs.mongo
+            .delete(&format!("users/{}/action_items/{}", uid, created.id))
+            .await
+            .unwrap();
     }
 
     // --- Firestore BYOK state parsing tests ---
