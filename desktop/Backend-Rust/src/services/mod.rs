@@ -1,6 +1,7 @@
 // Services module
 
 pub mod firestore;
+pub mod firestore_shim;
 pub mod integrations;
 pub mod mongo_store;
 pub mod redis;
