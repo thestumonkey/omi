@@ -367,7 +367,8 @@ impl FirestoreService {
     // LLM USAGE
 
     /// Atomically increment LLM usage counters for a user on a given date.
-    /// Uses Firestore REST commit with FieldTransforms (server-side atomic increments).
+    /// MongoDB `$inc` on dotted paths (shared shim format), replacing the
+    /// Firestore commit + FieldTransforms. Document: users/{uid}/llm_usage/{YYYY-MM-DD}.
     pub async fn record_llm_usage(
         &self,
         uid: &str,
@@ -380,49 +381,28 @@ impl FirestoreService {
         account: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let date_key = Utc::now().format("%Y-%m-%d").to_string();
-        let doc_path = format!(
-            "projects/{}/databases/(default)/documents/{}/{}/{}/{}",
-            self.project_id, USERS_COLLECTION, uid, LLM_USAGE_SUBCOLLECTION, date_key
-        );
-        let commit_url = format!(
-            "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents:commit",
-            self.project_id
-        );
-        // Write to account-specific prefix (e.g. "desktop_chat_omi" or "desktop_chat_personal")
-        // Also continue writing to "desktop_chat" for backward compat with existing queries
-        let acct_prefix = format!("desktop_chat_{}", account);
-        let body = json!({
-            "writes": [{
-                "transform": {
-                    "document": doc_path,
-                    "fieldTransforms": [
-                        { "fieldPath": "desktop_chat.input_tokens",       "increment": { "integerValue": input.to_string() } },
-                        { "fieldPath": "desktop_chat.output_tokens",      "increment": { "integerValue": output.to_string() } },
-                        { "fieldPath": "desktop_chat.cache_read_tokens",  "increment": { "integerValue": cache_read.to_string() } },
-                        { "fieldPath": "desktop_chat.cache_write_tokens", "increment": { "integerValue": cache_write.to_string() } },
-                        { "fieldPath": "desktop_chat.total_tokens",       "increment": { "integerValue": total.to_string() } },
-                        { "fieldPath": "desktop_chat.cost_usd",           "increment": { "doubleValue": cost } },
-                        { "fieldPath": "desktop_chat.call_count",         "increment": { "integerValue": "1" } },
-                        { "fieldPath": format!("{}.input_tokens", acct_prefix),       "increment": { "integerValue": input.to_string() } },
-                        { "fieldPath": format!("{}.output_tokens", acct_prefix),      "increment": { "integerValue": output.to_string() } },
-                        { "fieldPath": format!("{}.cache_read_tokens", acct_prefix),  "increment": { "integerValue": cache_read.to_string() } },
-                        { "fieldPath": format!("{}.cache_write_tokens", acct_prefix), "increment": { "integerValue": cache_write.to_string() } },
-                        { "fieldPath": format!("{}.total_tokens", acct_prefix),       "increment": { "integerValue": total.to_string() } },
-                        { "fieldPath": format!("{}.cost_usd", acct_prefix),           "increment": { "doubleValue": cost } },
-                        { "fieldPath": format!("{}.call_count", acct_prefix),         "increment": { "integerValue": "1" } },
-                    ]
-                }
-            }]
-        });
-        let resp = self
-            .build_request(reqwest::Method::POST, &commit_url)
-            .await?
-            .json(&body)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(resp.text().await?.into());
-        }
+        let path = format!("{}/{}/{}/{}", USERS_COLLECTION, uid, LLM_USAGE_SUBCOLLECTION, date_key);
+        // Account-specific prefix (e.g. "desktop_chat_omi"/"desktop_chat_personal"),
+        // plus the rolled-up "desktop_chat" map kept for existing queries.
+        let acct = format!("desktop_chat_{}", account);
+        let mut inc = doc! {
+            "desktop_chat.input_tokens": input,
+            "desktop_chat.output_tokens": output,
+            "desktop_chat.cache_read_tokens": cache_read,
+            "desktop_chat.cache_write_tokens": cache_write,
+            "desktop_chat.total_tokens": total,
+            "desktop_chat.cost_usd": cost,
+            "desktop_chat.call_count": 1i64,
+        };
+        inc.insert(format!("{}.input_tokens", acct), input);
+        inc.insert(format!("{}.output_tokens", acct), output);
+        inc.insert(format!("{}.cache_read_tokens", acct), cache_read);
+        inc.insert(format!("{}.cache_write_tokens", acct), cache_write);
+        inc.insert(format!("{}.total_tokens", acct), total);
+        inc.insert(format!("{}.cost_usd", acct), cost);
+        inc.insert(format!("{}.call_count", acct), 1i64);
+
+        self.mongo.apply(&path, doc! {"$inc": inc}, true).await?;
         Ok(())
     }
 
@@ -4584,8 +4564,8 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<crate::byok::ByokState, Box<dyn std::error::Error + Send + Sync>> {
-        let doc = self.get_user_document(uid).await?;
-        Ok(parse_byok_state_from_doc(&doc))
+        let doc = self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await?;
+        Ok(parse_byok_state_bson(doc.as_ref()))
     }
 
     /// Read the effective subscription plan for paywall purposes.
@@ -4600,32 +4580,8 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let doc = self.get_user_document(uid).await?;
-        let plan = parse_effective_plan_from_doc(&doc);
-
-        // Log interesting fallback cases for paid plans
-        if let Some(fields) = doc.get("fields") {
-            if let Some(sub_fields) = fields
-                .get("subscription")
-                .and_then(|v| v.get("mapValue"))
-                .and_then(|v| v.get("fields"))
-            {
-                let raw_plan = sub_fields
-                    .get("plan")
-                    .and_then(|v| v.get("stringValue"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("basic");
-
-                if raw_plan != "basic" && raw_plan != "free" && plan == "basic" {
-                    tracing::info!(
-                        "paywall: paid plan '{}' fell back to basic for uid={} (expired or missing period_end)",
-                        raw_plan, uid
-                    );
-                }
-            }
-        }
-
-        Ok(plan)
+        let doc = self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await?;
+        Ok(parse_effective_plan_bson(doc.as_ref()))
     }
 
     /// Get user account creation time from Firebase Auth Identity Toolkit REST API.
@@ -9834,6 +9790,58 @@ fn parse_effective_plan_from_doc(doc: &Value) -> String {
     }
 }
 
+/// Parse BYOK state from a MongoDB user document (shared shim format).
+/// `byok` is a plain nested document: { active, fingerprints: {provider: fp}, last_seen_at }.
+/// Returns `ByokState::default()` (inactive) when absent.
+fn parse_byok_state_bson(doc: Option<&Document>) -> crate::byok::ByokState {
+    let byok = match doc.and_then(|d| d.get_document("byok").ok()) {
+        Some(b) => b,
+        None => return crate::byok::ByokState::default(),
+    };
+    let active = byok.get_bool("active").unwrap_or(false);
+    let mut fingerprints = std::collections::HashMap::new();
+    if let Ok(fp) = byok.get_document("fingerprints") {
+        for (provider, val) in fp {
+            if let Bson::String(s) = val {
+                fingerprints.insert(provider.clone(), s.clone());
+            }
+        }
+    }
+    let last_seen_at = byok.get_datetime("last_seen_at").ok().map(|dt| dt.to_chrono());
+    crate::byok::ByokState {
+        active,
+        fingerprints,
+        last_seen_at,
+    }
+}
+
+/// Parse the effective subscription plan from a MongoDB user document.
+/// `subscription` is a plain nested document: { plan, current_period_end (unix secs), ... }.
+/// Returns "basic" when missing/expired/free (fail-open), matching the Firestore parser.
+fn parse_effective_plan_bson(doc: Option<&Document>) -> String {
+    let sub = match doc.and_then(|d| d.get_document("subscription").ok()) {
+        Some(s) => s,
+        None => return "basic".to_string(),
+    };
+    let mut plan = sub.get_str("plan").unwrap_or("basic").to_string();
+    if plan == "free" {
+        plan = "basic".to_string();
+    }
+    if plan == "basic" {
+        return plan;
+    }
+    let period_end = match sub.get("current_period_end") {
+        Some(Bson::Int64(v)) => Some(*v),
+        Some(Bson::Int32(v)) => Some(*v as i64),
+        Some(Bson::Double(v)) => Some(*v as i64),
+        _ => None,
+    };
+    match period_end {
+        Some(pe) if pe >= chrono::Utc::now().timestamp() => plan,
+        _ => "basic".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9844,6 +9852,91 @@ mod tests {
         assert_eq!(id.len(), 20);
         assert_eq!(id, document_id_from_seed("test content"));
         assert_ne!(id, document_id_from_seed("different content"));
+    }
+
+    // --- MongoDB (shim-format) parser tests ---
+
+    #[test]
+    fn bson_byok_active_with_fingerprints() {
+        let d = doc! { "byok": { "active": true, "fingerprints": { "openai": "abc", "anthropic": "xyz" } } };
+        let st = parse_byok_state_bson(Some(&d));
+        assert!(st.active);
+        assert_eq!(st.fingerprints.get("openai").unwrap(), "abc");
+        assert_eq!(st.fingerprints.get("anthropic").unwrap(), "xyz");
+    }
+
+    #[test]
+    fn bson_byok_absent_is_inactive_default() {
+        assert!(!parse_byok_state_bson(None).active);
+        assert!(!parse_byok_state_bson(Some(&doc! {"foo": 1})).active);
+    }
+
+    #[test]
+    fn bson_effective_plan_cases() {
+        assert_eq!(parse_effective_plan_bson(None), "basic");
+        assert_eq!(parse_effective_plan_bson(Some(&doc! {})), "basic");
+        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "free"}})), "basic");
+        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "basic"}})), "basic");
+        let future = chrono::Utc::now().timestamp() + 86400;
+        assert_eq!(
+            parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited", "current_period_end": future}})),
+            "unlimited"
+        );
+        let past = chrono::Utc::now().timestamp() - 86400;
+        assert_eq!(
+            parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited", "current_period_end": past}})),
+            "basic"
+        );
+        // Paid plan without a period end fails closed to basic.
+        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited"}})), "basic");
+    }
+
+    /// End-to-end user-doc (byok/subscription) + llm_usage round-trip against a
+    /// real MongoDB. Ignored by default — run with
+    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored user_doc_and_usage_mongo_roundtrip`.
+    #[tokio::test]
+    #[ignore]
+    async fn user_doc_and_usage_mongo_roundtrip() {
+        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
+        std::env::set_var("MONGODB_URL", &url);
+        std::env::set_var("MONGODB_DB", "omi_user_test");
+        let fs = FirestoreService::new("test-project".to_string(), None).await.unwrap();
+        let uid = "u_user_test";
+        let upath = format!("users/{}", uid);
+        fs.mongo.delete(&upath).await.unwrap();
+
+        // Seed a user doc the way Python stores it (plain nested byok/subscription).
+        let future = chrono::Utc::now().timestamp() + 86400;
+        fs.mongo
+            .set(
+                &upath,
+                doc! {
+                    "byok": {"active": true, "fingerprints": {"openai": "fp123"}},
+                    "subscription": {"plan": "unlimited", "current_period_end": future},
+                },
+            )
+            .await
+            .unwrap();
+
+        let byok = fs.get_user_byok_state(uid).await.unwrap();
+        assert!(byok.active);
+        assert_eq!(byok.fingerprints.get("openai").unwrap(), "fp123");
+        assert_eq!(fs.get_user_effective_plan(uid).await.unwrap(), "unlimited");
+
+        // record_llm_usage uses $inc — two calls accumulate.
+        fs.record_llm_usage(uid, 10, 5, 0, 0, 15, 0.002, "omi").await.unwrap();
+        fs.record_llm_usage(uid, 20, 7, 0, 0, 27, 0.003, "omi").await.unwrap();
+        let date_key = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let usage_path = format!("users/{}/llm_usage/{}", uid, date_key);
+        let usage = fs.mongo.get(&usage_path).await.unwrap().unwrap();
+        let dc = usage.get_document("desktop_chat").unwrap();
+        assert_eq!(dc.get_i64("input_tokens").unwrap(), 30);
+        assert_eq!(dc.get_i64("call_count").unwrap(), 2);
+        let acct = usage.get_document("desktop_chat_omi").unwrap();
+        assert_eq!(acct.get_i64("input_tokens").unwrap(), 30);
+
+        fs.mongo.delete(&upath).await.unwrap();
+        fs.mongo.delete(&usage_path).await.unwrap();
     }
 
     /// End-to-end action_items round-trip against a real MongoDB (shared shim
