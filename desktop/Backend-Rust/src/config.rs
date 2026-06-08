@@ -19,6 +19,14 @@ pub struct Config {
     pub firebase_auth_project_id: Option<String>,
     /// Firebase Web API key (for identity toolkit)
     pub firebase_api_key: Option<String>,
+    /// Casdoor OIDC endpoint (public), e.g. https://door.spangled-kettle.ts.net.
+    /// Used to derive the JWKS URL for verifying id_tokens.
+    pub casdoor_endpoint: Option<String>,
+    /// Casdoor internal cluster URL for server-to-server calls (e.g. http://casdoor:8000).
+    /// Preferred over the public endpoint when reachable.
+    pub casdoor_internal_url: Option<String>,
+    /// Casdoor OAuth client id — the expected `aud` claim on id_tokens.
+    pub casdoor_client_id: Option<String>,
     /// Base API URL (for OAuth callbacks)
     pub base_api_url: Option<String>,
     /// Apple Sign-In Client ID (Services ID)
@@ -98,6 +106,9 @@ impl Config {
             firebase_project_id: env::var("FIREBASE_PROJECT_ID").ok()
                 .or_else(|| env::var("GCP_PROJECT_ID").ok()),
             firebase_auth_project_id: env::var("FIREBASE_AUTH_PROJECT_ID").ok(),
+            casdoor_endpoint: env::var("CASDOOR_ENDPOINT").ok(),
+            casdoor_internal_url: env::var("CASDOOR_INTERNAL_URL").ok(),
+            casdoor_client_id: env::var("CASDOOR_CLIENT_ID").ok(),
             firebase_api_key: env::var("FIREBASE_API_KEY").ok(),
             base_api_url: env::var("BASE_API_URL").ok(),
             apple_client_id: env::var("APPLE_CLIENT_ID").ok(),
@@ -170,7 +181,9 @@ impl Config {
             tracing::warn!("REDIS_DB_HOST not set - conversation visibility/sharing will not work");
         }
         if self.encryption_secret.is_none() {
-            tracing::warn!("ENCRYPTION_SECRET not set — encrypted user data will not be decryptable");
+            tracing::warn!(
+                "ENCRYPTION_SECRET not set — encrypted user data will not be decryptable"
+            );
         }
         Ok(())
     }
@@ -181,7 +194,10 @@ impl Config {
             if let Some(password) = &self.redis_password {
                 // URL-encode the password to handle special characters
                 let encoded_password = urlencoding::encode(password);
-                format!("redis://default:{}@{}:{}", encoded_password, host, self.redis_port)
+                format!(
+                    "redis://default:{}@{}:{}",
+                    encoded_password, host, self.redis_port
+                )
             } else {
                 format!("redis://{}:{}", host, self.redis_port)
             }
