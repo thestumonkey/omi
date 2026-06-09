@@ -368,6 +368,88 @@ async fn commit(mongo: &MongoStore, body: Option<&Value>) -> (u16, Value) {
     (200, json!({ "writeResults": results }))
 }
 
+// ===========================================================================
+// reqwest-shaped seam: build_request returns one of these. Firestore URLs route
+// to MongoDB (Mongo variant); everything else (GCE compute, identitytoolkit)
+// passes through to real reqwest (Real variant). Covers exactly the chained
+// methods firestore.rs and agent.rs use: .json()/.header()/.send() and the
+// response's .status()/.json()/.text().
+// ===========================================================================
+
+type BoxErr = Box<dyn std::error::Error + Send + Sync>;
+
+pub enum ShimRequest {
+    Real(reqwest::RequestBuilder),
+    Mongo {
+        method: String,
+        url: String,
+        body: Option<Value>,
+        mongo: MongoStore,
+    },
+}
+
+impl ShimRequest {
+    pub fn json<T: serde::Serialize + ?Sized>(self, body: &T) -> Self {
+        match self {
+            ShimRequest::Real(rb) => ShimRequest::Real(rb.json(body)),
+            ShimRequest::Mongo { method, url, mongo, .. } => ShimRequest::Mongo {
+                method,
+                url,
+                mongo,
+                body: serde_json::to_value(body).ok(),
+            },
+        }
+    }
+
+    pub fn header(self, key: &str, value: &str) -> Self {
+        match self {
+            ShimRequest::Real(rb) => ShimRequest::Real(rb.header(key, value)),
+            // Headers are irrelevant to the Mongo path (firestore URLs).
+            other => other,
+        }
+    }
+
+    pub async fn send(self) -> Result<ShimResponse, BoxErr> {
+        match self {
+            ShimRequest::Real(rb) => Ok(ShimResponse::Real(rb.send().await?)),
+            ShimRequest::Mongo { method, url, body, mongo } => {
+                let (status, value) = dispatch(&mongo, &method, &url, body.as_ref()).await;
+                Ok(ShimResponse::Mongo { status, value })
+            }
+        }
+    }
+}
+
+pub enum ShimResponse {
+    Real(reqwest::Response),
+    Mongo { status: u16, value: Value },
+}
+
+impl ShimResponse {
+    pub fn status(&self) -> reqwest::StatusCode {
+        match self {
+            ShimResponse::Real(r) => r.status(),
+            ShimResponse::Mongo { status, .. } => {
+                reqwest::StatusCode::from_u16(*status).unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
+
+    pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, BoxErr> {
+        match self {
+            ShimResponse::Real(r) => Ok(r.json::<T>().await?),
+            ShimResponse::Mongo { value, .. } => Ok(serde_json::from_value(value)?),
+        }
+    }
+
+    pub async fn text(self) -> Result<String, BoxErr> {
+        match self {
+            ShimResponse::Real(r) => Ok(r.text().await?),
+            ShimResponse::Mongo { value, .. } => Ok(value.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

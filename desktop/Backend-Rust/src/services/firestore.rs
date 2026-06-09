@@ -2,7 +2,6 @@
 // Uses Firestore REST API for simplicity and compatibility
 
 use base64::Engine;
-use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::Client;
@@ -12,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::firestore_shim::{self, ShimRequest, ShimResponse};
 use super::MongoStore;
 use crate::encryption;
 
@@ -87,61 +87,10 @@ pub struct FirestoreService {
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     /// Encryption secret for decrypting user data with enhanced protection level
     encryption_secret: Option<Vec<u8>>,
-    /// MongoDB store — the self-hosted data backend (Phase 2 migration). Functions
-    /// are ported off Firestore REST onto this incrementally; both coexist during
-    /// the migration. Documents use the shared shim format (see mongo_store).
+    /// Self-hosted MongoDB. Firestore REST calls are transparently served from
+    /// here by the shim (see firestore_shim + build_request), so the upstream
+    /// methods run unchanged and nothing actually talks to Google Firestore.
     mongo: MongoStore,
-}
-
-/// Read an optional string field from a MongoDB document.
-fn bson_str(d: &Document, key: &str) -> Option<String> {
-    d.get_str(key).ok().map(String::from)
-}
-
-/// Read an optional UTC timestamp (BSON datetime) from a MongoDB document.
-fn bson_dt(d: &Document, key: &str) -> Option<DateTime<Utc>> {
-    d.get_datetime(key).ok().map(|dt| dt.to_chrono())
-}
-
-/// Read an optional i32, tolerating int32/int64/double storage.
-fn bson_i32(d: &Document, key: &str) -> Option<i32> {
-    match d.get(key) {
-        Some(Bson::Int32(v)) => Some(*v),
-        Some(Bson::Int64(v)) => Some(*v as i32),
-        Some(Bson::Double(v)) => Some(*v as i32),
-        _ => None,
-    }
-}
-
-/// Parse an action-item document (shared shim format) into `ActionItemDB`.
-/// The leaf id is the `_k` reserved field; user fields are top-level.
-fn parse_action_item_bson(d: &Document) -> Option<ActionItemDB> {
-    Some(ActionItemDB {
-        id: d.get_str("_k").ok()?.to_string(),
-        description: d.get_str("description").unwrap_or("").to_string(),
-        completed: d.get_bool("completed").unwrap_or(false),
-        created_at: bson_dt(d, "created_at").unwrap_or_else(Utc::now),
-        updated_at: bson_dt(d, "updated_at"),
-        due_at: bson_dt(d, "due_at"),
-        completed_at: bson_dt(d, "completed_at"),
-        conversation_id: bson_str(d, "conversation_id"),
-        source: bson_str(d, "source"),
-        priority: bson_str(d, "priority"),
-        metadata: bson_str(d, "metadata"),
-        deleted: d.get_bool("deleted").ok(),
-        deleted_by: bson_str(d, "deleted_by"),
-        deleted_at: bson_dt(d, "deleted_at"),
-        deleted_reason: bson_str(d, "deleted_reason"),
-        kept_task_id: bson_str(d, "kept_task_id"),
-        category: bson_str(d, "category"),
-        goal_id: bson_str(d, "goal_id"),
-        relevance_score: bson_i32(d, "relevance_score"),
-        sort_order: bson_i32(d, "sort_order"),
-        indent_level: bson_i32(d, "indent_level"),
-        from_staged: d.get_bool("from_staged").ok(),
-        recurrence_rule: bson_str(d, "recurrence_rule"),
-        recurrence_parent_id: bson_str(d, "recurrence_parent_id"),
-    })
 }
 
 impl FirestoreService {
@@ -153,15 +102,16 @@ impl FirestoreService {
         let client = Client::new();
 
         // Load service account credentials from GOOGLE_APPLICATION_CREDENTIALS
+        // (only used now for the GCE Compute API — Firestore is served from Mongo).
         let credentials = Self::load_credentials()?;
 
-        // Connect to the self-hosted MongoDB (shared with the Python backend).
-        // `with_uri_str` resolves lazily, so this succeeds even if Mongo is
-        // momentarily unreachable; the first query surfaces a connection error.
+        // Self-hosted MongoDB that the shim serves Firestore REST calls from.
+        // `with_uri_str` is lazy, so this succeeds even if Mongo is momentarily
+        // unreachable; the first query surfaces a connection error.
         let mongo_url = std::env::var("MONGODB_URL").unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
         let mongo_db = std::env::var("MONGODB_DB").unwrap_or_else(|_| "omi".to_string());
         let mongo = MongoStore::connect(&mongo_url, &mongo_db).await?;
-        tracing::info!("MongoStore connected (db={})", mongo_db);
+        tracing::info!("MongoStore connected (db={}) — Firestore calls served via shim", mongo_db);
 
         let service = Self {
             client,
@@ -171,11 +121,6 @@ impl FirestoreService {
             encryption_secret,
             mongo,
         };
-
-        // Pre-fetch an access token
-        if let Err(e) = service.get_access_token().await {
-            tracing::warn!("Failed to get initial access token: {}", e);
-        }
 
         Ok(service)
     }
@@ -351,15 +296,25 @@ impl FirestoreService {
     }
 
     /// Build request with auth header
-    async fn build_request(&self, method: reqwest::Method, url: &str) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
-        let mut req = self.client.request(method, url);
+    async fn build_request(&self, method: reqwest::Method, url: &str) -> Result<ShimRequest, Box<dyn std::error::Error + Send + Sync>> {
+        // Firestore REST calls are served from MongoDB by the shim — no Google,
+        // no token. Everything else (GCE Compute, Identity Toolkit) hits the real
+        // network with a service-account bearer token.
+        if firestore_shim::is_firestore_url(url) {
+            return Ok(ShimRequest::Mongo {
+                method: method.as_str().to_string(),
+                url: url.to_string(),
+                body: None,
+                mongo: self.mongo.clone(),
+            });
+        }
         let token = self.get_access_token().await?;
-        req = req.bearer_auth(token);
-        Ok(req)
+        let req = self.client.request(method, url).bearer_auth(token);
+        Ok(ShimRequest::Real(req))
     }
 
     /// Build authenticated request for GCE Compute Engine API (public for agent routes)
-    pub async fn build_compute_request(&self, method: reqwest::Method, url: &str) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn build_compute_request(&self, method: reqwest::Method, url: &str) -> Result<ShimRequest, Box<dyn std::error::Error + Send + Sync>> {
         self.build_request(method, url).await
     }
 
@@ -367,8 +322,7 @@ impl FirestoreService {
     // LLM USAGE
 
     /// Atomically increment LLM usage counters for a user on a given date.
-    /// MongoDB `$inc` on dotted paths (shared shim format), replacing the
-    /// Firestore commit + FieldTransforms. Document: users/{uid}/llm_usage/{YYYY-MM-DD}.
+    /// Uses Firestore REST commit with FieldTransforms (server-side atomic increments).
     pub async fn record_llm_usage(
         &self,
         uid: &str,
@@ -381,28 +335,49 @@ impl FirestoreService {
         account: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let date_key = Utc::now().format("%Y-%m-%d").to_string();
-        let path = format!("{}/{}/{}/{}", USERS_COLLECTION, uid, LLM_USAGE_SUBCOLLECTION, date_key);
-        // Account-specific prefix (e.g. "desktop_chat_omi"/"desktop_chat_personal"),
-        // plus the rolled-up "desktop_chat" map kept for existing queries.
-        let acct = format!("desktop_chat_{}", account);
-        let mut inc = doc! {
-            "desktop_chat.input_tokens": input,
-            "desktop_chat.output_tokens": output,
-            "desktop_chat.cache_read_tokens": cache_read,
-            "desktop_chat.cache_write_tokens": cache_write,
-            "desktop_chat.total_tokens": total,
-            "desktop_chat.cost_usd": cost,
-            "desktop_chat.call_count": 1i64,
-        };
-        inc.insert(format!("{}.input_tokens", acct), input);
-        inc.insert(format!("{}.output_tokens", acct), output);
-        inc.insert(format!("{}.cache_read_tokens", acct), cache_read);
-        inc.insert(format!("{}.cache_write_tokens", acct), cache_write);
-        inc.insert(format!("{}.total_tokens", acct), total);
-        inc.insert(format!("{}.cost_usd", acct), cost);
-        inc.insert(format!("{}.call_count", acct), 1i64);
-
-        self.mongo.apply(&path, doc! {"$inc": inc}, true).await?;
+        let doc_path = format!(
+            "projects/{}/databases/(default)/documents/{}/{}/{}/{}",
+            self.project_id, USERS_COLLECTION, uid, LLM_USAGE_SUBCOLLECTION, date_key
+        );
+        let commit_url = format!(
+            "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents:commit",
+            self.project_id
+        );
+        // Write to account-specific prefix (e.g. "desktop_chat_omi" or "desktop_chat_personal")
+        // Also continue writing to "desktop_chat" for backward compat with existing queries
+        let acct_prefix = format!("desktop_chat_{}", account);
+        let body = json!({
+            "writes": [{
+                "transform": {
+                    "document": doc_path,
+                    "fieldTransforms": [
+                        { "fieldPath": "desktop_chat.input_tokens",       "increment": { "integerValue": input.to_string() } },
+                        { "fieldPath": "desktop_chat.output_tokens",      "increment": { "integerValue": output.to_string() } },
+                        { "fieldPath": "desktop_chat.cache_read_tokens",  "increment": { "integerValue": cache_read.to_string() } },
+                        { "fieldPath": "desktop_chat.cache_write_tokens", "increment": { "integerValue": cache_write.to_string() } },
+                        { "fieldPath": "desktop_chat.total_tokens",       "increment": { "integerValue": total.to_string() } },
+                        { "fieldPath": "desktop_chat.cost_usd",           "increment": { "doubleValue": cost } },
+                        { "fieldPath": "desktop_chat.call_count",         "increment": { "integerValue": "1" } },
+                        { "fieldPath": format!("{}.input_tokens", acct_prefix),       "increment": { "integerValue": input.to_string() } },
+                        { "fieldPath": format!("{}.output_tokens", acct_prefix),      "increment": { "integerValue": output.to_string() } },
+                        { "fieldPath": format!("{}.cache_read_tokens", acct_prefix),  "increment": { "integerValue": cache_read.to_string() } },
+                        { "fieldPath": format!("{}.cache_write_tokens", acct_prefix), "increment": { "integerValue": cache_write.to_string() } },
+                        { "fieldPath": format!("{}.total_tokens", acct_prefix),       "increment": { "integerValue": total.to_string() } },
+                        { "fieldPath": format!("{}.cost_usd", acct_prefix),           "increment": { "doubleValue": cost } },
+                        { "fieldPath": format!("{}.call_count", acct_prefix),         "increment": { "integerValue": "1" } },
+                    ]
+                }
+            }]
+        });
+        let resp = self
+            .build_request(reqwest::Method::POST, &commit_url)
+            .await?
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(resp.text().await?.into());
+        }
         Ok(())
     }
 
@@ -1912,71 +1887,250 @@ impl FirestoreService {
         sort_by: Option<&str>,
         include_deleted: Option<bool>,
     ) -> Result<Vec<ActionItemDB>, Box<dyn std::error::Error + Send + Sync>> {
-        // MongoDB (shared shim format). Unlike Firestore, `deleted != true` filters
-        // correctly at the DB level (it also matches docs where the field is
-        // absent), so the Firestore post-query dedup loop is unnecessary here.
-        let parent = format!("{}/{}/{}", USERS_COLLECTION, uid, ACTION_ITEMS_SUBCOLLECTION);
+        let parent = format!("{}/{}/{}", self.base_url(), USERS_COLLECTION, uid);
 
-        let mut filter = Document::new();
+        // Build filters
+        let mut filters: Vec<Value> = Vec::new();
+
         if let Some(completed) = completed_filter {
-            filter.insert("completed", completed);
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "completed"},
+                    "op": "EQUAL",
+                    "value": {"booleanValue": completed}
+                }
+            }));
         }
+
+        // Conversation ID filter
         if let Some(conv_id) = conversation_id {
-            filter.insert("conversation_id", conv_id);
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "conversation_id"},
+                    "op": "EQUAL",
+                    "value": {"stringValue": conv_id}
+                }
+            }));
         }
-        if include_deleted == Some(true) {
-            filter.insert("deleted", true);
+
+        // Date range filters for created_at
+        if let Some(start) = start_date {
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "created_at"},
+                    "op": "GREATER_THAN_OR_EQUAL",
+                    "value": {"timestampValue": start}
+                }
+            }));
+        }
+
+        if let Some(end) = end_date {
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "created_at"},
+                    "op": "LESS_THAN_OR_EQUAL",
+                    "value": {"timestampValue": end}
+                }
+            }));
+        }
+
+        // Date range filters for due_at
+        if let Some(due_start) = due_start_date {
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "due_at"},
+                    "op": "GREATER_THAN_OR_EQUAL",
+                    "value": {"timestampValue": due_start}
+                }
+            }));
+        }
+
+        if let Some(due_end) = due_end_date {
+            filters.push(json!({
+                "fieldFilter": {
+                    "field": {"fieldPath": "due_at"},
+                    "op": "LESS_THAN_OR_EQUAL",
+                    "value": {"timestampValue": due_end}
+                }
+            }));
+        }
+
+        // Build the where clause
+        let where_clause = if filters.is_empty() {
+            None
+        } else if filters.len() == 1 {
+            Some(filters.into_iter().next().unwrap())
         } else {
-            filter.insert("deleted", doc! {"$ne": true});
-        }
-
-        // created_at / due_at range filters (inputs are RFC3339 strings).
-        let parse = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|dt| bson::DateTime::from_chrono(dt.with_timezone(&Utc)));
-        let mut created_range = Document::new();
-        if let Some(v) = start_date.and_then(parse) {
-            created_range.insert("$gte", v);
-        }
-        if let Some(v) = end_date.and_then(parse) {
-            created_range.insert("$lte", v);
-        }
-        if !created_range.is_empty() {
-            filter.insert("created_at", created_range);
-        }
-        let mut due_range = Document::new();
-        if let Some(v) = due_start_date.and_then(parse) {
-            due_range.insert("$gte", v);
-        }
-        if let Some(v) = due_end_date.and_then(parse) {
-            due_range.insert("$lte", v);
-        }
-        if !due_range.is_empty() {
-            filter.insert("due_at", due_range);
-        }
-
-        // Sort mirrors the Firestore order_by choices.
-        let sort = match sort_by {
-            Some("due_at") => doc! {"due_at": 1, "created_at": -1},
-            Some("priority") => doc! {"priority": -1, "created_at": -1},
-            _ => doc! {"created_at": -1},
+            Some(json!({
+                "compositeFilter": {
+                    "op": "AND",
+                    "filters": filters
+                }
+            }))
         };
 
-        let docs = self
-            .mongo
-            .query(&parent, filter, Some(sort), offset as u64, Some(limit as i64))
-            .await?;
+        // Build order by clause based on sort_by parameter
+        let order_by = match sort_by {
+            Some("due_at") => json!([
+                {"field": {"fieldPath": "due_at"}, "direction": "ASCENDING"},
+                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
+            ]),
+            Some("priority") => json!([
+                {"field": {"fieldPath": "priority"}, "direction": "DESCENDING"},
+                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
+            ]),
+            _ => json!([
+                {"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}
+            ]),
+        };
 
-        let mut action_items: Vec<ActionItemDB> = docs.iter().filter_map(parse_action_item_bson).collect();
+        // Fetch from Firestore in a loop to handle post-query deleted filtering.
+        // Since `deleted` can't be reliably filtered in Firestore (most docs lack the field),
+        // we filter in Rust. But this means a single Firestore page may yield fewer items
+        // than requested after filtering, so we keep fetching until we have enough or Firestore
+        // is exhausted.
+        let mut action_items: Vec<ActionItemDB> = Vec::new();
+        let mut current_offset = offset;
+        let fetch_batch = limit.max(500); // fetch in large batches to minimize round-trips
 
-        // Final ordering parity with the Python app: items WITH due_at first
-        // (ascending), then by created_at descending.
-        action_items.sort_by(|a, b| match (&a.due_at, &b.due_at) {
-            (Some(due_a), Some(due_b)) => due_a.cmp(due_b).then_with(|| b.created_at.cmp(&a.created_at)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => b.created_at.cmp(&a.created_at),
+        loop {
+            let mut structured_query = json!({
+                "from": [{"collectionId": ACTION_ITEMS_SUBCOLLECTION}],
+                "orderBy": order_by.clone(),
+                "limit": fetch_batch,
+                "offset": current_offset
+            });
+
+            if let Some(ref where_filter) = where_clause {
+                structured_query["where"] = where_filter.clone();
+            }
+
+            let query = json!({
+                "structuredQuery": structured_query
+            });
+
+            let response = self
+                .build_request(reqwest::Method::POST, &format!("{}:runQuery", parent))
+                .await?
+                .json(&query)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let error_text = response.text().await?;
+                tracing::error!("Firestore query error for action_items: {}", error_text);
+                return Err(format!("Firestore query error: {}", error_text).into());
+            }
+
+            let results: Vec<Value> = response.json().await?;
+            let fetched_count = results.iter().filter(|doc| doc.get("document").is_some()).count();
+
+            let batch: Vec<ActionItemDB> = results
+                .into_iter()
+                .filter_map(|doc| {
+                    doc.get("document")
+                        .and_then(|d| self.parse_action_item(d).ok())
+                })
+                // Filter based on deleted status
+                .filter(|item| {
+                    if include_deleted == Some(true) {
+                        item.deleted == Some(true)
+                    } else {
+                        item.deleted != Some(true)
+                    }
+                })
+                .collect();
+
+            action_items.extend(batch);
+            current_offset += fetched_count;
+
+            // Stop if Firestore returned fewer than requested (no more data)
+            if fetched_count < fetch_batch {
+                break;
+            }
+
+            // Stop if we have enough items
+            if action_items.len() >= limit {
+                action_items.truncate(limit);
+                break;
+            }
+        }
+
+        // Enrich action items that have conversation_id but no source
+        self.enrich_action_items_with_source(uid, &mut action_items).await;
+
+        // Post-query sort matching Python backend behavior (used by iOS/Flutter app):
+        // 1. Items WITH due_at come first (sorted by due_at ascending)
+        // 2. Items WITHOUT due_at come last
+        // 3. Tie-breaker: created_at descending (newest first)
+        action_items.sort_by(|a, b| {
+            match (&a.due_at, &b.due_at) {
+                (Some(due_a), Some(due_b)) => {
+                    due_a.cmp(due_b).then_with(|| b.created_at.cmp(&a.created_at))
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => b.created_at.cmp(&a.created_at),
+            }
         });
 
         Ok(action_items)
+    }
+
+    /// Batch fetch conversations and populate source field on action items
+    /// For items with conversation_id but no source, derives source as "transcription:{conversation.source}"
+    async fn enrich_action_items_with_source(&self, uid: &str, action_items: &mut [ActionItemDB]) {
+        use std::collections::{HashMap, HashSet};
+
+        // Collect unique conversation IDs from items that need enrichment
+        // (have conversation_id but no source)
+        let conversation_ids: HashSet<&str> = action_items
+            .iter()
+            .filter(|item| item.source.is_none() && item.conversation_id.is_some())
+            .filter_map(|item| item.conversation_id.as_deref())
+            .collect();
+
+        if conversation_ids.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            "Enriching {} action items with source from {} conversations",
+            action_items.iter().filter(|i| i.source.is_none()).count(),
+            conversation_ids.len()
+        );
+
+        // Fetch conversations in parallel (limit to avoid too many concurrent requests)
+        let mut source_map: HashMap<String, String> = HashMap::new();
+
+        // Batch fetch - fetch up to 10 at a time
+        let ids: Vec<&str> = conversation_ids.into_iter().collect();
+        for chunk in ids.chunks(10) {
+            let futures: Vec<_> = chunk
+                .iter()
+                .map(|id| self.get_conversation(uid, id))
+                .collect();
+
+            let results = futures::future::join_all(futures).await;
+
+            for (id, result) in chunk.iter().zip(results) {
+                if let Ok(Some(conv)) = result {
+                    // Format as "transcription:{source}" to match expected values
+                    // e.g., "transcription:omi", "transcription:desktop"
+                    let source_str = format!("transcription:{:?}", conv.source).to_lowercase();
+                    source_map.insert(id.to_string(), source_str);
+                }
+            }
+        }
+
+        // Populate source field on action items that don't have one
+        for item in action_items.iter_mut() {
+            if item.source.is_none() {
+                if let Some(conv_id) = &item.conversation_id {
+                    item.source = source_map.get(conv_id).cloned();
+                }
+            }
+        }
     }
 
     /// Get a single action item by ID
@@ -2265,75 +2419,86 @@ impl FirestoreService {
         recurrence_rule: Option<&str>,
         recurrence_parent_id: Option<&str>,
     ) -> Result<ActionItemDB, Box<dyn std::error::Error + Send + Sync>> {
-        // MongoDB (shared shim format). Matches Python action_items.create_action_item:
-        // random hex id, created_at/updated_at = now (UTC), completed = false.
-        let item_id = uuid::Uuid::new_v4().simple().to_string();
+        let item_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
-        let path = format!("{}/{}/{}/{}", USERS_COLLECTION, uid, ACTION_ITEMS_SUBCOLLECTION, item_id);
 
-        let mut fields = doc! {
-            "description": description,
-            "completed": false,
-            "created_at": bson::DateTime::from_chrono(now),
-            "updated_at": bson::DateTime::from_chrono(now),
-        };
+        let url = format!(
+            "{}/{}/{}/{}/{}",
+            self.base_url(),
+            USERS_COLLECTION,
+            uid,
+            ACTION_ITEMS_SUBCOLLECTION,
+            item_id
+        );
+
+        let mut fields = json!({
+            "description": {"stringValue": description},
+            "completed": {"booleanValue": false},
+            "created_at": {"timestampValue": now.to_rfc3339()},
+            "updated_at": {"timestampValue": now.to_rfc3339()}
+        });
+
         if let Some(due) = due_at {
-            fields.insert("due_at", bson::DateTime::from_chrono(due));
+            fields["due_at"] = json!({"timestampValue": due.to_rfc3339()});
         }
+
         if let Some(src) = source {
-            fields.insert("source", src);
+            fields["source"] = json!({"stringValue": src});
         }
+
         if let Some(pri) = priority {
-            fields.insert("priority", pri);
+            fields["priority"] = json!({"stringValue": pri});
         }
+
         if let Some(meta) = metadata {
-            fields.insert("metadata", meta);
+            fields["metadata"] = json!({"stringValue": meta});
         }
+
         if let Some(cat) = category {
-            fields.insert("category", cat);
+            fields["category"] = json!({"stringValue": cat});
         }
+
         if let Some(score) = relevance_score {
-            fields.insert("relevance_score", score);
+            fields["relevance_score"] = json!({"integerValue": score.to_string()});
         }
+
         if let Some(staged) = from_staged {
-            fields.insert("from_staged", staged);
+            fields["from_staged"] = json!({"booleanValue": staged});
         }
+
         if let Some(rule) = recurrence_rule {
-            fields.insert("recurrence_rule", rule);
+            fields["recurrence_rule"] = json!({"stringValue": rule});
         }
+
         if let Some(pid) = recurrence_parent_id {
-            fields.insert("recurrence_parent_id", pid);
+            fields["recurrence_parent_id"] = json!({"stringValue": pid});
         }
 
-        self.mongo.set(&path, fields).await?;
+        let doc = json!({"fields": fields});
 
-        tracing::info!("Created action item {} for user {} with source={:?}", item_id, uid, source);
-        Ok(ActionItemDB {
-            id: item_id,
-            description: description.to_string(),
-            completed: false,
-            created_at: now,
-            updated_at: Some(now),
-            due_at,
-            completed_at: None,
-            conversation_id: None,
-            source: source.map(String::from),
-            priority: priority.map(String::from),
-            metadata: metadata.map(String::from),
-            deleted: None,
-            deleted_by: None,
-            deleted_at: None,
-            deleted_reason: None,
-            kept_task_id: None,
-            category: category.map(String::from),
-            goal_id: None,
-            relevance_score,
-            sort_order: None,
-            indent_level: None,
-            from_staged,
-            recurrence_rule: recurrence_rule.map(String::from),
-            recurrence_parent_id: recurrence_parent_id.map(String::from),
-        })
+        let response = self
+            .build_request(reqwest::Method::PATCH, &url)
+            .await?
+            .json(&doc)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Firestore create error: {}", error_text).into());
+        }
+
+        // Parse and return the created document
+        let created_doc: Value = response.json().await?;
+        let action_item = self.parse_action_item(&created_doc)?;
+
+        tracing::info!(
+            "Created action item {} for user {} with source={:?}",
+            item_id,
+            uid,
+            source
+        );
+        Ok(action_item)
     }
 
     /// Batch update relevance scores for multiple action items using Firestore commit API.
@@ -4564,8 +4729,8 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<crate::byok::ByokState, Box<dyn std::error::Error + Send + Sync>> {
-        let doc = self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await?;
-        Ok(parse_byok_state_bson(doc.as_ref()))
+        let doc = self.get_user_document(uid).await?;
+        Ok(parse_byok_state_from_doc(&doc))
     }
 
     /// Read the effective subscription plan for paywall purposes.
@@ -4580,8 +4745,32 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let doc = self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await?;
-        Ok(parse_effective_plan_bson(doc.as_ref()))
+        let doc = self.get_user_document(uid).await?;
+        let plan = parse_effective_plan_from_doc(&doc);
+
+        // Log interesting fallback cases for paid plans
+        if let Some(fields) = doc.get("fields") {
+            if let Some(sub_fields) = fields
+                .get("subscription")
+                .and_then(|v| v.get("mapValue"))
+                .and_then(|v| v.get("fields"))
+            {
+                let raw_plan = sub_fields
+                    .get("plan")
+                    .and_then(|v| v.get("stringValue"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("basic");
+
+                if raw_plan != "basic" && raw_plan != "free" && plan == "basic" {
+                    tracing::info!(
+                        "paywall: paid plan '{}' fell back to basic for uid={} (expired or missing period_end)",
+                        raw_plan, uid
+                    );
+                }
+            }
+        }
+
+        Ok(plan)
     }
 
     /// Get user account creation time from Firebase Auth Identity Toolkit REST API.
@@ -6431,65 +6620,195 @@ impl FirestoreService {
     pub async fn get_desktop_releases(
         &self,
     ) -> Result<Vec<crate::routes::updates::ReleaseInfo>, Box<dyn std::error::Error + Send + Sync>> {
-        // Top-level `desktop_releases` collection (shared shim format).
-        let docs = self.mongo.query("desktop_releases", Document::new(), None, 0, None).await?;
-        let mut releases: Vec<crate::routes::updates::ReleaseInfo> =
-            docs.iter().filter_map(parse_release_bson).collect();
-        // Newest first.
+        let url = format!(
+            "{}/desktop_releases",
+            self.base_url()
+        );
+
+        let response = self
+            .build_request(reqwest::Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            // If collection doesn't exist, return empty list
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(vec![]);
+            }
+            let error_text = response.text().await?;
+            return Err(format!("Firestore error: {}", error_text).into());
+        }
+
+        let data: Value = response.json().await?;
+        let mut releases = Vec::new();
+
+        if let Some(documents) = data.get("documents").and_then(|d| d.as_array()) {
+            for doc in documents {
+                if let Ok(release) = self.parse_release(doc) {
+                    releases.push(release);
+                }
+            }
+        }
+
+        // Sort by build number descending (newest first)
         releases.sort_by(|a, b| b.build_number.cmp(&a.build_number));
+
         Ok(releases)
     }
 
-    /// Create a new desktop release.
+    /// Parse Firestore document to ReleaseInfo
+    fn parse_release(
+        &self,
+        doc: &Value,
+    ) -> Result<crate::routes::updates::ReleaseInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let fields = doc.get("fields").ok_or("Missing fields")?;
+
+        let changelog = if let Some(arr) = fields.get("changelog").and_then(|c| c.get("arrayValue")).and_then(|a| a.get("values")).and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|v| v.get("stringValue").and_then(|s| s.as_str()))
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // channel: None = unpromoted (staging), Some("stable") = promoted stable
+        let channel = self.parse_string(fields, "channel");
+
+        Ok(crate::routes::updates::ReleaseInfo {
+            version: self.parse_string(fields, "version").unwrap_or_default(),
+            build_number: self.parse_int(fields, "build_number").unwrap_or(0) as u32,
+            download_url: self.parse_string(fields, "download_url").unwrap_or_default(),
+            ed_signature: self.parse_string(fields, "ed_signature").unwrap_or_default(),
+            published_at: self.parse_string(fields, "published_at").unwrap_or_default(),
+            changelog,
+            is_live: self.parse_bool(fields, "is_live").unwrap_or(false),
+            is_critical: self.parse_bool(fields, "is_critical").unwrap_or(false),
+            channel,
+        })
+    }
+
+    /// Create a new desktop release in Firestore
     pub async fn create_desktop_release(
         &self,
         release: &crate::routes::updates::ReleaseInfo,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let doc_id = format!("v{}+{}", release.version, release.build_number);
-        let path = format!("desktop_releases/{}", doc_id);
-        // None/empty channel → "staging" (unpromoted default).
-        let channel = match &release.channel {
-            Some(ch) if !ch.is_empty() => ch.clone(),
-            _ => "staging".to_string(),
+
+        let url = format!(
+            "{}/desktop_releases/{}",
+            self.base_url(),
+            doc_id
+        );
+
+        // Build changelog array
+        let changelog_values: Vec<Value> = release.changelog
+            .iter()
+            .map(|s| json!({"stringValue": s}))
+            .collect();
+
+        // Channel field: always a string. None/empty → "staging" (unpromoted default)
+        let channel_value = match &release.channel {
+            Some(ch) if !ch.is_empty() => json!({"stringValue": ch}),
+            _ => json!({"stringValue": "staging"}),
         };
-        let changelog: Vec<Bson> = release.changelog.iter().map(|s| Bson::String(s.clone())).collect();
-        let fields = doc! {
-            "version": &release.version,
-            "build_number": release.build_number as i64,
-            "download_url": &release.download_url,
-            "ed_signature": &release.ed_signature,
-            "published_at": &release.published_at,
-            "changelog": Bson::Array(changelog),
-            "is_live": release.is_live,
-            "is_critical": release.is_critical,
-            "channel": channel,
-        };
-        self.mongo.set(&path, fields).await?;
+
+        let doc = json!({
+            "fields": {
+                "version": {"stringValue": release.version},
+                "build_number": {"integerValue": release.build_number.to_string()},
+                "download_url": {"stringValue": release.download_url},
+                "ed_signature": {"stringValue": release.ed_signature},
+                "published_at": {"stringValue": release.published_at},
+                "changelog": {"arrayValue": {"values": changelog_values}},
+                "is_live": {"booleanValue": release.is_live},
+                "is_critical": {"booleanValue": release.is_critical},
+                "channel": channel_value
+            }
+        });
+
+        let response = self
+            .build_request(reqwest::Method::PATCH, &url)
+            .await?
+            .json(&doc)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Firestore create error: {}", error_text).into());
+        }
+
         tracing::info!("Created desktop release: {}", doc_id);
         Ok(doc_id)
     }
 
-    /// Promote a desktop release to the next channel: staging → beta → stable.
-    /// Returns (old_channel, new_channel).
+    /// Promote a desktop release to the next channel: staging → beta → stable
+    /// Returns (old_channel, new_channel)
     pub async fn promote_desktop_release(
         &self,
         doc_id: &str,
     ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-        let path = format!("desktop_releases/{}", doc_id);
-        let doc = self
-            .mongo
-            .get(&path)
+        // Fetch the current document
+        let url = format!(
+            "{}/desktop_releases/{}",
+            self.base_url(),
+            doc_id
+        );
+
+        let response = self
+            .build_request(reqwest::Method::GET, &url)
             .await?
-            .ok_or_else(|| format!("Release not found: {}", doc_id))?;
-        let current_channel = doc.get_str("channel").unwrap_or("").to_string();
-        let (old_channel, new_channel) = match current_channel.as_str() {
-            "staging" | "" => ("staging".to_string(), "beta".to_string()),
-            "beta" => ("beta".to_string(), "stable".to_string()),
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Release not found: {}", error_text).into());
+        }
+
+        let doc: Value = response.json().await?;
+        let fields = doc.get("fields").ok_or("Missing fields in document")?;
+        let current_channel = self.parse_string(fields, "channel").unwrap_or_default();
+
+        // Determine next channel
+        let (old_channel, new_channel_value) = match current_channel.as_str() {
+            "staging" | "" => ("staging".to_string(), json!({"stringValue": "beta"})),
+            "beta" => ("beta".to_string(), json!({"stringValue": "stable"})),
             "stable" => return Err("Release is already on stable channel, cannot promote further".into()),
             other => return Err(format!("Unknown channel '{}', cannot promote", other).into()),
         };
-        self.mongo.apply(&path, doc! {"$set": {"channel": &new_channel}}, false).await?;
+
+        let new_channel = new_channel_value.get("stringValue").and_then(|v| v.as_str()).unwrap().to_string();
+
+        // PATCH only the channel field
+        let patch_url = format!(
+            "{}/desktop_releases/{}?updateMask.fieldPaths=channel",
+            self.base_url(),
+            doc_id
+        );
+
+        let patch_doc = json!({
+            "fields": {
+                "channel": new_channel_value
+            }
+        });
+
+        let response = self
+            .build_request(reqwest::Method::PATCH, &patch_url)
+            .await?
+            .json(&patch_doc)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Failed to update channel: {}", error_text).into());
+        }
+
         tracing::info!("Promoted release {}: {} → {}", doc_id, old_channel, new_channel);
+
         Ok((old_channel, new_channel))
     }
 
@@ -8269,7 +8588,6 @@ impl FirestoreService {
                     .json(&total_query)
                     .send()
                     .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
             },
             async {
                 self.build_request(reqwest::Method::POST, &agg_url)
@@ -8277,11 +8595,10 @@ impl FirestoreService {
                     .json(&completed_query)
                     .send()
                     .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
             }
         );
 
-        let parse_count = |response: reqwest::Response| async move {
+        let parse_count = |response: ShimResponse| async move {
             if !response.status().is_success() {
                 let error_text = response.text().await?;
                 return Err(format!("Firestore aggregation query error: {}", error_text).into());
@@ -9328,37 +9645,94 @@ impl FirestoreService {
         &self,
         uid: &str,
     ) -> Result<Option<crate::models::agent::AgentVm>, Box<dyn std::error::Error + Send + Sync>> {
-        // MongoDB user doc; `agentVm` is a plain nested document.
-        let doc = match self.mongo.get(&format!("{}/{}", USERS_COLLECTION, uid)).await? {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-        let vm = match doc.get_document("agentVm").ok() {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let vm_name = vm.get_str("vmName").unwrap_or("").to_string();
+        let doc = self.get_user_document(uid).await?;
+        let empty = json!({});
+        let fields = doc.get("fields").unwrap_or(&empty);
+
+        let agent_vm = fields.get("agentVm");
+        if agent_vm.is_none() {
+            return Ok(None);
+        }
+
+        let map_value = agent_vm
+            .and_then(|v| v.get("mapValue"))
+            .and_then(|v| v.get("fields"));
+
+        if map_value.is_none() {
+            return Ok(None);
+        }
+
+        let f = map_value.unwrap();
+
+        let vm_name = f
+            .get("vmName")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
         if vm_name.is_empty() {
             return Ok(None);
         }
-        let status = match vm.get_str("status").unwrap_or("provisioning") {
+
+        let zone = f
+            .get("zone")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-central1-a")
+            .to_string();
+
+        let ip = f
+            .get("ip")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let status_str = f
+            .get("status")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("provisioning");
+
+        let status = match status_str {
             "ready" => crate::models::agent::AgentVmStatus::Ready,
             "stopped" => crate::models::agent::AgentVmStatus::Stopped,
             "error" => crate::models::agent::AgentVmStatus::Error,
             _ => crate::models::agent::AgentVmStatus::Provisioning,
         };
+
+        let auth_token = f
+            .get("authToken")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let created_at = f
+            .get("createdAt")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let last_query_at = f
+            .get("lastQueryAt")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         Ok(Some(crate::models::agent::AgentVm {
             vm_name,
-            zone: vm.get_str("zone").unwrap_or("us-central1-a").to_string(),
-            ip: vm.get_str("ip").ok().map(String::from),
+            zone,
+            ip,
             status,
-            auth_token: vm.get_str("authToken").unwrap_or("").to_string(),
-            created_at: vm.get_str("createdAt").unwrap_or("").to_string(),
-            last_query_at: vm.get_str("lastQueryAt").ok().map(String::from),
+            auth_token,
+            created_at,
+            last_query_at,
         }))
     }
 
-    /// Set agent VM info on a user's document (`agentVm` nested field).
+    /// Set agent VM info on a user's document
     pub async fn set_agent_vm(
         &self,
         uid: &str,
@@ -9369,37 +9743,49 @@ impl FirestoreService {
         auth_token: &str,
         created_at: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut vm = doc! {
-            "vmName": vm_name,
-            "zone": zone,
-            "status": status.to_string(),
-            "authToken": auth_token,
-            "createdAt": created_at,
-        };
+        let mut vm_fields = json!({
+            "vmName": {"stringValue": vm_name},
+            "zone": {"stringValue": zone},
+            "status": {"stringValue": status.to_string()},
+            "authToken": {"stringValue": auth_token},
+            "createdAt": {"stringValue": created_at}
+        });
+
         if let Some(ip_val) = ip {
-            vm.insert("ip", ip_val);
+            vm_fields.as_object_mut().unwrap().insert(
+                "ip".to_string(),
+                json!({"stringValue": ip_val}),
+            );
         }
-        self.mongo
-            .apply(&format!("{}/{}", USERS_COLLECTION, uid), doc! {"$set": {"agentVm": vm}}, true)
-            .await?;
-        Ok(())
+
+        let fields = json!({
+            "agentVm": {
+                "mapValue": {
+                    "fields": vm_fields
+                }
+            }
+        });
+
+        self.update_user_fields(uid, fields, &["agentVm"]).await
     }
 
-    /// Delete the `agentVm` field from a user's document (GCE VM gone).
-    pub async fn delete_agent_vm(&self, uid: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.mongo
-            .apply(&format!("{}/{}", USERS_COLLECTION, uid), doc! {"$unset": {"agentVm": ""}}, false)
-            .await?;
-        Ok(())
+    /// Delete the agentVm field from a user's document.
+    /// Used when the GCE VM no longer exists in GCP.
+    pub async fn delete_agent_vm(
+        &self,
+        uid: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Omitting agentVm from the body while including it in the update mask
+        // causes Firestore to delete the field.
+        self.update_user_fields(uid, json!({}), &["agentVm"]).await
     }
 
     // =========================================================================
     // SCREEN ACTIVITY
     // =========================================================================
 
-    /// Upsert screen activity rows to MongoDB users/{uid}/screen_activity/{id}.
-    /// (Python's screen_activity.py is still Firestore — a known straggler; both
-    /// use the shared shim collection `screen_activity`, so they align once it's migrated.)
+    /// Batch write screen activity rows to Firestore users/{uid}/screen_activity/{id}.
+    /// Uses Firestore commit API for batch writes (max 500 per commit).
     pub async fn upsert_screen_activity(
         &self,
         uid: &str,
@@ -9408,24 +9794,66 @@ impl FirestoreService {
         if rows.is_empty() {
             return Ok(0);
         }
+
         let mut written = 0;
-        for row in rows {
-            let path = format!(
-                "{}/{}/{}/{}",
-                USERS_COLLECTION, uid, SCREEN_ACTIVITY_SUBCOLLECTION, row.id
+
+        for chunk in rows.chunks(500) {
+            let writes: Vec<Value> = chunk
+                .iter()
+                .map(|row| {
+                    let doc_name = format!(
+                        "projects/{}/databases/(default)/documents/{}/{}/{}/{}",
+                        self.project_id,
+                        USERS_COLLECTION,
+                        uid,
+                        SCREEN_ACTIVITY_SUBCOLLECTION,
+                        row.id
+                    );
+
+                    // Truncate OCR text to 1000 chars
+                    let ocr_truncated: String = row.ocr_text.chars().take(1000).collect();
+
+                    json!({
+                        "update": {
+                            "name": doc_name,
+                            "fields": {
+                                "timestamp": {"stringValue": &row.timestamp},
+                                "appName": {"stringValue": &row.app_name},
+                                "windowTitle": {"stringValue": &row.window_title},
+                                "ocrText": {"stringValue": ocr_truncated},
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            let commit_url = format!(
+                "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents:commit",
+                self.project_id
             );
-            // Truncate OCR text to 1000 chars (parity with the Firestore version).
-            let ocr_truncated: String = row.ocr_text.chars().take(1000).collect();
-            let fields = doc! {
-                "timestamp": &row.timestamp,
-                "appName": &row.app_name,
-                "windowTitle": &row.window_title,
-                "ocrText": ocr_truncated,
-            };
-            self.mongo.set(&path, fields).await?;
-            written += 1;
+
+            let body = json!({ "writes": writes });
+
+            let response = self
+                .build_request(reqwest::Method::POST, &commit_url)
+                .await?
+                .json(&body)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let error_text = response.text().await?;
+                return Err(format!("Firestore screen_activity batch commit error: {}", error_text).into());
+            }
+
+            written += chunk.len();
         }
-        tracing::info!("Screen activity Mongo write uid={} count={}", uid, written);
+
+        tracing::info!(
+            "Screen activity Firestore write uid={} count={}",
+            uid,
+            written
+        );
         Ok(written)
     }
 }
@@ -9549,77 +9977,6 @@ fn parse_effective_plan_from_doc(doc: &Value) -> String {
     }
 }
 
-/// Parse BYOK state from a MongoDB user document (shared shim format).
-/// `byok` is a plain nested document: { active, fingerprints: {provider: fp}, last_seen_at }.
-/// Returns `ByokState::default()` (inactive) when absent.
-fn parse_byok_state_bson(doc: Option<&Document>) -> crate::byok::ByokState {
-    let byok = match doc.and_then(|d| d.get_document("byok").ok()) {
-        Some(b) => b,
-        None => return crate::byok::ByokState::default(),
-    };
-    let active = byok.get_bool("active").unwrap_or(false);
-    let mut fingerprints = std::collections::HashMap::new();
-    if let Ok(fp) = byok.get_document("fingerprints") {
-        for (provider, val) in fp {
-            if let Bson::String(s) = val {
-                fingerprints.insert(provider.clone(), s.clone());
-            }
-        }
-    }
-    let last_seen_at = byok.get_datetime("last_seen_at").ok().map(|dt| dt.to_chrono());
-    crate::byok::ByokState {
-        active,
-        fingerprints,
-        last_seen_at,
-    }
-}
-
-/// Parse the effective subscription plan from a MongoDB user document.
-/// `subscription` is a plain nested document: { plan, current_period_end (unix secs), ... }.
-/// Returns "basic" when missing/expired/free (fail-open), matching the Firestore parser.
-fn parse_effective_plan_bson(doc: Option<&Document>) -> String {
-    let sub = match doc.and_then(|d| d.get_document("subscription").ok()) {
-        Some(s) => s,
-        None => return "basic".to_string(),
-    };
-    let mut plan = sub.get_str("plan").unwrap_or("basic").to_string();
-    if plan == "free" {
-        plan = "basic".to_string();
-    }
-    if plan == "basic" {
-        return plan;
-    }
-    let period_end = match sub.get("current_period_end") {
-        Some(Bson::Int64(v)) => Some(*v),
-        Some(Bson::Int32(v)) => Some(*v as i64),
-        Some(Bson::Double(v)) => Some(*v as i64),
-        _ => None,
-    };
-    match period_end {
-        Some(pe) if pe >= chrono::Utc::now().timestamp() => plan,
-        _ => "basic".to_string(),
-    }
-}
-
-/// Parse a desktop_releases document (shared shim format) into `ReleaseInfo`.
-fn parse_release_bson(d: &Document) -> Option<crate::routes::updates::ReleaseInfo> {
-    let changelog = d
-        .get_array("changelog")
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    Some(crate::routes::updates::ReleaseInfo {
-        version: d.get_str("version").unwrap_or("").to_string(),
-        build_number: bson_i32(d, "build_number").unwrap_or(0) as u32,
-        download_url: d.get_str("download_url").unwrap_or("").to_string(),
-        ed_signature: d.get_str("ed_signature").unwrap_or("").to_string(),
-        published_at: d.get_str("published_at").unwrap_or("").to_string(),
-        changelog,
-        is_live: d.get_bool("is_live").unwrap_or(false),
-        is_critical: d.get_bool("is_critical").unwrap_or(false),
-        channel: d.get_str("channel").ok().map(String::from),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9630,161 +9987,6 @@ mod tests {
         assert_eq!(id.len(), 20);
         assert_eq!(id, document_id_from_seed("test content"));
         assert_ne!(id, document_id_from_seed("different content"));
-    }
-
-    // --- MongoDB (shim-format) parser tests ---
-
-    #[test]
-    fn bson_byok_active_with_fingerprints() {
-        let d = doc! { "byok": { "active": true, "fingerprints": { "openai": "abc", "anthropic": "xyz" } } };
-        let st = parse_byok_state_bson(Some(&d));
-        assert!(st.active);
-        assert_eq!(st.fingerprints.get("openai").unwrap(), "abc");
-        assert_eq!(st.fingerprints.get("anthropic").unwrap(), "xyz");
-    }
-
-    #[test]
-    fn bson_byok_absent_is_inactive_default() {
-        assert!(!parse_byok_state_bson(None).active);
-        assert!(!parse_byok_state_bson(Some(&doc! {"foo": 1})).active);
-    }
-
-    #[test]
-    fn bson_effective_plan_cases() {
-        assert_eq!(parse_effective_plan_bson(None), "basic");
-        assert_eq!(parse_effective_plan_bson(Some(&doc! {})), "basic");
-        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "free"}})), "basic");
-        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "basic"}})), "basic");
-        let future = chrono::Utc::now().timestamp() + 86400;
-        assert_eq!(
-            parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited", "current_period_end": future}})),
-            "unlimited"
-        );
-        let past = chrono::Utc::now().timestamp() - 86400;
-        assert_eq!(
-            parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited", "current_period_end": past}})),
-            "basic"
-        );
-        // Paid plan without a period end fails closed to basic.
-        assert_eq!(parse_effective_plan_bson(Some(&doc! {"subscription": {"plan": "unlimited"}})), "basic");
-    }
-
-    /// End-to-end user-doc (byok/subscription) + llm_usage round-trip against a
-    /// real MongoDB. Ignored by default — run with
-    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored user_doc_and_usage_mongo_roundtrip`.
-    #[tokio::test]
-    #[ignore]
-    async fn user_doc_and_usage_mongo_roundtrip() {
-        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
-        std::env::set_var("MONGODB_URL", &url);
-        std::env::set_var("MONGODB_DB", "omi_user_test");
-        let fs = FirestoreService::new("test-project".to_string(), None).await.unwrap();
-        let uid = "u_user_test";
-        let upath = format!("users/{}", uid);
-        fs.mongo.delete(&upath).await.unwrap();
-
-        // Seed a user doc the way Python stores it (plain nested byok/subscription).
-        let future = chrono::Utc::now().timestamp() + 86400;
-        fs.mongo
-            .set(
-                &upath,
-                doc! {
-                    "byok": {"active": true, "fingerprints": {"openai": "fp123"}},
-                    "subscription": {"plan": "unlimited", "current_period_end": future},
-                },
-            )
-            .await
-            .unwrap();
-
-        let byok = fs.get_user_byok_state(uid).await.unwrap();
-        assert!(byok.active);
-        assert_eq!(byok.fingerprints.get("openai").unwrap(), "fp123");
-        assert_eq!(fs.get_user_effective_plan(uid).await.unwrap(), "unlimited");
-
-        // record_llm_usage uses $inc — two calls accumulate.
-        fs.record_llm_usage(uid, 10, 5, 0, 0, 15, 0.002, "omi").await.unwrap();
-        fs.record_llm_usage(uid, 20, 7, 0, 0, 27, 0.003, "omi").await.unwrap();
-        let date_key = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let usage_path = format!("users/{}/llm_usage/{}", uid, date_key);
-        let usage = fs.mongo.get(&usage_path).await.unwrap().unwrap();
-        let dc = usage.get_document("desktop_chat").unwrap();
-        assert_eq!(dc.get_i64("input_tokens").unwrap(), 30);
-        assert_eq!(dc.get_i64("call_count").unwrap(), 2);
-        let acct = usage.get_document("desktop_chat_omi").unwrap();
-        assert_eq!(acct.get_i64("input_tokens").unwrap(), 30);
-
-        fs.mongo.delete(&upath).await.unwrap();
-        fs.mongo.delete(&usage_path).await.unwrap();
-    }
-
-    /// End-to-end action_items round-trip against a real MongoDB (shared shim
-    /// format). Ignored by default (CI has no Mongo); run with
-    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored action_items_mongo_roundtrip`.
-    #[tokio::test]
-    #[ignore]
-    async fn action_items_mongo_roundtrip() {
-        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
-        std::env::set_var("MONGODB_URL", &url);
-        std::env::set_var("MONGODB_DB", "omi_at_test");
-        let fs = FirestoreService::new("test-project".to_string(), None)
-            .await
-            .expect("FirestoreService::new");
-        let uid = "u_at_test";
-
-        let created = fs
-            .create_action_item(
-                uid,
-                "buy milk",
-                None,
-                Some("sentry_feedback"),
-                Some("high"),
-                None,
-                Some("work"),
-                Some(5),
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("create");
-        assert_eq!(created.description, "buy milk");
-        assert!(!created.completed);
-
-        // Read it back through the Mongo query path.
-        let items = fs
-            .get_action_items(uid, 50, 0, None, None, None, None, None, None, None, None)
-            .await
-            .expect("get");
-        let found = items.iter().find(|i| i.id == created.id).expect("created item present");
-        assert_eq!(found.description, "buy milk");
-        assert_eq!(found.source.as_deref(), Some("sentry_feedback"));
-        assert_eq!(found.priority.as_deref(), Some("high"));
-        assert_eq!(found.category.as_deref(), Some("work"));
-        assert_eq!(found.relevance_score, Some(5));
-        assert!(!found.completed);
-
-        // completed=true filter must exclude our incomplete item.
-        let completed = fs
-            .get_action_items(uid, 50, 0, Some(true), None, None, None, None, None, None, None)
-            .await
-            .expect("get completed");
-        assert!(!completed.iter().any(|i| i.id == created.id));
-
-        // Stored doc uses the shim format (collection `action_items`, _k = leaf id).
-        let raw = fs
-            .mongo
-            .get(&format!("users/{}/action_items/{}", uid, created.id))
-            .await
-            .unwrap()
-            .expect("raw doc");
-        assert_eq!(raw.get_str("_k").unwrap(), created.id);
-        assert_eq!(raw.get_str("_p").unwrap(), format!("users/{}/action_items", uid));
-
-        // cleanup
-        fs.mongo
-            .delete(&format!("users/{}/action_items/{}", uid, created.id))
-            .await
-            .unwrap();
     }
 
     // --- Firestore BYOK state parsing tests ---
@@ -10009,81 +10211,87 @@ mod tests {
         assert_eq!(parse_effective_plan_from_doc(&doc), "enterprise");
     }
 
-    /// End-to-end desktop_releases + agent_vm + screen_activity round-trip against
-    /// a real MongoDB. Ignored by default — run with
-    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored releases_and_agent_vm_mongo_roundtrip`.
+    /// End-to-end: drive the upstream FirestoreService methods THROUGH the shim
+    /// (Firestore REST -> MongoDB) against a real Mongo. This is the proof the
+    /// shim approach works without changing any method. Run with
+    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored shim_end_to_end_via_methods`.
     #[tokio::test]
     #[ignore]
-    async fn releases_and_agent_vm_mongo_roundtrip() {
+    async fn shim_end_to_end_via_methods() {
         let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
         std::env::set_var("MONGODB_URL", &url);
-        std::env::set_var("MONGODB_DB", "omi_rel_test");
+        std::env::set_var("MONGODB_DB", "omi_e2e_test");
         let fs = FirestoreService::new("test-project".to_string(), None).await.unwrap();
+        let uid = "u_e2e";
 
-        // desktop_releases: create -> get -> promote
-        let rel = crate::routes::updates::ReleaseInfo {
-            version: "1.2.3".to_string(),
-            build_number: 99,
-            download_url: "https://x/y.zip".to_string(),
-            ed_signature: "sig".to_string(),
-            published_at: "2026-06-08T00:00:00Z".to_string(),
-            changelog: vec!["a".to_string(), "b".to_string()],
-            is_live: true,
-            is_critical: false,
-            channel: None,
-        };
-        let id = fs.create_desktop_release(&rel).await.unwrap();
-        assert_eq!(id, "v1.2.3+99");
-        let list = fs.get_desktop_releases().await.unwrap();
-        let got = list.iter().find(|r| r.build_number == 99).expect("release present");
-        assert_eq!(got.version, "1.2.3");
-        assert_eq!(got.changelog, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(got.channel.as_deref(), Some("staging")); // defaulted on create
-        let (old, new) = fs.promote_desktop_release(&id).await.unwrap();
-        assert_eq!((old.as_str(), new.as_str()), ("staging", "beta"));
-        fs.mongo.delete(&format!("desktop_releases/{}", id)).await.unwrap();
-
-        // agent_vm: set -> get -> delete
-        let uid = "u_vm_test";
+        // Seed a user doc (byok + subscription) directly, as the Python backend would.
+        let seed = crate::services::mongo_store::MongoStore::connect(&url, "omi_e2e_test").await.unwrap();
         let upath = format!("users/{}", uid);
-        fs.mongo.delete(&upath).await.unwrap();
-        assert!(fs.get_agent_vm(uid).await.unwrap().is_none());
-        fs.set_agent_vm(
-            uid,
-            "vm-1",
-            "us-central1-a",
-            Some("10.0.0.1"),
-            crate::models::agent::AgentVmStatus::Ready,
-            "tok",
-            "2026-06-08T00:00:00Z",
+        let _ = seed.delete(&upath).await;
+        let future = chrono::Utc::now().timestamp() + 86400;
+        seed.set(
+            &upath,
+            bson::doc! {
+                "byok": {"active": true, "fingerprints": {"openai": "fp1"}},
+                "subscription": {"plan": "unlimited", "current_period_end": future},
+            },
         )
         .await
         .unwrap();
-        let vm = fs.get_agent_vm(uid).await.unwrap().expect("vm present");
-        assert_eq!(vm.vm_name, "vm-1");
-        assert_eq!(vm.ip.as_deref(), Some("10.0.0.1"));
-        assert_eq!(vm.status, crate::models::agent::AgentVmStatus::Ready);
+
+        // byok + subscription read through the unchanged upstream methods (via shim).
+        let byok = fs.get_user_byok_state(uid).await.unwrap();
+        assert!(byok.active);
+        assert_eq!(byok.fingerprints.get("openai").unwrap(), "fp1");
+        assert_eq!(fs.get_user_effective_plan(uid).await.unwrap(), "unlimited");
+
+        // action_items create + query through the methods.
+        let created = fs
+            .create_action_item(uid, "buy milk", None, Some("sentry_feedback"), Some("high"), None, Some("work"), Some(5), None, None, None)
+            .await
+            .unwrap();
+        let items = fs
+            .get_action_items(uid, 50, 0, None, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let found = items.iter().find(|i| i.id == created.id).expect("created item present");
+        assert_eq!(found.description, "buy milk");
+        assert_eq!(found.source.as_deref(), Some("sentry_feedback"));
+        // landed in the shared shim collection with _p set
+        let raw = seed.get(&format!("users/{}/action_items/{}", uid, created.id)).await.unwrap().unwrap();
+        assert_eq!(raw.get_str("_p").unwrap(), format!("users/{}/action_items", uid));
+
+        // llm usage: two increments through record_llm_usage, summed via get_total_llm_cost.
+        let dk = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = seed.delete(&format!("users/{}/llm_usage/{}", uid, dk)).await;
+        fs.record_llm_usage(uid, 10, 5, 0, 0, 15, 0.25, "omi").await.unwrap();
+        fs.record_llm_usage(uid, 20, 7, 0, 0, 27, 0.25, "omi").await.unwrap();
+        let total = fs.get_total_llm_cost(uid).await.unwrap();
+        assert!((total - 0.5).abs() < 1e-9, "total cost was {}", total);
+
+        // agent_vm set/get/delete through the methods.
+        fs.set_agent_vm(uid, "vm-1", "us-central1-a", Some("10.0.0.1"), crate::models::agent::AgentVmStatus::Ready, "tok", "2026-06-08T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(fs.get_agent_vm(uid).await.unwrap().expect("vm").vm_name, "vm-1");
         fs.delete_agent_vm(uid).await.unwrap();
         assert!(fs.get_agent_vm(uid).await.unwrap().is_none());
 
-        // screen_activity: upsert
-        let rows = vec![crate::models::screen_activity::ScreenActivityRow {
-            id: 1717000000,
-            timestamp: "2026-06-08 10:00:00.000".to_string(),
-            app_name: "Safari".to_string(),
-            window_title: "Inbox".to_string(),
-            ocr_text: "hello".to_string(),
-            embedding: None,
-        }];
-        assert_eq!(fs.upsert_screen_activity(uid, &rows).await.unwrap(), 1);
-        let sa = fs
-            .mongo
-            .get(&format!("users/{}/screen_activity/{}", uid, 1717000000i64))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(sa.get_str("appName").unwrap(), "Safari");
-        fs.mongo.delete(&format!("users/{}/screen_activity/{}", uid, 1717000000i64)).await.unwrap();
-        fs.mongo.delete(&upath).await.unwrap();
+        // desktop_releases create/get/promote through the methods.
+        let rel = crate::routes::updates::ReleaseInfo {
+            version: "1.2.3".to_string(), build_number: 99, download_url: "u".to_string(),
+            ed_signature: "s".to_string(), published_at: "2026-06-08T00:00:00Z".to_string(),
+            changelog: vec!["a".to_string()], is_live: true, is_critical: false, channel: None,
+        };
+        let id = fs.create_desktop_release(&rel).await.unwrap();
+        assert!(fs.get_desktop_releases().await.unwrap().iter().any(|r| r.build_number == 99 && r.version == "1.2.3"));
+        let (o, n) = fs.promote_desktop_release(&id).await.unwrap();
+        assert_eq!((o.as_str(), n.as_str()), ("staging", "beta"));
+
+        // cleanup
+        let _ = seed.delete(&upath).await;
+        let _ = seed.delete(&format!("users/{}/action_items/{}", uid, created.id)).await;
+        let _ = seed.delete(&format!("users/{}/llm_usage/{}", uid, dk)).await;
+        let _ = seed.delete(&format!("desktop_releases/{}", id)).await;
     }
 }
