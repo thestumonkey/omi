@@ -33,7 +33,7 @@ mod routes;
 mod services;
 mod vertex;
 
-use auth::{byok_cache_extension, firebase_auth_extension, paywall_checker_extension, FirebaseAuth};
+use auth::{byok_cache_extension, casdoor_auth_extension, paywall_checker_extension, CasdoorAuth};
 use byok::ByokStateCache;
 use paywall::PaywallChecker;
 use config::Config;
@@ -117,29 +117,34 @@ async fn main() {
     }
 
     // Initialize Firebase Auth
-    // Auth token validation may use a different project than Firestore.
-    // Cloud Run OAuth issues tokens for "based-hardware" (prod), so local dev
-    // needs FIREBASE_AUTH_PROJECT_ID=based-hardware while keeping Firestore on dev.
-    let auth_project_id = config.firebase_auth_project_id.clone()
-        .or_else(|| config.firebase_project_id.clone())
-        .expect("FIREBASE_AUTH_PROJECT_ID or FIREBASE_PROJECT_ID must be set");
-    let firebase_auth = Arc::new(FirebaseAuth::new(auth_project_id.clone()));
+    // Casdoor OIDC verifier — validates the id_tokens the desktop app sends as
+    // Bearer tokens (issued by the Python backend's Casdoor flow). audience =
+    // CASDOOR_CLIENT_ID; JWKS fetched from {CASDOOR_ENDPOINT}/.well-known/jwks.
+    let casdoor_endpoint = config.casdoor_endpoint.clone()
+        .expect("CASDOOR_ENDPOINT must be set");
+    let casdoor_client_id = config.casdoor_client_id.clone()
+        .expect("CASDOOR_CLIENT_ID must be set");
+    let casdoor_auth = Arc::new(CasdoorAuth::new(
+        casdoor_endpoint,
+        config.casdoor_internal_url.clone(),
+        casdoor_client_id,
+    ));
 
-    // Refresh Firebase keys with retry (transient network failures at startup)
+    // Refresh JWKS with retry (transient network failures at startup)
     {
         let max_attempts = 3u32;
         let mut last_err = None;
         for attempt in 1..=max_attempts {
-            match firebase_auth.refresh_keys().await {
+            match casdoor_auth.refresh_keys().await {
                 Ok(_) => {
                     if attempt > 1 {
-                        tracing::info!("Firebase keys fetched on attempt {}", attempt);
+                        tracing::info!("Casdoor JWKS fetched on attempt {}", attempt);
                     }
                     last_err = None;
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("Firebase key fetch attempt {}/{} failed: {}", attempt, max_attempts, e);
+                    tracing::warn!("Casdoor JWKS fetch attempt {}/{} failed: {}", attempt, max_attempts, e);
                     last_err = Some(e);
                     if attempt < max_attempts {
                         tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
@@ -148,7 +153,7 @@ async fn main() {
             }
         }
         if let Some(e) = last_err {
-            tracing::warn!("All {} Firebase key fetch attempts failed: {} - auth may not work", max_attempts, e);
+            tracing::warn!("All {} Casdoor JWKS fetch attempts failed: {} - auth may not work", max_attempts, e);
         }
     }
 
@@ -238,9 +243,14 @@ async fn main() {
     let byok_cache = Arc::new(ByokStateCache::new());
 
     // Paywall checker — reads subscription/BYOK/account-age from Firestore + Firebase Auth.
+    // NOTE: still Firebase-coupled (Phase 2 migrates Firestore → Mongo); the project
+    // id is only used for the Firestore/Identity-Toolkit calls inside the checker.
+    let firebase_project_id = config.firebase_auth_project_id.clone()
+        .or_else(|| config.firebase_project_id.clone())
+        .expect("FIREBASE_AUTH_PROJECT_ID or FIREBASE_PROJECT_ID must be set (Firestore, pending Phase 2)");
     let paywall_checker = Arc::new(PaywallChecker::new(
         firestore.clone(),
-        auth_project_id.clone(),
+        firebase_project_id,
         byok_cache.clone(),
     ));
 
@@ -284,7 +294,7 @@ async fn main() {
     // Merge both (now both are Router<()>), then add layers
     let app = main_router
         .merge(auth_router)
-        .layer(firebase_auth_extension(firebase_auth))
+        .layer(casdoor_auth_extension(casdoor_auth))
         .layer(paywall_checker_extension(paywall_checker))
         .layer(byok_cache_extension(byok_cache))
         .layer(cors)
