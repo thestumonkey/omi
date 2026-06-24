@@ -81,6 +81,14 @@ pub struct Config {
     pub desktop_legacy_anthropic_key: Option<String>,
     /// Google Calendar API key (served to desktop clients)
     pub google_calendar_api_key: Option<String>,
+    /// Self-hosted Ollama base URL (e.g. https://gpu.spangled-kettle.ts.net). When set,
+    /// the Gemini proxy translates generateContent/streamGenerateContent/embedContent to
+    /// Ollama's native API (/api/chat, /api/embeddings) instead of calling Vertex/AI Studio.
+    pub ollama_url: Option<String>,
+    /// Ollama chat model that gemini-2.5-* requests map to (name from `/api/tags`).
+    pub ollama_chat_model: String,
+    /// Ollama embedding model that gemini-embedding-* requests map to.
+    pub ollama_embed_model: String,
     /// When true, route Gemini calls through Vertex AI instead of AI Studio.
     /// Uses service account auth (GOOGLE_APPLICATION_CREDENTIALS) instead of API key.
     pub use_vertex_ai: bool,
@@ -88,6 +96,9 @@ pub struct Config {
     pub vertex_project_id: Option<String>,
     /// GCP region for Vertex AI (default: us-central1)
     pub vertex_location: String,
+    /// Self-hosted deployment: own LLM (e.g. Ollama) at zero per-call cost, so
+    /// the desktop trial paywall is bypassed entirely (every user unlimited).
+    pub self_hosted: bool,
 }
 
 impl Config {
@@ -152,6 +163,11 @@ impl Config {
             anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
             desktop_legacy_anthropic_key: env::var("DESKTOP_LEGACY_ANTHROPIC_KEY").ok(),
             google_calendar_api_key: env::var("GOOGLE_CALENDAR_API_KEY").ok(),
+            ollama_url: env::var("OLLAMA_URL").ok().filter(|s| !s.is_empty()),
+            ollama_chat_model: env::var("OLLAMA_CHAT_MODEL")
+                .unwrap_or_else(|_| "Meta-Llama-3.1-8B-Instruct-GGUF-Q4_K_M".to_string()),
+            ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
+                .unwrap_or_else(|_| "Meta-Llama-3.1-8B-Instruct-GGUF-Q4_K_M".to_string()),
             use_vertex_ai: env::var("USE_VERTEX_AI")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
@@ -160,6 +176,9 @@ impl Config {
                 .ok(),
             vertex_location: env::var("GCP_LOCATION")
                 .unwrap_or_else(|_| "us-central1".to_string()),
+            self_hosted: env::var("SELF_HOSTED")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
         }
     }
 

@@ -252,6 +252,7 @@ async fn main() {
         firestore.clone(),
         firebase_project_id,
         byok_cache.clone(),
+        config.self_hosted,
     ));
 
     let state = AppState {

@@ -7,6 +7,7 @@ pub mod chat_completions;
 pub mod config;
 pub mod crisp;
 pub mod health;
+pub mod ollama;
 pub mod proxy;
 pub mod rate_limit;
 pub mod screen_activity;
