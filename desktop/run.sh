@@ -131,7 +131,11 @@ if [ "$BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
     exit 1
 fi
 
-if [ "$URL_SCHEME" != "$EXPECTED_URL_SCHEME" ]; then
+# Allow an explicit OMI_URL_SCHEME to decouple the URL scheme from the app name
+# (e.g. app "omi-private" with a clean "omi-private://" scheme instead of the
+# derived "omi-omi-private://"). Without an explicit override, the scheme must
+# still match the name-derived default.
+if [ -z "${OMI_URL_SCHEME:-}" ] && [ "$URL_SCHEME" != "$EXPECTED_URL_SCHEME" ]; then
     echo "ERROR: APP_NAME '$APP_NAME' must use URL scheme '$EXPECTED_URL_SCHEME' (got '$URL_SCHEME')"
     exit 1
 fi

@@ -35,40 +35,10 @@ struct SignInView: View {
 
                 Spacer()
 
-                // Sign in buttons
+                // Sign in button — single Casdoor (OIDC) flow. Both the old
+                // Apple/Google buttons routed here anyway; the provider hint is
+                // not forwarded to Casdoor, which presents its own login page.
                 VStack(spacing: 12) {
-                    // Sign in with Apple
-                    Button(action: {
-                        Task {
-                            do {
-                                try await AuthService.shared.signInWithApple()
-                            } catch is CancellationError {
-                                // swallow — user initiated
-                            } catch AuthError.cancelled {
-                                // swallow — user initiated
-                            } catch {
-                                let errorMsg = "Error: \(error.localizedDescription)"
-                                authState.error = errorMsg
-                                NSLog("OMI Sign in error: %@", errorMsg)
-                            }
-                        }
-                    }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "applelogo")
-                                .scaledFont(size: 18)
-                            Text("Sign in with Apple")
-                                .scaledFont(size: 17, weight: .medium)
-                        }
-                        .foregroundColor(.black)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background(Color.white)
-                        .cornerRadius(10)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(authState.isLoading)
-
-                    // Sign in with Google
                     Button(action: {
                         Task {
                             do {
@@ -85,20 +55,16 @@ struct SignInView: View {
                         }
                     }) {
                         HStack(spacing: 8) {
-                            GoogleLogo()
-                                .frame(width: 18, height: 18)
-                            Text("Sign in with Google")
+                            Image(systemName: "lock.shield.fill")
+                                .scaledFont(size: 18)
+                            Text("Continue with Casdoor")
                                 .scaledFont(size: 17, weight: .medium)
                         }
-                        .foregroundColor(.black)
+                        .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
-                        .background(Color.white)
+                        .background(Color(red: 0.086, green: 0.467, blue: 1.0)) // Casdoor blue #1677FF
                         .cornerRadius(10)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                        )
                     }
                     .buttonStyle(.plain)
                     .disabled(authState.isLoading)
