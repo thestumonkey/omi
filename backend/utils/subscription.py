@@ -18,6 +18,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Self-hosted deployments run their own LLM (e.g. Ollama) at zero per-call cost
+# to the operator, so there is nothing to meter. When SELF_HOSTED is set, the
+# trial paywall and chat-quota are bypassed entirely — every user is treated as
+# unlimited, exactly like the BYOK ("bring your own key") escape hatch upstream
+# already grants. This also keeps the quota snapshot from ever reading the
+# subscription / usage / account-age paths, which is where the self-hosted
+# Firestore→Mongo shim would otherwise crash.
+IS_SELF_HOSTED = os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
 PAID_PLAN_TYPES = {PlanType.unlimited, PlanType.architect, PlanType.operator}
 
 # Plans that unlock the desktop (macOS) app. Neo (unlimited) is a mobile/web
@@ -161,6 +170,9 @@ def is_trial_paywalled(uid: str, platform: Optional[str]) -> bool:
     `source` query param for the listen WebSocket. Mobile (ios/android),
     Omi devices, and any unknown/missing platform are never paywalled.
     """
+    # Self-hosted: own LLM, no per-call cost to meter → never paywalled.
+    if IS_SELF_HOSTED:
+        return False
     if not platform or platform.lower() not in _TRIAL_PAYWALL_DESKTOP_TOKENS:
         return False
     return _is_trial_expired_cached(uid)
@@ -496,6 +508,19 @@ def get_chat_quota_snapshot(uid: str, platform: Optional[str] = None) -> dict:
     desktop callers can be paywalled; mobile callers fall through to the
     real plan logic.
     """
+    # Self-hosted: unlimited, and short-circuit BEFORE any subscription / usage
+    # / account-age read so the Firestore→Mongo shim's straggler paths can never
+    # 500 the desktop quota check.
+    if IS_SELF_HOSTED:
+        return {
+            'plan': PlanType.unlimited,
+            'unit': 'questions',
+            'used': 0.0,
+            'limit': None,
+            'allowed': True,
+            'reset_at': None,
+        }
+
     # Paywall test override — surface as exhausted Free-plan quota so the
     # client renders the same over-limit popup it shows for normal users
     # past 30/mo.
