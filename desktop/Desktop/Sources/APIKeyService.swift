@@ -207,4 +207,27 @@ final class APIKeyService: ObservableObject {
         }
         return out
     }
+
+    // MARK: - Custom LLM endpoint (self-hosted)
+
+    /// User-configured OpenAI-compatible LLM connection (e.g. a self-hosted
+    /// Ollama). Sent as `X-BYOK-LLM-{Endpoint,Key,Model}` headers; a SELF_HOSTED
+    /// backend reverse-proxies `/v2/chat/completions` straight to it. Only the
+    /// endpoint URL is required — key and model are optional.
+    static let customLLMEndpointStorageKey = "dev_custom_llm_endpoint"
+    static let customLLMKeyStorageKey = "dev_custom_llm_key"
+    static let customLLMModelStorageKey = "dev_custom_llm_model"
+
+    nonisolated static var customLLMEndpoint: String? {
+        nonEmptyStatic(UserDefaults.standard.string(forKey: "dev_custom_llm_endpoint"))
+    }
+    nonisolated static var customLLMKey: String? {
+        nonEmptyStatic(UserDefaults.standard.string(forKey: "dev_custom_llm_key"))
+    }
+    nonisolated static var customLLMModel: String? {
+        nonEmptyStatic(UserDefaults.standard.string(forKey: "dev_custom_llm_model"))
+    }
+
+    /// True when the user has configured a custom LLM endpoint URL.
+    nonisolated static var hasCustomLLMEndpoint: Bool { customLLMEndpoint != nil }
 }

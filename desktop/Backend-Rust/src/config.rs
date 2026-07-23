@@ -99,6 +99,14 @@ pub struct Config {
     /// Self-hosted deployment: own LLM (e.g. Ollama) at zero per-call cost, so
     /// the desktop trial paywall is bypassed entirely (every user unlimited).
     pub self_hosted: bool,
+    /// Server-side default for the interactive chat path (/v2/chat/completions)
+    /// when SELF_HOSTED. An OpenAI-compatible base URL (e.g. http://gpu.chakra-sacral).
+    /// A per-request `X-BYOK-LLM-Endpoint` header still overrides this. Mirrors
+    /// OLLAMA_URL for the Gemini path — needed because the main chat runs through
+    /// the pi-mono Node agent, which doesn't forward the per-user header.
+    pub chat_llm_endpoint: Option<String>,
+    pub chat_llm_key: Option<String>,
+    pub chat_llm_model: Option<String>,
 }
 
 impl Config {
@@ -179,6 +187,9 @@ impl Config {
             self_hosted: env::var("SELF_HOSTED")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(false),
+            chat_llm_endpoint: env::var("CHAT_LLM_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            chat_llm_key: env::var("CHAT_LLM_KEY").ok().filter(|s| !s.is_empty()),
+            chat_llm_model: env::var("CHAT_LLM_MODEL").ok().filter(|s| !s.is_empty()),
         }
     }
 

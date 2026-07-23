@@ -16,6 +16,10 @@ struct OnboardingBYOKStepView: View {
   @AppStorage(BYOKProvider.gemini.storageKey) private var geminiKey: String = ""
   @AppStorage(BYOKProvider.deepgram.storageKey) private var deepgramKey: String = ""
 
+  @AppStorage(APIKeyService.customLLMEndpointStorageKey) private var customEndpoint: String = ""
+  @AppStorage(APIKeyService.customLLMKeyStorageKey) private var customEndpointKey: String = ""
+  @AppStorage(APIKeyService.customLLMModelStorageKey) private var customModel: String = ""
+
   @State private var isActivating = false
   @State private var activationError: String?
   @State private var keyStatuses: [BYOKProvider: BYOKValidator.Status] = [:]
@@ -61,9 +65,58 @@ struct OnboardingBYOKStepView: View {
               .foregroundColor(OmiColors.textTertiary)
           }
         }
+
+        Divider().background(Color.white.opacity(0.08)).padding(.vertical, 4)
+
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Or connect your own LLM")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(OmiColors.textPrimary)
+          Text(
+            "Point Omi at any OpenAI-compatible endpoint (e.g. a self-hosted Ollama). Used for chat. Stays on this Mac."
+          )
+          .font(.system(size: 12))
+          .foregroundColor(OmiColors.textTertiary)
+
+          endpointField(placeholder: "LLM endpoint URL (https://…)", text: $customEndpoint)
+          endpointField(placeholder: "API key (optional)", text: $customEndpointKey, secure: true)
+          endpointField(placeholder: "Model name (optional)", text: $customModel)
+
+          Button("Use this endpoint") {
+            AnalyticsManager.shared.onboardingStepCompleted(
+              step: stepIndex, stepName: "BYOK_CustomEndpoint")
+            onContinue()
+          }
+          .buttonStyle(OnboardingCardButtonStyle(isPrimary: false))
+          .disabled(customEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
     }
+  }
+
+  private func endpointField(placeholder: String, text: Binding<String>, secure: Bool = false)
+    -> some View
+  {
+    Group {
+      if secure {
+        SecureField(placeholder, text: text).textFieldStyle(.plain)
+      } else {
+        TextField(placeholder, text: text).textFieldStyle(.plain)
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+    .background(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(OmiColors.backgroundSecondary)
+        .overlay(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    )
+    .foregroundColor(OmiColors.textPrimary)
+    .frame(maxWidth: 560)
   }
 
   private var allKeysProvided: Bool {

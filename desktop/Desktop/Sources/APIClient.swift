@@ -98,6 +98,19 @@ actor APIClient {
       headers[provider.headerName] = entry.key
     }
 
+    // Custom LLM endpoint (self-hosted): when the user has configured their own
+    // OpenAI-compatible LLM connection, the SELF_HOSTED backend reverse-proxies
+    // chat to it. Endpoint is required; key/model optional.
+    if let endpoint = APIKeyService.customLLMEndpoint {
+      headers["X-BYOK-LLM-Endpoint"] = endpoint
+      if let key = APIKeyService.customLLMKey {
+        headers["X-BYOK-LLM-Key"] = key
+      }
+      if let model = APIKeyService.customLLMModel {
+        headers["X-BYOK-LLM-Model"] = model
+      }
+    }
+
     return headers
   }
 
