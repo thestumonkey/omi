@@ -918,6 +918,11 @@ def has_transcription_credits(uid: str, source: Optional[str] = None) -> bool:
     etc). The paywall test override only fires for desktop sources so that
     phone-call / Omi-device traffic for cohort UIDs is unaffected.
     """
+    # Self-hosted deployments have no Omi-side metering — transcription is always allowed.
+    # (Matches the bypass in is_trial_paywalled / get_chat_quota_snapshot.)
+    if IS_SELF_HOSTED:
+        return True
+
     # Desktop trial paywall: paywalled users have zero transcription credits.
     if is_trial_paywalled(uid, source):
         return False
@@ -952,6 +957,10 @@ def get_remaining_transcription_seconds(uid: str, source: Optional[str] = None) 
     `source` gates the desktop-only paywall test override (see
     `is_trial_paywalled`).
     """
+    # Self-hosted: unlimited transcription, no freemium threshold.
+    if IS_SELF_HOSTED:
+        return None
+
     # Single-user paywall test override — surface 0 so the freemium-threshold
     # event fires and the client renders its usage-limit popup.
     if is_trial_paywalled(uid, source):

@@ -56,7 +56,26 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _clause_to_mongo(field: str, op: str, value: Any) -> dict:
+def _clause_to_mongo(field: str, op: Any, value: Any) -> dict:
+    # Unary operators (IS_NULL / IS_NOT_NULL / IS_NAN / IS_NOT_NAN) arrive as an
+    # `Operator` enum rather than an op string. Firestore rewrites
+    # `where(field, '==', None)` to IS_NULL, so this fires for null-field queries
+    # (e.g. messages with no plugin_id). Mongo `{field: None}` matches both an
+    # explicit null and a missing field, which is the intended "is null" semantics.
+    if op not in _OP:
+        # Prefer the enum's .name: in Python 3.11+ str(IntEnum) returns the integer
+        # value ('3'), not 'Operator.IS_NULL', so str-parsing alone silently fails.
+        op_name = getattr(op, 'name', None) or str(op)
+        op_name = op_name.upper().replace('OPERATOR.', '').replace('-', '_')
+        if op_name == 'IS_NULL':
+            return {field: None}
+        if op_name == 'IS_NOT_NULL':
+            return {field: {'$ne': None}}
+        if op_name == 'IS_NAN':
+            return {field: float('nan')}
+        if op_name == 'IS_NOT_NAN':
+            return {field: {'$ne': float('nan')}}
+        raise KeyError(f'unsupported Firestore operator: {op!r}')
     return {field: _OP[op](value)}
 
 
@@ -164,8 +183,17 @@ class DocumentReference:
 
             raise NotFound(f'No document to update: {self.path}')
 
-    def get(self, transaction=None) -> DocumentSnapshot:
-        raw = self._mc().find_one({'_id': self.path}, session=self._session(transaction))
+    def get(self, field_paths=None, transaction=None) -> DocumentSnapshot:
+        # Firestore's DocumentReference.get(field_paths=None, transaction=None):
+        # the first positional arg is an optional list of field paths to project.
+        projection = None
+        if field_paths:
+            # always keep the bookkeeping fields so DocumentSnapshot stays well-formed
+            projection = {f: 1 for f in field_paths}
+            projection.update({'_id': 1, '_p': 1, '_k': 1})
+        raw = self._mc().find_one(
+            {'_id': self.path}, projection, session=self._session(transaction)
+        )
         return DocumentSnapshot(self, raw)
 
     def delete(self, transaction=None):
@@ -401,7 +429,11 @@ class MongoFirestore:
     """Drop-in replacement for firestore.Client(), backed by MongoDB."""
 
     def __init__(self, mongo_url: str, db_name: str):
-        self._client = MongoClient(mongo_url)
+        # tz_aware=True: pymongo returns naive UTC datetimes by default, but Firestore
+        # returns tz-aware ones. App code does `datetime.now(timezone.utc) - stored_dt`,
+        # which raises "can't subtract offset-naive and offset-aware datetimes" on naive
+        # values. Returning tz-aware (UTC) datetimes makes the shim match Firestore.
+        self._client = MongoClient(mongo_url, tz_aware=True)
         self._db = self._client[db_name]
 
     @staticmethod
