@@ -33,6 +33,20 @@ _usage_callback = get_usage_callback()
 # own AI Studio API key. Platform calls use ChatGoogleGenerativeAI (native SDK).
 _GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+# Self-hosted LLM override. When SELF_HOSTED_LLM_URL is set, every default (non-BYOK)
+# chat client routes to a single OpenAI-compatible endpoint (e.g. Ollama/lemonade)
+# instead of OpenAI / OpenRouter / Gemini. This lets a self-hosted deploy drop the
+# cloud LLM dependency for conversation post-processing, memories, etc.
+# Notes:
+#  - The cloud QoS profiles reference model names (gpt-4.1-mini, …) that don't exist on
+#    the local server, so a single SELF_HOSTED_LLM_MODEL replaces them all.
+#  - Embeddings are NOT affected (local server has embeddings disabled — see embeddings).
+#  - URL must be the OpenAI-compatible base, including the /v1 suffix
+#    (e.g. http://gpu.chakra-sacral/v1).
+_SELF_HOSTED_LLM_URL = os.environ.get('SELF_HOSTED_LLM_URL', '').strip()
+_SELF_HOSTED_LLM_MODEL = os.environ.get('SELF_HOSTED_LLM_MODEL', '').strip() or 'gpt-4.1-mini'
+_SELF_HOSTED_LLM_KEY = os.environ.get('SELF_HOSTED_LLM_KEY', '').strip() or 'sk-local'
+
 
 class _AnthropicClientProxy:
     """Forwards every attribute to the appropriate anthropic.AsyncAnthropic for the request."""
@@ -498,8 +512,34 @@ def _get_or_create_gemini_llm(model_name: str, streaming: bool = False) -> BaseC
     return _llm_cache[key]
 
 
+def _get_or_create_selfhosted_llm(streaming: bool = False) -> ChatOpenAI:
+    """Single OpenAI-compatible client pointed at a self-hosted LLM (Ollama/lemonade).
+
+    Active only when SELF_HOSTED_LLM_URL is set; replaces every default provider/model
+    so the cloud QoS matrix collapses onto one local model. Generous timeout/retries
+    tolerate on-demand model loading (lemonade cold starts can take minutes).
+    """
+    key = (_SELF_HOSTED_LLM_MODEL, streaming, 'selfhosted')
+    if key not in _llm_cache:
+        kwargs: Dict[str, Any] = {
+            'api_key': _SELF_HOSTED_LLM_KEY,
+            'base_url': _SELF_HOSTED_LLM_URL,
+            'callbacks': [_usage_callback],
+            'request_timeout': 300,
+            'max_retries': 2,
+        }
+        if streaming:
+            kwargs['streaming'] = True
+            kwargs['stream_options'] = {"include_usage": True}
+        _llm_cache[key] = ChatOpenAI(model=_SELF_HOSTED_LLM_MODEL, **kwargs)
+    return _llm_cache[key]
+
+
 def _get_default_client(model: str, provider: str, streaming: bool, feature: str) -> BaseChatModel:
     """Get the cached default client for a model/provider combo."""
+    # Self-hosted: every default client collapses onto one local OpenAI-compatible model.
+    if _SELF_HOSTED_LLM_URL:
+        return _get_or_create_selfhosted_llm(streaming)
     if provider == 'openrouter':
         temp = _OPENROUTER_TEMPERATURES.get(feature)
         return _get_or_create_openrouter_llm(model, streaming, temp)
