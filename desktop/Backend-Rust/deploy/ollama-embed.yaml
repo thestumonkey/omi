@@ -1,0 +1,44 @@
+# Self-hosted embedding service for the desktop backend.
+#
+# Runs nomic-embed-text (v1.5, 768-dim) on CPU — embeddings are cheap and don't
+# need the GPU, so this keeps them off the shared/flaky iGPU entirely. The desktop
+# backend routes embedContent/batchEmbedContents here via OLLAMA_EMBED_URL
+# (ollama-native /api/embeddings), while text generation goes to the GPU scheduler.
+#
+# Deploy:   kubectl apply -f deploy/ollama-embed.yaml
+# One-time: kubectl -n omi exec deploy/ollama-embed -- ollama pull nomic-embed-text
+#           (models live on an emptyDir; re-pull if the pod is recreated)
+# Wire:     set on desktop-backend:
+#             OLLAMA_EMBED_URL=http://ollama-embed.omi:11434
+#             OLLAMA_EMBED_MODEL=nomic-embed-text
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-embed
+  namespace: omi
+  labels: { app: ollama-embed }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ollama-embed } }
+  template:
+    metadata: { labels: { app: ollama-embed } }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: erebus }
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports: [ { containerPort: 11434 } ]
+          env:
+            - { name: OLLAMA_HOST, value: "0.0.0.0:11434" }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "3", memory: "4Gi" }
+          volumeMounts: [ { name: models, mountPath: /root/.ollama } ]
+      volumes: [ { name: models, emptyDir: {} } ]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ollama-embed, namespace: omi }
+spec:
+  selector: { app: ollama-embed }
+  ports: [ { port: 11434, targetPort: 11434 } ]

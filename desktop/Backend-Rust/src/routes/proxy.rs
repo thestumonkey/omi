@@ -188,6 +188,8 @@ async fn gemini_proxy_server_key(
     // Ollama's native API instead of calling Vertex/AI Studio (app stays unchanged).
     if let Some(ollama_url) = state.config.ollama_url.as_deref() {
         tracing::info!("gemini_proxy: routing {} (model {}) to Ollama", action, model);
+        // Embeddings may run on a dedicated service (OLLAMA_EMBED_URL); fall back to the chat URL.
+        let embed_url = state.config.ollama_embed_url.as_deref().unwrap_or(ollama_url);
         return match action {
             "generateContent" => crate::routes::ollama::handle_generate(
                 ollama_url, &state.config.ollama_chat_model, sanitized_body, false,
@@ -195,12 +197,12 @@ async fn gemini_proxy_server_key(
             .await
             .map_err(ProxyError::Status),
             "embedContent" => crate::routes::ollama::handle_embed(
-                ollama_url, &state.config.ollama_embed_model, sanitized_body, false,
+                embed_url, &state.config.ollama_embed_model, sanitized_body, false,
             )
             .await
             .map_err(ProxyError::Status),
             "batchEmbedContents" => crate::routes::ollama::handle_embed(
-                ollama_url, &state.config.ollama_embed_model, sanitized_body, true,
+                embed_url, &state.config.ollama_embed_model, sanitized_body, true,
             )
             .await
             .map_err(ProxyError::Status),

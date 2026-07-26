@@ -89,6 +89,10 @@ pub struct Config {
     pub ollama_chat_model: String,
     /// Ollama embedding model that gemini-embedding-* requests map to.
     pub ollama_embed_model: String,
+    /// Optional separate base URL for embeddings (OLLAMA_EMBED_URL). Falls back to
+    /// `ollama_url` when unset — lets embeddings run on a dedicated service (e.g. a
+    /// CPU nomic-embed-text pod) while chat stays on the GPU endpoint.
+    pub ollama_embed_url: Option<String>,
     /// When true, route Gemini calls through Vertex AI instead of AI Studio.
     /// Uses service account auth (GOOGLE_APPLICATION_CREDENTIALS) instead of API key.
     pub use_vertex_ai: bool,
@@ -172,10 +176,11 @@ impl Config {
             desktop_legacy_anthropic_key: env::var("DESKTOP_LEGACY_ANTHROPIC_KEY").ok(),
             google_calendar_api_key: env::var("GOOGLE_CALENDAR_API_KEY").ok(),
             ollama_url: env::var("OLLAMA_URL").ok().filter(|s| !s.is_empty()),
+            ollama_embed_url: env::var("OLLAMA_EMBED_URL").ok().filter(|s| !s.is_empty()),
             ollama_chat_model: env::var("OLLAMA_CHAT_MODEL")
-                .unwrap_or_else(|_| "Meta-Llama-3.1-8B-Instruct-GGUF-Q4_K_M".to_string()),
+                .unwrap_or_else(|_| "gemma4-it-e4b-FLM".to_string()),
             ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
-                .unwrap_or_else(|_| "Meta-Llama-3.1-8B-Instruct-GGUF-Q4_K_M".to_string()),
+                .unwrap_or_else(|_| "nomic-embed-text".to_string()),
             use_vertex_ai: env::var("USE_VERTEX_AI")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),

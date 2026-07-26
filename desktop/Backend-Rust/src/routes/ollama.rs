@@ -1,14 +1,17 @@
-// Gemini <-> Ollama translation.
+// Gemini <-> self-hosted LLM translation.
 //
 // The desktop app speaks the Gemini REST shape (generateContent /
 // streamGenerateContent / embedContent / batchEmbedContents) to our proxy.
-// A self-hosted Ollama/lemonade server speaks its own native API
-// (/api/chat, /api/embeddings). This module translates between the two so the
-// app stays unchanged. Enabled when OLLAMA_URL is set (see proxy.rs dispatch).
+// This module translates it to the self-hosted backend so the app stays
+// unchanged. Enabled when OLLAMA_URL is set (see proxy.rs dispatch).
 //
-// NOTE: lemonade's OpenAI-compatible /v1 endpoint uses a DIFFERENT model
-// registry than /api/tags, so we deliberately target the native /api/* routes
-// whose model names match `GET /api/tags`.
+// Routing (single scheduler endpoint for generation):
+//   - generateContent -> OLLAMA_URL + `/v1/chat/completions` (OpenAI-compatible).
+//     This targets the GPU scheduler's real model set (e.g. gemma4-it-e4b-FLM on
+//     the NPU) — the same endpoint the interactive chat path uses. The native
+//     `/api/chat` route reaches only raw ollama's small model set, so we avoid it.
+//   - embedContent/batchEmbedContents -> OLLAMA_EMBED_URL + `/api/embeddings`
+//     (ollama-native), served by the dedicated nomic-embed-text pod.
 
 use std::time::Duration;
 
@@ -42,8 +45,8 @@ fn map_role(role: &str) -> &'static str {
     }
 }
 
-/// Translate a Gemini generateContent body into an Ollama /api/chat request.
-pub fn gemini_to_ollama_chat(body: &[u8], model: &str, stream: bool) -> Result<Value, String> {
+/// Translate a Gemini generateContent body into an OpenAI /v1/chat/completions request.
+pub fn gemini_to_openai_chat(body: &[u8], model: &str, stream: bool) -> Result<Value, String> {
     let g: Value = serde_json::from_slice(body).map_err(|e| format!("bad gemini json: {e}"))?;
     let mut messages: Vec<Value> = Vec::new();
 
@@ -63,36 +66,34 @@ pub fn gemini_to_ollama_chat(body: &[u8], model: &str, stream: bool) -> Result<V
         }
     }
 
-    // generationConfig -> Ollama options
-    let mut options = serde_json::Map::new();
+    let mut req = json!({ "model": model, "messages": messages, "stream": stream });
+    // generationConfig -> top-level OpenAI sampling params.
     if let Some(gc) = g.get("generationConfig").or_else(|| g.get("generation_config")) {
         if let Some(t) = gc.get("temperature") {
-            options.insert("temperature".into(), t.clone());
+            req["temperature"] = t.clone();
         }
         if let Some(n) = gc.get("maxOutputTokens").or_else(|| gc.get("max_output_tokens")) {
-            options.insert("num_predict".into(), n.clone());
+            req["max_tokens"] = n.clone();
         }
         if let Some(p) = gc.get("topP").or_else(|| gc.get("top_p")) {
-            options.insert("top_p".into(), p.clone());
+            req["top_p"] = p.clone();
         }
-    }
-
-    let mut req = json!({ "model": model, "messages": messages, "stream": stream });
-    if !options.is_empty() {
-        req["options"] = Value::Object(options);
     }
     Ok(req)
 }
 
-/// Translate an Ollama /api/chat (non-stream) response into a Gemini response.
-pub fn ollama_chat_to_gemini(ollama: &Value) -> Value {
-    let text = ollama
-        .get("message")
+/// Translate an OpenAI /v1/chat/completions (non-stream) response into a Gemini response.
+pub fn openai_chat_to_gemini(openai: &Value) -> Value {
+    let text = openai
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    let prompt = ollama.get("prompt_eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let completion = ollama.get("eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    let usage = openai.get("usage");
+    let prompt = usage.and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
+    let completion = usage.and_then(|u| u.get("completion_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
     json!({
         "candidates": [{
             "content": { "parts": [{ "text": text }], "role": "model" },
@@ -111,19 +112,20 @@ fn base(url: &str) -> &str {
     url.trim_end_matches('/')
 }
 
-/// Handle generateContent (and streamGenerateContent, as a single SSE event)
-/// by calling Ollama /api/chat and translating the response back to Gemini shape.
+/// Handle generateContent (and streamGenerateContent, as a single SSE event) by
+/// calling the scheduler's OpenAI-compatible /v1/chat/completions and translating
+/// the response back to Gemini shape.
 pub async fn handle_generate(
     ollama_url: &str,
     model: &str,
     gemini_body: &[u8],
     as_stream: bool,
 ) -> Result<Response, StatusCode> {
-    let req = gemini_to_ollama_chat(gemini_body, model, false).map_err(|e| {
-        tracing::warn!("ollama: gemini->chat translate failed: {e}");
+    let req = gemini_to_openai_chat(gemini_body, model, false).map_err(|e| {
+        tracing::warn!("gemini_proxy: gemini->openai translate failed: {e}");
         StatusCode::BAD_REQUEST
     })?;
-    let url = format!("{}/api/chat", base(ollama_url));
+    let url = format!("{}/v1/chat/completions", base(ollama_url));
     let resp = reqwest::Client::new()
         .post(&url)
         .timeout(OLLAMA_TIMEOUT)
@@ -131,20 +133,20 @@ pub async fn handle_generate(
         .send()
         .await
         .map_err(|e| {
-            tracing::error!("ollama: /api/chat request failed: {e}");
+            tracing::error!("gemini_proxy: /v1/chat/completions request failed: {e}");
             StatusCode::BAD_GATEWAY
         })?;
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
         let txt = resp.text().await.unwrap_or_default();
-        tracing::error!("ollama: /api/chat upstream {code}: {txt}");
+        tracing::error!("gemini_proxy: /v1/chat/completions upstream {code}: {txt}");
         return Err(StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY));
     }
-    let ollama_resp: Value = resp.json().await.map_err(|e| {
-        tracing::error!("ollama: bad /api/chat json: {e}");
+    let openai_resp: Value = resp.json().await.map_err(|e| {
+        tracing::error!("gemini_proxy: bad /v1/chat/completions json: {e}");
         StatusCode::BAD_GATEWAY
     })?;
-    let gemini = ollama_chat_to_gemini(&ollama_resp);
+    let gemini = openai_chat_to_gemini(&openai_resp);
 
     if as_stream {
         // Emit the full translated response as a single Gemini SSE event.
@@ -226,25 +228,26 @@ mod tests {
             ],
             "generationConfig": {"temperature": 0.5, "maxOutputTokens": 128}
         }"#;
-        let out = gemini_to_ollama_chat(body, "m", false).unwrap();
+        let out = gemini_to_openai_chat(body, "m", false).unwrap();
         assert_eq!(out["model"], "m");
         assert_eq!(out["stream"], false);
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
-        assert_eq!(msgs[2]["role"], "assistant"); // gemini "model" -> ollama "assistant"
-        assert_eq!(out["options"]["num_predict"], 128);
-        assert_eq!(out["options"]["temperature"], 0.5);
+        assert_eq!(msgs[2]["role"], "assistant"); // gemini "model" -> openai "assistant"
+        // OpenAI sampling params are top-level (not nested under `options`).
+        assert_eq!(out["max_tokens"], 128);
+        assert_eq!(out["temperature"], 0.5);
     }
 
     #[test]
-    fn translates_ollama_response_to_gemini() {
-        let ollama = json!({
-            "message": {"role": "assistant", "content": "the answer"},
-            "prompt_eval_count": 10, "eval_count": 3
+    fn translates_openai_response_to_gemini() {
+        let openai = json!({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "the answer"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
         });
-        let g = ollama_chat_to_gemini(&ollama);
+        let g = openai_chat_to_gemini(&openai);
         assert_eq!(g["candidates"][0]["content"]["parts"][0]["text"], "the answer");
         assert_eq!(g["candidates"][0]["content"]["role"], "model");
         assert_eq!(g["candidates"][0]["finishReason"], "STOP");
