@@ -1,6 +1,8 @@
 import hashlib
+import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
@@ -8,6 +10,7 @@ import httpx
 from cachetools import TTLCache
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 import tiktoken
@@ -676,6 +679,59 @@ embeddings = _OpenAIEmbeddingsProxy(
     ctor_kwargs={},
 )
 parser = PydanticOutputParser(pydantic_object=Structured)
+
+
+def get_json_llm(feature: str, cache_key: Optional[str] = None, streaming: bool = False) -> BaseChatModel:
+    """LLM for structured / JSON-producing features.
+
+    On the self-hosted path, bind ``response_format={"type": "json_object"}`` so the
+    llama.cpp/lemonade backend grammar-constrains generation to syntactically valid
+    JSON. Weak local models otherwise emit prose around (or instead of) the JSON and
+    blow up the strict pydantic parser, which surfaces as empty titles/overviews.
+    Cloud providers are returned unchanged — their function-calling structured output
+    already works, and their prompts don't expect ``response_format``."""
+    llm = get_llm(feature, streaming=streaming, cache_key=cache_key)
+    if _SELF_HOSTED_LLM_URL:
+        return llm.bind(response_format={"type": "json_object"})
+    return llm
+
+
+def extract_json(text: str) -> str:
+    """Best-effort isolation of a JSON object from an LLM response.
+
+    Self-hosted models frequently wrap JSON in `````json`` fences or add
+    leading/trailing commentary. Strip fences and return the outermost ``{...}`` span so
+    the strict parser can still succeed. Returns the input unchanged if no object is found."""
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+    if t.startswith('```'):
+        t = re.sub(r'^```[a-zA-Z]*\s*', '', t)
+        t = re.sub(r'\s*```$', '', t).strip()
+    start, end = t.find('{'), t.rfind('}')
+    if start != -1 and end > start:
+        return t[start : end + 1]
+    return t
+
+
+def tolerant_parser(base_parser: PydanticOutputParser) -> Runnable:
+    """Wrap a ``PydanticOutputParser`` with a JSON-extraction fallback.
+
+    On a parse failure (common when a self-hosted model adds prose around the JSON),
+    retry once against the isolated ``{...}`` span before giving up. Preserves the
+    original exception behaviour if extraction also fails."""
+
+    def _parse(message: Any):
+        text = getattr(message, 'content', None)
+        if text is None:
+            text = message if isinstance(message, str) else str(message)
+        try:
+            return base_parser.parse(text)
+        except Exception:
+            return base_parser.parse(extract_json(text))
+
+    return RunnableLambda(_parse)
+
 
 encoding = tiktoken.encoding_for_model('gpt-4')
 

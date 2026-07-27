@@ -11,7 +11,7 @@ from models.calendar_context import CalendarMeetingContext
 from models.conversation import Conversation
 from models.conversation_photo import ConversationPhoto
 from models.structured import ActionItem, ActionItemsExtraction, Event, Structured
-from .clients import get_llm, parser
+from .clients import get_llm, get_json_llm, parser, tolerant_parser
 import logging
 
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ Content:
             ).strip()
         ]
     )
-    chain = prompt | get_llm('conv_discard') | custom_parser
+    chain = prompt | get_json_llm('conv_discard') | tolerant_parser(custom_parser)
     try:
         response: DiscardConversation = chain.invoke(
             {
@@ -534,7 +534,7 @@ def extract_action_items(
     # Second system message: conversation context + existing items (dynamic, per-conversation)
     context_message = 'The content language is {language_code}. You MUST respond entirely in {response_language}.\n\nContent:\n{conversation_context}{existing_items_context}'
     prompt = ChatPromptTemplate.from_messages([('system', instructions_text), ('system', context_message)])
-    chain = prompt | get_llm('conv_action_items', cache_key='omi-extract-actions') | action_items_parser
+    chain = prompt | get_json_llm('conv_action_items', cache_key='omi-extract-actions') | tolerant_parser(action_items_parser)
 
     current_time = datetime.now(timezone.utc)
 
@@ -645,7 +645,7 @@ def get_transcript_structure(
     # Second system message: conversation context (dynamic, per-conversation)
     context_message = 'The content language is {language_code}. You MUST respond entirely in {response_language}.\n\nContent:\n{conversation_context}'
     prompt = ChatPromptTemplate.from_messages([('system', instructions_text), ('system', context_message)])
-    chain = prompt | get_llm('conv_structure', cache_key='omi-transcript-structure') | parser
+    chain = prompt | get_json_llm('conv_structure', cache_key='omi-transcript-structure') | tolerant_parser(parser)
 
     response = chain.invoke(
         {
@@ -729,7 +729,7 @@ def get_reprocess_transcript_structure(
     ).strip()
 
     prompt = ChatPromptTemplate.from_messages([('system', prompt_text)])
-    chain = prompt | get_llm('conv_structure', cache_key='omi-transcript-structure') | parser
+    chain = prompt | get_json_llm('conv_structure', cache_key='omi-transcript-structure') | tolerant_parser(parser)
 
     response = chain.invoke(
         {
