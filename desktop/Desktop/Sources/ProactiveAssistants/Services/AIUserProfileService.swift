@@ -231,8 +231,10 @@ actor AIUserProfileService {
             throw ProfileError.insufficientData
         }
 
-        // 3. Build prompt
-        let prompt = buildPrompt(memories: memories, tasks: tasks, goals: goals, conversations: conversations, messages: messages)
+        // 3. Build token-bounded batches. A single all-corpus prompt overflows the
+        //    model context as the corpus grows (e.g. 43K tokens vs an ~8K window),
+        //    so we curate hierarchically: summarize bounded chunks, then merge.
+        let batches = buildBatchedPrompts(memories: memories, tasks: tasks, goals: goals, conversations: conversations, messages: messages)
 
         // 4. Call Gemini
         let gemini = try GeminiClient()
@@ -272,8 +274,27 @@ actor AIUserProfileService {
         The output MUST be under 2000 characters total.
         """
 
-        let stageOneText = try await gemini.sendTextRequest(prompt: prompt, systemPrompt: systemPrompt)
-        log("AIUserProfileService: Stage 1 complete (\(stageOneText.count) chars)")
+        let stageOneText: String
+        do {
+            var partials: [String] = []
+            for (i, batch) in batches.enumerated() {
+                let partial = try await gemini.sendTextRequest(prompt: batch, systemPrompt: systemPrompt)
+                partials.append(partial)
+                log("AIUserProfileService: Stage 1 batch \(i + 1)/\(batches.count) complete (\(partial.count) chars)")
+            }
+            if partials.count <= 1 {
+                stageOneText = partials.first ?? ""
+            } else {
+                // Merge the per-batch partial profiles (small fact lists) into one.
+                let mergePrompt = buildBatchMergePrompt(partials: partials)
+                stageOneText = try await gemini.sendTextRequest(prompt: mergePrompt, systemPrompt: systemPrompt)
+                log("AIUserProfileService: Stage 1 merged \(partials.count) batches (\(stageOneText.count) chars)")
+            }
+        } catch {
+            // Surface loudly: callers use `try?` and would otherwise swallow this silently.
+            log("AIUserProfileService: ⚠️ profile generation FAILED across \(batches.count) batch(es): \(error.localizedDescription)")
+            throw error
+        }
 
         // 5. Stage 2 — Consolidate with past profiles for holistic view
         let pastProfiles = await getAllProfiles(limit: 5)
@@ -453,35 +474,50 @@ actor AIUserProfileService {
 
     // MARK: - Prompt Building
 
-    private func buildPrompt(
+    /// Char budget per batch. The self-hosted model context is small (~8K tokens);
+    /// at ~4 chars/token, ~14000 chars of data leaves room for the system prompt + output.
+    private static let maxBatchDataChars = 14000
+
+    /// Split the corpus into token-bounded prompts so no single call overflows the model
+    /// context. Each prompt carries the stage-1 instruction plus a bounded chunk of data.
+    /// Returns one prompt per batch; the caller summarizes each and merges the results.
+    private func buildBatchedPrompts(
         memories: [String],
         tasks: [String],
         goals: [String],
         conversations: [String],
         messages: [String]
-    ) -> String {
-        var sections: [String] = []
+    ) -> [String] {
+        // Flatten all sources into labeled lines so each fact keeps its type.
+        var items: [String] = []
+        items += memories.map { "[memory] \($0)" }
+        items += tasks.map { "[task] \($0)" }
+        items += goals.map { "[goal] \($0)" }
+        items += conversations.map { "[conversation] \($0)" }
+        items += messages.map { "[message] \($0)" }
 
-        if !memories.isEmpty {
-            sections.append("## Memories about the user\n\(memories.joined(separator: "\n"))")
+        let budget = Self.maxBatchDataChars
+        var batches: [String] = []
+        var current: [String] = []
+        var currentLen = 0
+        for rawLine in items {
+            // Guard against a single oversized line (e.g. a long transcript) overflowing on its own.
+            let line = rawLine.count > budget ? String(rawLine.prefix(budget)) : rawLine
+            if currentLen + line.count + 1 > budget && !current.isEmpty {
+                batches.append(makeBatchPrompt(lines: current))
+                current = []
+                currentLen = 0
+            }
+            current.append(line)
+            currentLen += line.count + 1
         }
-
-        if !tasks.isEmpty {
-            sections.append("## Recent tasks\n\(tasks.joined(separator: "\n"))")
+        if !current.isEmpty {
+            batches.append(makeBatchPrompt(lines: current))
         }
+        return batches
+    }
 
-        if !goals.isEmpty {
-            sections.append("## Active goals\n\(goals.joined(separator: "\n"))")
-        }
-
-        if !conversations.isEmpty {
-            sections.append("## Recent conversations (past 7 days)\n\(conversations.joined(separator: "\n"))")
-        }
-
-        if !messages.isEmpty {
-            sections.append("## Recent AI chat messages\n\(messages.joined(separator: "\n"))")
-        }
-
+    private func makeBatchPrompt(lines: [String]) -> String {
         return """
         Generate a factual user profile from the following data. \
         Output a flat list of concrete facts (one per line, prefixed with "- "). \
@@ -489,7 +525,21 @@ actor AIUserProfileService {
         to extract tasks, goals, and memories. Focus on facts that help identify who is who, what projects are active, \
         and what the user's current priorities are. Under 2000 characters.
 
-        \(sections.joined(separator: "\n\n"))
+        \(lines.joined(separator: "\n"))
+        """
+    }
+
+    /// Merge per-batch partial profiles (small fact lists) into one deduplicated profile.
+    private func buildBatchMergePrompt(partials: [String]) -> String {
+        let joined = partials.enumerated()
+            .map { "### Partial profile \($0.offset + 1)\n\($0.element)" }
+            .joined(separator: "\n\n")
+        return """
+        Merge the following partial user profiles (each generated from a subset of the user's data) \
+        into ONE deduplicated profile. Output a flat list of concrete facts (one per line, prefixed with "- "). \
+        Combine overlapping facts, drop duplicates, keep only concrete facts. Under 2000 characters.
+
+        \(joined)
         """
     }
 
