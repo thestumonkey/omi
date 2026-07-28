@@ -67,6 +67,23 @@ actor APIClient {
         return date
       }
 
+      // Fallback for tz-naive timestamps: some backend rows (e.g. legacy/migrated
+      // conversations) serialize datetimes without a "Z"/offset, like
+      // "2026-06-25T10:17:51.049000". ISO8601DateFormatter requires a timezone, so a
+      // single such value would otherwise fail the whole [ServerConversation] decode and
+      // blank the entire list. Assume UTC and retry the working ISO8601 parsers.
+      let hasOffset =
+        dateString.range(of: "[+-]\\d{2}:?\\d{2}$", options: .regularExpression) != nil
+      if !dateString.hasSuffix("Z") && !hasOffset {
+        let utcString = dateString + "Z"
+        if let date = isoWithFractional.date(from: utcString) {
+          return date
+        }
+        if let date = iso.date(from: utcString) {
+          return date
+        }
+      }
+
       throw DecodingError.dataCorruptedError(
         in: container, debugDescription: "Invalid date format: \(dateString)")
     }
