@@ -184,6 +184,32 @@ async fn gemini_proxy_server_key(
     model: &str,
     sanitized_body: &[u8],
 ) -> Result<Response, ProxyError> {
+    // Self-hosted Ollama: when OLLAMA_URL is set, translate the Gemini request to
+    // Ollama's native API instead of calling Vertex/AI Studio (app stays unchanged).
+    if let Some(ollama_url) = state.config.ollama_url.as_deref() {
+        tracing::info!("gemini_proxy: routing {} (model {}) to Ollama", action, model);
+        // Embeddings may run on a dedicated service (OLLAMA_EMBED_URL); fall back to the chat URL.
+        let embed_url = state.config.ollama_embed_url.as_deref().unwrap_or(ollama_url);
+        return match action {
+            "generateContent" => crate::routes::ollama::handle_generate(
+                ollama_url, &state.config.ollama_chat_model, sanitized_body, false,
+            )
+            .await
+            .map_err(ProxyError::Status),
+            "embedContent" => crate::routes::ollama::handle_embed(
+                embed_url, &state.config.ollama_embed_model, sanitized_body, false,
+            )
+            .await
+            .map_err(ProxyError::Status),
+            "batchEmbedContents" => crate::routes::ollama::handle_embed(
+                embed_url, &state.config.ollama_embed_model, sanitized_body, true,
+            )
+            .await
+            .map_err(ProxyError::Status),
+            _ => Err(ProxyError::Status(StatusCode::BAD_REQUEST)),
+        };
+    }
+
     // Resolve provider route: single dispatch point for all provider-specific behavior.
     // Returns provider, action override, and body transforms needed.
     use crate::llm::model_qos::{resolve_route, BodyTransform, Provider, ResponseTransform};
@@ -399,6 +425,17 @@ async fn gemini_stream_server_key(
     sanitized_body: Vec<u8>,
     query: &std::collections::HashMap<String, String>,
 ) -> Result<Response, ProxyError> {
+    // Self-hosted Ollama: stream as a single translated SSE event when configured.
+    if let Some(ollama_url) = state.config.ollama_url.as_deref() {
+        tracing::info!("gemini_stream_proxy: routing {} (model {}) to Ollama", action, model);
+        let _ = (effective_path, query);
+        return crate::routes::ollama::handle_generate(
+            ollama_url, &state.config.ollama_chat_model, &sanitized_body, true,
+        )
+        .await
+        .map_err(ProxyError::Status);
+    }
+
     // Resolve provider route (same dispatch as non-streaming proxy)
     use crate::llm::model_qos::{resolve_route, Provider};
     let route = resolve_route(model, action);

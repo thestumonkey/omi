@@ -6,24 +6,26 @@ use serde::{Deserialize, Serialize};
 
 // ── Request types (OpenAI-compatible inbound) ──────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+// Serialize is derived too so the request can be re-forwarded verbatim to a
+// user-configured custom OpenAI-compatible endpoint (self-hosted BYOK path).
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub stream: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     // OpenAI renamed `max_tokens` to `max_completion_tokens` for reasoning
     // models. Pi's openai-completions client sends this field instead of
     // `max_tokens`. Accept both and prefer `max_completion_tokens` when set.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
 }
 

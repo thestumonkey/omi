@@ -1,6 +1,8 @@
 import hashlib
+import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
@@ -8,6 +10,7 @@ import httpx
 from cachetools import TTLCache
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 import tiktoken
@@ -32,6 +35,20 @@ _usage_callback = get_usage_callback()
 # Google's OpenAI-compatible endpoint — used only for BYOK users who bring their
 # own AI Studio API key. Platform calls use ChatGoogleGenerativeAI (native SDK).
 _GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# Self-hosted LLM override. When SELF_HOSTED_LLM_URL is set, every default (non-BYOK)
+# chat client routes to a single OpenAI-compatible endpoint (e.g. Ollama/lemonade)
+# instead of OpenAI / OpenRouter / Gemini. This lets a self-hosted deploy drop the
+# cloud LLM dependency for conversation post-processing, memories, etc.
+# Notes:
+#  - The cloud QoS profiles reference model names (gpt-4.1-mini, …) that don't exist on
+#    the local server, so a single SELF_HOSTED_LLM_MODEL replaces them all.
+#  - Embeddings are NOT affected (local server has embeddings disabled — see embeddings).
+#  - URL must be the OpenAI-compatible base, including the /v1 suffix
+#    (e.g. http://gpu.chakra-sacral/v1).
+_SELF_HOSTED_LLM_URL = os.environ.get('SELF_HOSTED_LLM_URL', '').strip()
+_SELF_HOSTED_LLM_MODEL = os.environ.get('SELF_HOSTED_LLM_MODEL', '').strip() or 'gpt-4.1-mini'
+_SELF_HOSTED_LLM_KEY = os.environ.get('SELF_HOSTED_LLM_KEY', '').strip() or 'sk-local'
 
 
 class _AnthropicClientProxy:
@@ -498,8 +515,34 @@ def _get_or_create_gemini_llm(model_name: str, streaming: bool = False) -> BaseC
     return _llm_cache[key]
 
 
+def _get_or_create_selfhosted_llm(streaming: bool = False) -> ChatOpenAI:
+    """Single OpenAI-compatible client pointed at a self-hosted LLM (Ollama/lemonade).
+
+    Active only when SELF_HOSTED_LLM_URL is set; replaces every default provider/model
+    so the cloud QoS matrix collapses onto one local model. Generous timeout/retries
+    tolerate on-demand model loading (lemonade cold starts can take minutes).
+    """
+    key = (_SELF_HOSTED_LLM_MODEL, streaming, 'selfhosted')
+    if key not in _llm_cache:
+        kwargs: Dict[str, Any] = {
+            'api_key': _SELF_HOSTED_LLM_KEY,
+            'base_url': _SELF_HOSTED_LLM_URL,
+            'callbacks': [_usage_callback],
+            'request_timeout': 300,
+            'max_retries': 2,
+        }
+        if streaming:
+            kwargs['streaming'] = True
+            kwargs['stream_options'] = {"include_usage": True}
+        _llm_cache[key] = ChatOpenAI(model=_SELF_HOSTED_LLM_MODEL, **kwargs)
+    return _llm_cache[key]
+
+
 def _get_default_client(model: str, provider: str, streaming: bool, feature: str) -> BaseChatModel:
     """Get the cached default client for a model/provider combo."""
+    # Self-hosted: every default client collapses onto one local OpenAI-compatible model.
+    if _SELF_HOSTED_LLM_URL:
+        return _get_or_create_selfhosted_llm(streaming)
     if provider == 'openrouter':
         temp = _OPENROUTER_TEMPERATURES.get(feature)
         return _get_or_create_openrouter_llm(model, streaming, temp)
@@ -636,6 +679,59 @@ embeddings = _OpenAIEmbeddingsProxy(
     ctor_kwargs={},
 )
 parser = PydanticOutputParser(pydantic_object=Structured)
+
+
+def get_json_llm(feature: str, cache_key: Optional[str] = None, streaming: bool = False) -> BaseChatModel:
+    """LLM for structured / JSON-producing features.
+
+    On the self-hosted path, bind ``response_format={"type": "json_object"}`` so the
+    llama.cpp/lemonade backend grammar-constrains generation to syntactically valid
+    JSON. Weak local models otherwise emit prose around (or instead of) the JSON and
+    blow up the strict pydantic parser, which surfaces as empty titles/overviews.
+    Cloud providers are returned unchanged — their function-calling structured output
+    already works, and their prompts don't expect ``response_format``."""
+    llm = get_llm(feature, streaming=streaming, cache_key=cache_key)
+    if _SELF_HOSTED_LLM_URL:
+        return llm.bind(response_format={"type": "json_object"})
+    return llm
+
+
+def extract_json(text: str) -> str:
+    """Best-effort isolation of a JSON object from an LLM response.
+
+    Self-hosted models frequently wrap JSON in `````json`` fences or add
+    leading/trailing commentary. Strip fences and return the outermost ``{...}`` span so
+    the strict parser can still succeed. Returns the input unchanged if no object is found."""
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+    if t.startswith('```'):
+        t = re.sub(r'^```[a-zA-Z]*\s*', '', t)
+        t = re.sub(r'\s*```$', '', t).strip()
+    start, end = t.find('{'), t.rfind('}')
+    if start != -1 and end > start:
+        return t[start : end + 1]
+    return t
+
+
+def tolerant_parser(base_parser: PydanticOutputParser) -> Runnable:
+    """Wrap a ``PydanticOutputParser`` with a JSON-extraction fallback.
+
+    On a parse failure (common when a self-hosted model adds prose around the JSON),
+    retry once against the isolated ``{...}`` span before giving up. Preserves the
+    original exception behaviour if extraction also fails."""
+
+    def _parse(message: Any):
+        text = getattr(message, 'content', None)
+        if text is None:
+            text = message if isinstance(message, str) else str(message)
+        try:
+            return base_parser.parse(text)
+        except Exception:
+            return base_parser.parse(extract_json(text))
+
+    return RunnableLambda(_parse)
+
 
 encoding = tiktoken.encoding_for_model('gpt-4')
 

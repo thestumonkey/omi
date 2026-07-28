@@ -48,6 +48,8 @@ pub struct PaywallChecker {
     firebase_auth_project_id: String,
     byok_cache: Arc<byok::ByokStateCache>,
     cache: Mutex<HashMap<String, CacheEntry>>,
+    /// Self-hosted: own LLM at zero per-call cost → never paywall anyone.
+    self_hosted: bool,
 }
 
 impl PaywallChecker {
@@ -55,12 +57,14 @@ impl PaywallChecker {
         firestore: Arc<FirestoreService>,
         firebase_auth_project_id: String,
         byok_cache: Arc<byok::ByokStateCache>,
+        self_hosted: bool,
     ) -> Self {
         Self {
             firestore,
             firebase_auth_project_id,
             byok_cache,
             cache: Mutex::new(HashMap::new()),
+            self_hosted,
         }
     }
 
@@ -80,6 +84,13 @@ impl PaywallChecker {
         request_headers: &HeaderMap,
         byok_stripped: bool,
     ) -> bool {
+        // Self-hosted: own LLM, no per-call cost to meter → never paywalled.
+        // Short-circuits before any Firestore/Firebase-Auth read (those paths
+        // are still Firebase-coupled and would otherwise fail on this stack).
+        if self.self_hosted {
+            return false;
+        }
+
         // BYOK escape hatch: a request carrying all 4 BYOK provider headers
         // is never paywalled, regardless of cached state. This handles the
         // race where Firestore hasn't caught up after BYOK activation.

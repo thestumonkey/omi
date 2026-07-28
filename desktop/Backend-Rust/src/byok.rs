@@ -26,6 +26,17 @@ pub const HEADER_ANTHROPIC: &str = "x-byok-anthropic";
 pub const HEADER_GEMINI: &str = "x-byok-gemini";
 pub const HEADER_DEEPGRAM: &str = "x-byok-deepgram";
 
+/// Custom OpenAI-compatible LLM endpoint (self-hosted BYOK). When the user
+/// configures their own LLM connection (e.g. a self-hosted Ollama) in the app,
+/// these headers carry it per-request. Unlike the four provider keys above, this
+/// is NOT fingerprint-enrolled — it's honored directly on SELF_HOSTED backends
+/// (see `chat_completions.rs`). The endpoint is a base URL (`/v1/chat/completions`
+/// is appended); the key is optional (most local servers need none); the model
+/// overrides the request's model so it matches the endpoint's own registry.
+pub const HEADER_LLM_ENDPOINT: &str = "x-byok-llm-endpoint";
+pub const HEADER_LLM_KEY: &str = "x-byok-llm-key";
+pub const HEADER_LLM_MODEL: &str = "x-byok-llm-model";
+
 /// All four required BYOK headers. Python's `_request_has_all_byok_keys()` checks
 /// the same set — a fully enrolled BYOK user sends all four on every request.
 const ALL_BYOK_HEADERS: &[&str] = &[

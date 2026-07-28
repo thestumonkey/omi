@@ -81,6 +81,18 @@ pub struct Config {
     pub desktop_legacy_anthropic_key: Option<String>,
     /// Google Calendar API key (served to desktop clients)
     pub google_calendar_api_key: Option<String>,
+    /// Self-hosted Ollama base URL (e.g. https://gpu.spangled-kettle.ts.net). When set,
+    /// the Gemini proxy translates generateContent/streamGenerateContent/embedContent to
+    /// Ollama's native API (/api/chat, /api/embeddings) instead of calling Vertex/AI Studio.
+    pub ollama_url: Option<String>,
+    /// Ollama chat model that gemini-2.5-* requests map to (name from `/api/tags`).
+    pub ollama_chat_model: String,
+    /// Ollama embedding model that gemini-embedding-* requests map to.
+    pub ollama_embed_model: String,
+    /// Optional separate base URL for embeddings (OLLAMA_EMBED_URL). Falls back to
+    /// `ollama_url` when unset — lets embeddings run on a dedicated service (e.g. a
+    /// CPU nomic-embed-text pod) while chat stays on the GPU endpoint.
+    pub ollama_embed_url: Option<String>,
     /// When true, route Gemini calls through Vertex AI instead of AI Studio.
     /// Uses service account auth (GOOGLE_APPLICATION_CREDENTIALS) instead of API key.
     pub use_vertex_ai: bool,
@@ -88,6 +100,17 @@ pub struct Config {
     pub vertex_project_id: Option<String>,
     /// GCP region for Vertex AI (default: us-central1)
     pub vertex_location: String,
+    /// Self-hosted deployment: own LLM (e.g. Ollama) at zero per-call cost, so
+    /// the desktop trial paywall is bypassed entirely (every user unlimited).
+    pub self_hosted: bool,
+    /// Server-side default for the interactive chat path (/v2/chat/completions)
+    /// when SELF_HOSTED. An OpenAI-compatible base URL (e.g. http://gpu.chakra-sacral).
+    /// A per-request `X-BYOK-LLM-Endpoint` header still overrides this. Mirrors
+    /// OLLAMA_URL for the Gemini path — needed because the main chat runs through
+    /// the pi-mono Node agent, which doesn't forward the per-user header.
+    pub chat_llm_endpoint: Option<String>,
+    pub chat_llm_key: Option<String>,
+    pub chat_llm_model: Option<String>,
 }
 
 impl Config {
@@ -152,6 +175,12 @@ impl Config {
             anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
             desktop_legacy_anthropic_key: env::var("DESKTOP_LEGACY_ANTHROPIC_KEY").ok(),
             google_calendar_api_key: env::var("GOOGLE_CALENDAR_API_KEY").ok(),
+            ollama_url: env::var("OLLAMA_URL").ok().filter(|s| !s.is_empty()),
+            ollama_embed_url: env::var("OLLAMA_EMBED_URL").ok().filter(|s| !s.is_empty()),
+            ollama_chat_model: env::var("OLLAMA_CHAT_MODEL")
+                .unwrap_or_else(|_| "gemma4-it-e4b-FLM".to_string()),
+            ollama_embed_model: env::var("OLLAMA_EMBED_MODEL")
+                .unwrap_or_else(|_| "nomic-embed-text".to_string()),
             use_vertex_ai: env::var("USE_VERTEX_AI")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
@@ -160,6 +189,12 @@ impl Config {
                 .ok(),
             vertex_location: env::var("GCP_LOCATION")
                 .unwrap_or_else(|_| "us-central1".to_string()),
+            self_hosted: env::var("SELF_HOSTED")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
+            chat_llm_endpoint: env::var("CHAT_LLM_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            chat_llm_key: env::var("CHAT_LLM_KEY").ok().filter(|s| !s.is_empty()),
+            chat_llm_model: env::var("CHAT_LLM_MODEL").ok().filter(|s| !s.is_empty()),
         }
     }
 

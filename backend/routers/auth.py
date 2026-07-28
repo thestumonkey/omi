@@ -180,7 +180,11 @@ async def auth_callback(
             "request": request,
             "code": auth_code,
             "state": session_data.get("state") or "",
-            "redirect_uri": redirect_uri,
+            # Thread the session's redirect_uri through so the callback page returns
+            # to the originating app's scheme (e.g. omi-computer-dev://, omi-<bundle>://).
+            # Without this the template falls back to the omi:// default, which only
+            # the mobile app registers — breaking every desktop named bundle.
+            "redirect_uri": session_data.get("redirect_uri"),
         },
     )
 

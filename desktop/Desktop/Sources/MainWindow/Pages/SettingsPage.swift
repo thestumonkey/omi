@@ -377,6 +377,9 @@ struct SettingsContentView: View {
   @AppStorage("dev_anthropic_api_key") private var devAnthropicKey: String = ""
   @AppStorage("dev_openai_api_key") private var devOpenAIKey: String = ""
   @AppStorage("dev_deepgram_api_key") private var devDeepgramKey: String = ""
+  @AppStorage(APIKeyService.customLLMEndpointStorageKey) private var customLLMEndpoint: String = ""
+  @AppStorage(APIKeyService.customLLMKeyStorageKey) private var customLLMKey: String = ""
+  @AppStorage(APIKeyService.customLLMModelStorageKey) private var customLLMModel: String = ""
   @State private var byokKeyStatuses: [BYOKProvider: BYOKValidator.Status] = [:]
   @State private var byokActivationError: String?
 
@@ -5557,6 +5560,8 @@ struct SettingsContentView: View {
         }
       }
 
+      customLLMEndpointCard
+
       if hasAnyBYOKKey {
         settingsCard(settingId: "advanced.devkeys.clear") {
           HStack {
@@ -5671,6 +5676,30 @@ struct SettingsContentView: View {
         }
       }
       await MainActor.run { loadSubscriptionInfo() }
+    }
+  }
+
+  private var customLLMEndpointCard: some View {
+    settingsCard(settingId: "advanced.devkeys.customllm") {
+      VStack(alignment: .leading, spacing: 8) {
+        Text("Custom LLM Endpoint")
+          .scaledFont(size: 14, weight: .medium)
+          .foregroundColor(OmiColors.textPrimary)
+        Text(
+          "Route chat to any OpenAI-compatible endpoint (e.g. a self-hosted Ollama). Overrides the built-in chat model. Stays on this Mac."
+        )
+        .scaledFont(size: 12)
+        .foregroundColor(OmiColors.textTertiary)
+        TextField("Endpoint URL (https://…)", text: $customLLMEndpoint)
+          .textFieldStyle(.roundedBorder)
+          .scaledFont(size: 13)
+        SecureField("API key (optional)", text: $customLLMKey)
+          .textFieldStyle(.roundedBorder)
+          .scaledFont(size: 13)
+        TextField("Model name (optional)", text: $customLLMModel)
+          .textFieldStyle(.roundedBorder)
+          .scaledFont(size: 13)
+      }
     }
   }
 

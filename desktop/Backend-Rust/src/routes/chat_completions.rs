@@ -455,6 +455,34 @@ async fn chat_completions(
 ) -> Result<Response, StatusCode> {
     let byok_stripped = user.byok_stripped;
     let user: AuthUser = user.into();
+
+    // Self-hosted custom endpoint (BYOK): if the user configured their own
+    // OpenAI-compatible LLM connection (e.g. a self-hosted Ollama), reverse-proxy
+    // straight to it — skipping the built-in Anthropic path, the model whitelist,
+    // and server-key rate limiting. Gated by SELF_HOSTED so the hosted product is
+    // unaffected. Not fingerprint-enrolled: it's the user's own endpoint, no
+    // Omi-side cost to meter.
+    if state.config.self_hosted {
+        // 1) Per-user override from the app (rides request paths that go through
+        //    APIClient.buildHeaders, e.g. title/ack generation).
+        if let Some(endpoint) = byok::get_byok_key(&headers, byok::HEADER_LLM_ENDPOINT) {
+            let key = byok::get_byok_key(&headers, byok::HEADER_LLM_KEY);
+            let model = byok::get_byok_key(&headers, byok::HEADER_LLM_MODEL);
+            return proxy_custom_endpoint(&req, endpoint, key, model).await;
+        }
+        // 2) Server-side default — covers the main interactive chat, which runs
+        //    through the pi-mono Node agent and can't send the per-user header.
+        if let Some(endpoint) = state.config.chat_llm_endpoint.as_deref() {
+            return proxy_custom_endpoint(
+                &req,
+                endpoint,
+                state.config.chat_llm_key.as_deref(),
+                state.config.chat_llm_model.as_deref(),
+            )
+            .await;
+        }
+    }
+
     // Validate model
     let route = resolve_model(&req.model).ok_or_else(|| {
         tracing::warn!(
@@ -537,6 +565,58 @@ async fn chat_completions(
         )
         .await
     }
+}
+
+/// Reverse-proxy an OpenAI-shaped chat request to a user-configured custom
+/// OpenAI-compatible endpoint (self-hosted BYOK). The inbound request is already
+/// OpenAI format, so it's forwarded verbatim (with an optional model override) and
+/// the upstream response body is streamed straight back — covering both streaming
+/// (SSE) and non-streaming (JSON) responses without any translation.
+async fn proxy_custom_endpoint(
+    req: &ChatCompletionRequest,
+    endpoint: &str,
+    key: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<Response, StatusCode> {
+    let mut body = serde_json::to_value(req).map_err(|e| {
+        tracing::error!("chat_completions: serialize for custom endpoint failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if let Some(m) = model_override {
+        body["model"] = json!(m);
+    }
+
+    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+    tracing::info!("chat_completions: routing to custom endpoint {}", url);
+
+    let mut rb = reqwest::Client::new().post(&url).json(&body);
+    if let Some(k) = key {
+        rb = rb.bearer_auth(k);
+    }
+
+    let upstream = rb.send().await.map_err(|e| {
+        tracing::error!("chat_completions: custom endpoint request failed: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    // Pipe the upstream body straight through (SSE chunks or a single JSON doc).
+    let stream = upstream.bytes_stream();
+    Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|e| {
+            tracing::error!("chat_completions: build proxied response failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 async fn handle_non_streaming(

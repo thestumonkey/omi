@@ -627,8 +627,17 @@ actor TranscriptionStorage {
                 .fetchOne(database) {
                 // Skip if local record is newer than the conversation's latest timestamp.
                 // This prevents sync from overwriting recent local mutations (star, delete, title edit, etc.)
+                //
+                // Exception: server-generated structured content (title/overview) has no bearing on
+                // the conversation's content timestamp — re-processing adds a title without advancing
+                // finished_at, so the timestamp guard alone would freeze an early-synced empty title
+                // forever. When the local record has no title but the server now provides one, let the
+                // update through. A real local title edit makes the local title non-empty, so this
+                // can't clobber user edits.
                 let serverTimestamp = conversation.finishedAt ?? conversation.startedAt ?? conversation.createdAt
-                if existingSession.updatedAt >= serverTimestamp {
+                let localTitleMissing = (existingSession.title ?? "").isEmpty
+                let serverProvidesTitle = !conversation.structured.title.isEmpty
+                if existingSession.updatedAt >= serverTimestamp && !(localTitleMissing && serverProvidesTitle) {
                     guard let sessionId = existingSession.id else {
                         throw TranscriptionStorageError.invalidState("Session ID is nil")
                     }

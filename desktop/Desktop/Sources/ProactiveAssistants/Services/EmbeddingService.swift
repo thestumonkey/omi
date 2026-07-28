@@ -5,8 +5,11 @@ import Foundation
 actor EmbeddingService {
   static let shared = EmbeddingService()
 
-  /// Gemini embedding-001 outputs 3072 dimensions by default
-  static let embeddingDimension = 3072
+  /// Embedding dimension. Self-hosted uses nomic-embed-text-v1.5 (768-dim) via the
+  /// desktop backend's OLLAMA_EMBED_URL; the hosted product used Gemini embedding-001
+  /// (3072-dim). `dataToFloats`/OCREmbeddingService validate against this, so any
+  /// vectors stored at a different dimension are ignored and re-embedded.
+  static let embeddingDimension = 768
   static var modelName: String { ModelQoS.Gemini.embedding }
 
   /// In-memory index: action_item.id -> normalized embedding

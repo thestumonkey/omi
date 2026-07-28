@@ -42,8 +42,10 @@ RUN apt-get update && apt-get install -y \
 # Copy binary from builder
 COPY --from=builder /app/target/release/omi-desktop-backend /app/omi-desktop-backend
 
-# Copy Google credentials for Firestore access
-COPY google-credentials.json /app/google-credentials.json
+# NOTE: Google service-account credentials are intentionally NOT baked in.
+# Self-hosted deployments use Casdoor + MongoDB (no Firestore), and the runtime
+# treats missing credentials as optional (FirestoreService loads Ok(None)).
+# To use Firestore, mount creds and set GOOGLE_APPLICATION_CREDENTIALS instead.
 
 # Expose port
 EXPOSE 8080

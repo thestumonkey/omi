@@ -154,81 +154,45 @@ class AuthService {
         NSLog("OMI AUTH: Checking saved auth state - savedSignedIn: %@, savedEmail: %@",
               savedSignedIn ? "true" : "false", savedEmail ?? "nil")
 
-        // Set auth state synchronously (we're already on main thread from configure()).
-        // Using DispatchQueue.main.async here would defer to the next run-loop tick,
-        // creating a race window where the Firebase auth state listener can fire first
-        // with user=nil and flip isSignedIn to false before we restore it.
-        if savedSignedIn {
-            // Check if Firebase also has a current user (session might still be valid)
-            if let currentUser = Auth.auth().currentUser {
-                NSLog("OMI AUTH: Restored auth state from Firebase - uid: %@", currentUser.uid)
-                self.isSignedIn = true
-                AuthState.shared.userEmail = currentUser.email ?? savedEmail
-                AuthState.shared.isRestoringAuth = false
-                self.loadNameFromBackendIfNeeded()
-            } else {
-                // Firebase doesn't have user, but we have saved state
-                // This can happen with ad-hoc signing where Keychain doesn't persist
-                NSLog("OMI AUTH: Restored auth state from UserDefaults (Firebase session expired)")
-
-                // Migration: Fix empty userId by extracting from stored idToken
-                let savedUserId = UserDefaults.standard.string(forKey: kAuthUserId) ?? ""
-                if savedUserId.isEmpty, let storedToken = storedIdToken {
-                    if let payload = decodeJWT(storedToken),
-                       let userId = payload["user_id"] as? String ?? payload["sub"] as? String {
-                        NSLog("OMI AUTH: Migrating empty userId - extracted from JWT: %@", userId)
-                        UserDefaults.standard.set(userId, forKey: kAuthUserId)
-                    }
-                }
-
-                self.isSignedIn = true
-                AuthState.shared.userEmail = savedEmail
-                AuthState.shared.isRestoringAuth = false
-            }
-        } else {
+        // Casdoor: the session lives in the stored id_token/refresh_token (UserDefaults),
+        // not a Firebase keychain session. Restore synchronously (we're on the main thread
+        // from configure()); getIdToken() refreshes against /v1/auth/refresh when expired.
+        guard savedSignedIn else {
             NSLog("OMI AUTH: No saved auth state found")
             AuthState.shared.isRestoringAuth = false
+            return
         }
+
+        NSLog("OMI AUTH: Restored auth state from stored Casdoor tokens")
+
+        // Backfill empty userId from the stored id_token's sub (migration / crash recovery).
+        let savedUserId = UserDefaults.standard.string(forKey: kAuthUserId) ?? ""
+        if savedUserId.isEmpty, let storedToken = storedIdToken,
+           let payload = decodeJWT(storedToken),
+           let userId = (payload["sub"] as? String) ?? (payload["user_id"] as? String) {
+            NSLog("OMI AUTH: Backfilling empty userId from JWT: %@", userId)
+            UserDefaults.standard.set(userId, forKey: kAuthUserId)
+        }
+
+        self.isSignedIn = true
+        AuthState.shared.userEmail = savedEmail
+        AuthState.shared.isRestoringAuth = false
+        self.loadNameFromBackendIfNeeded()
     }
 
     // MARK: - Auth State Listener
 
     private func setupAuthStateListener() {
-        authStateHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
-            Task { @MainActor in
-                if user != nil {
-                    // Firebase has a user - trust it
-                    log("AUTH_LISTENER: Firebase user present (uid=\(user?.uid ?? "nil")), setting isSignedIn=true")
-                    self?.isSignedIn = true
-                    AuthState.shared.userEmail = user?.email
-                    AuthState.shared.isRestoringAuth = false
-                    self?.saveAuthState(isSignedIn: true, email: user?.email, userId: user?.uid)
-                    // Configure database for the signed-in user immediately so any code
-                    // that touches the DB during onboarding (e.g. save_knowledge_graph)
-                    // writes to the correct per-user path instead of "anonymous".
-                    if let uid = user?.uid {
-                        Task { await RewindDatabase.shared.configure(userId: uid) }
-                    }
-                    // Load name from backend profile (Firestore), then Firebase Auth as fallback
-                    self?.loadNameFromBackendIfNeeded()
-                    // Sync assistant settings from backend (fire-and-forget)
-                    Task { await SettingsSyncManager.shared.syncFromServer() }
-                } else {
-                    // Firebase has no user - check if we have a saved session (for dev builds where Keychain doesn't persist)
-                    let savedSignedIn = UserDefaults.standard.bool(forKey: self?.kAuthIsSignedIn ?? "")
-                    log("AUTH_LISTENER: Firebase user nil, savedSignedIn=\(savedSignedIn), currentIsSignedIn=\(self?.isSignedIn ?? false)")
-                    if !savedSignedIn {
-                        // No saved session either - user is truly signed out
-                        log("AUTH_LISTENER: No saved session - setting isSignedIn=false")
-                        self?.isSignedIn = false
-                        AuthState.shared.userEmail = nil
-                        AuthState.shared.isRestoringAuth = false
-                    } else {
-                        log("AUTH_LISTENER: Keeping saved session (not overriding isSignedIn)")
-                    }
-                }
-            }
+        // Casdoor: auth state is driven entirely by the stored id_token/refresh_token
+        // (see restoreAuthState) rather than a Firebase auth-state listener. After a
+        // successful sign-in, configure the per-user DB + sync settings so behaviour
+        // matches the old listener-driven path.
+        guard isSignedIn, let uid = storedTokenUserId ?? UserDefaults.standard.string(forKey: kAuthUserId), !uid.isEmpty else {
+            return
         }
+        Task { await RewindDatabase.shared.configure(userId: uid) }
+        loadNameFromBackendIfNeeded()
+        Task { await SettingsSyncManager.shared.syncFromServer() }
     }
 
     // MARK: - Sign in with Apple (Native with Web OAuth Fallback)
@@ -403,13 +367,12 @@ class AuthService {
             }
             NSLog("OMI AUTH: Received valid authorization code")
 
-            // Step 6: Exchange code for custom token and user info
-            NSLog("OMI AUTH: Exchanging code for Firebase token...")
+            // Step 6: Exchange code for the Casdoor id_token + user info
+            NSLog("OMI AUTH: Exchanging code for Casdoor id_token...")
             let tokenResult = try await exchangeCodeForToken(code: code)
-            NSLog("OMI AUTH: Got Firebase custom token")
+            NSLog("OMI AUTH: Got Casdoor id_token for uid %@", tokenResult.uid)
 
-            // Save user info from OAuth response immediately (before Firebase sign-in)
-            // This ensures we have the name even if Firebase session doesn't persist
+            // Save user info from the id_token immediately
             if let extractedGivenName = tokenResult.givenName, !extractedGivenName.isEmpty {
                 givenName = extractedGivenName
                 familyName = tokenResult.familyName ?? ""
@@ -419,28 +382,14 @@ class AuthService {
                 AuthState.shared.userEmail = extractedEmail
             }
 
-            // Step 7: Exchange custom token for ID token via REST API
-            // This bypasses keychain issues with Firebase SDK on dev builds
-            NSLog("OMI AUTH: Exchanging custom token for ID token via REST API...")
-            let firebaseTokens = try await exchangeCustomTokenForIdToken(customToken: tokenResult.customToken)
-            NSLog("OMI AUTH: Got Firebase ID token via REST API")
-
-            // Store tokens for API calls (include userId to validate token ownership on retrieval)
-            saveTokens(idToken: firebaseTokens.idToken, refreshToken: firebaseTokens.refreshToken, expiresIn: firebaseTokens.expiresIn, userId: firebaseTokens.localId)
-
-            // Also try Firebase SDK sign-in (best effort for other Firebase features)
-            do {
-                let authResult = try await Auth.auth().signIn(withCustomToken: tokenResult.customToken)
-                NSLog("OMI AUTH: Firebase SDK sign-in SUCCESS - uid: %@", authResult.user.uid)
-            } catch let firebaseError as NSError {
-                // Keychain errors are expected on dev builds - we have REST API tokens as fallback
-                NSLog("OMI AUTH: Firebase SDK sign-in failed (using REST API tokens): %@", firebaseError.localizedDescription)
-            }
+            // Step 7: Store the Casdoor tokens for API calls (bearer = id_token).
+            // No Firebase: the id_token is sent directly and verified by both backends.
+            let userId = tokenResult.uid
+            saveTokens(idToken: tokenResult.idToken, refreshToken: tokenResult.refreshToken, expiresIn: tokenResult.expiresIn, userId: userId)
 
             isSignedIn = true
 
             // Save auth state immediately
-            let userId = firebaseTokens.localId
             saveAuthState(isSignedIn: true, email: tokenResult.email, userId: userId)
             await RewindDatabase.shared.configure(userId: userId)
 
@@ -587,7 +536,12 @@ class AuthService {
 
     /// Response from token exchange containing custom token and user info
     struct TokenExchangeResult {
-        let customToken: String
+        /// Casdoor-issued OIDC id_token — used directly as the API bearer (no Firebase).
+        let idToken: String
+        let refreshToken: String
+        let expiresIn: Int
+        /// uid = the `sub` claim of the id_token.
+        let uid: String
         let givenName: String?
         let familyName: String?
         let email: String?
@@ -605,8 +559,7 @@ class AuthService {
         let bodyParams = [
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": redirectURI,
-            "use_custom_token": "true"
+            "redirect_uri": redirectURI
         ]
 
         let bodyString = bodyParams
@@ -635,39 +588,55 @@ class AuthService {
             throw AuthError.invalidResponse
         }
 
-        // Get custom token
-        guard let customToken = json["custom_token"] as? String else {
-            NSLog("OMI AUTH: No custom_token in response")
-            throw AuthError.missingCustomToken
+        // Casdoor returns the OIDC tokens directly — id_token is the API bearer.
+        guard let idToken = json["id_token"] as? String else {
+            NSLog("OMI AUTH: No id_token in token response")
+            throw AuthError.invalidResponse
         }
+        let refreshToken = json["refresh_token"] as? String ?? ""
+        // expires_in may be Int or String depending on the backend serializer.
+        let expiresIn: Int
+        if let n = json["expires_in"] as? Int { expiresIn = n }
+        else if let s = json["expires_in"] as? String, let n = Int(s) { expiresIn = n }
+        else { expiresIn = 3600 }
 
-        // Extract user info from id_token (JWT)
+        // Extract uid (sub) + display name/email from the id_token (JWT).
+        var uid = ""
         var extractedGivenName: String?
         var extractedFamilyName: String?
         var extractedEmail: String?
 
-        if let idToken = json["id_token"] as? String {
-            if let userInfo = decodeJWT(idToken) {
-                extractedGivenName = userInfo["given_name"] as? String
-                extractedFamilyName = userInfo["family_name"] as? String
-                extractedEmail = userInfo["email"] as? String
+        if let userInfo = decodeJWT(idToken) {
+            uid = (userInfo["sub"] as? String) ?? (userInfo["user_id"] as? String) ?? ""
+            extractedGivenName = userInfo["given_name"] as? String
+            extractedFamilyName = userInfo["family_name"] as? String
+            extractedEmail = userInfo["email"] as? String
 
-                // Fall back to "name" field if given_name not available
-                if extractedGivenName == nil, let fullName = userInfo["name"] as? String {
-                    let parts = fullName.split(separator: " ", maxSplits: 1)
-                    extractedGivenName = parts.first.map(String.init)
-                    extractedFamilyName = parts.count > 1 ? String(parts[1]) : nil
-                }
-
-                NSLog("OMI AUTH: Extracted from id_token - name: %@ %@, email: %@",
-                      extractedGivenName ?? "(none)",
-                      extractedFamilyName ?? "",
-                      extractedEmail ?? "(none)")
+            // Fall back to "name"/"preferred_username" if given_name not available
+            if extractedGivenName == nil,
+               let fullName = (userInfo["name"] as? String) ?? (userInfo["preferred_username"] as? String) {
+                let parts = fullName.split(separator: " ", maxSplits: 1)
+                extractedGivenName = parts.first.map(String.init)
+                extractedFamilyName = parts.count > 1 ? String(parts[1]) : nil
             }
+
+            NSLog("OMI AUTH: Extracted from id_token - uid: %@, name: %@ %@, email: %@",
+                  uid,
+                  extractedGivenName ?? "(none)",
+                  extractedFamilyName ?? "",
+                  extractedEmail ?? "(none)")
+        }
+
+        guard !uid.isEmpty else {
+            NSLog("OMI AUTH: id_token missing sub claim")
+            throw AuthError.invalidResponse
         }
 
         return TokenExchangeResult(
-            customToken: customToken,
+            idToken: idToken,
+            refreshToken: refreshToken,
+            expiresIn: expiresIn,
+            uid: uid,
             givenName: extractedGivenName,
             familyName: extractedFamilyName,
             email: extractedEmail
@@ -896,18 +865,20 @@ class AuthService {
 
     /// Refresh the ID token using the refresh token
     private func refreshIdToken() async throws -> String {
-        guard let refreshToken = storedRefreshToken else {
+        guard let refreshToken = storedRefreshToken, !refreshToken.isEmpty else {
             throw AuthError.notSignedIn
         }
 
-        guard let url = URL(string: "https://securetoken.googleapis.com/v1/token?key=\(firebaseApiKey)") else {
+        // Casdoor refresh via the Python backend (POST /v1/auth/refresh, form: refresh_token).
+        guard let url = URL(string: "\(apiBaseURL)v1/auth/refresh") else {
             throw AuthError.invalidURL
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "grant_type=refresh_token&refresh_token=\(refreshToken)".data(using: .utf8)
+        let encoded = refreshToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? refreshToken
+        request.httpBody = "refresh_token=\(encoded)".data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -918,18 +889,11 @@ class AuthService {
         guard httpResponse.statusCode == 200 else {
             let errorBody = String(data: data, encoding: .utf8) ?? "unknown"
             NSLog("OMI AUTH: Token refresh error (HTTP %d): %@", httpResponse.statusCode, errorBody)
-            // Only clear tokens for definitive auth failures (invalid/revoked refresh token).
-            // Transient errors (network issues, 500s) should not destroy the session.
-            let isDefinitiveAuthFailure = errorBody.contains("TOKEN_EXPIRED")
-                || errorBody.contains("INVALID_REFRESH_TOKEN")
-                || errorBody.contains("USER_NOT_FOUND")
-                || errorBody.contains("USER_DISABLED")
-                || httpResponse.statusCode == 400
-            if isDefinitiveAuthFailure {
+            // 401 = refresh token invalid/expired/revoked → definitive auth failure.
+            // Transient errors (network, 5xx) must NOT destroy the session.
+            if httpResponse.statusCode == 401 {
                 NSLog("OMI AUTH: Definitive auth failure - clearing tokens and session")
                 clearTokens()
-                // Also clear auth state so the UI shows sign-in instead of a ghost session
-                // where auth_isSignedIn=true but no valid tokens exist.
                 isSignedIn = false
                 saveAuthState(isSignedIn: false, email: nil, userId: nil)
             }
@@ -937,19 +901,22 @@ class AuthService {
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let newIdToken = json["id_token"] as? String,
-              let newRefreshToken = json["refresh_token"] as? String,
-              let expiresIn = json["expires_in"] as? String else {
+              let newIdToken = json["id_token"] as? String else {
             throw AuthError.invalidResponse
         }
 
-        // Get user ID from response (Firebase returns it as "user_id")
-        // Fall back to existing stored token user ID if not in response
-        let userId = (json["user_id"] as? String) ?? storedTokenUserId ?? ""
+        // Casdoor may or may not rotate the refresh token; keep the old one if absent.
+        let newRefreshToken = (json["refresh_token"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? refreshToken
+        let expiresIn: Int
+        if let n = json["expires_in"] as? Int { expiresIn = n }
+        else if let s = json["expires_in"] as? String, let n = Int(s) { expiresIn = n }
+        else { expiresIn = 3600 }
 
-        // Save new tokens with user ID
-        saveTokens(idToken: newIdToken, refreshToken: newRefreshToken, expiresIn: Int(expiresIn) ?? 3600, userId: userId)
-        NSLog("OMI AUTH: Refreshed ID token successfully for user %@", userId)
+        // uid from the new id_token's sub, falling back to the stored owner.
+        let userId = (decodeJWT(newIdToken)?["sub"] as? String) ?? storedTokenUserId ?? ""
+
+        saveTokens(idToken: newIdToken, refreshToken: newRefreshToken, expiresIn: expiresIn, userId: userId)
+        NSLog("OMI AUTH: Refreshed Casdoor id_token successfully for user %@", userId)
 
         return newIdToken
     }
@@ -999,23 +966,7 @@ class AuthService {
             }
         }
 
-        // Third try: Use Firebase SDK (only if user matches expected user)
-        // This prevents returning a stale user's token during sign-out race conditions
-        if let user = Auth.auth().currentUser {
-            if expectedUserId == nil || user.uid == expectedUserId {
-                if expectedUserId == nil {
-                    // Backfill the missing userId
-                    NSLog("OMI AUTH: expectedUserId is nil, backfilling from Firebase SDK user %@", user.uid)
-                    UserDefaults.standard.set(user.uid, forKey: kAuthUserId)
-                }
-                let tokenResult = try await user.getIDTokenResult(forcingRefresh: forceRefresh)
-                return tokenResult.token
-            } else {
-                NSLog("OMI AUTH: Firebase SDK user mismatch (firebase: %@, expected: %@) - not using",
-                      user.uid, expectedUserId ?? "nil")
-            }
-        }
-
+        // No Firebase fallback: tokens come exclusively from the Casdoor flow above.
         throw AuthError.notSignedIn
     }
 
@@ -1063,7 +1014,7 @@ class AuthService {
             SentrySDK.setUser(nil)
         }
 
-        try Auth.auth().signOut()
+        // Casdoor: no Firebase session to tear down — just drop the local tokens/state below.
         isSignedIn = false
         APIKeyService.shared.clear()
         // Clear saved auth state and tokens
