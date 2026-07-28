@@ -66,3 +66,9 @@ mongodb = "3"
 bson = { version = "2", features = ["chrono-0_4"] }
 
 # Note: Using Firestore REST API directly instead of gcloud-sdk for compatibility
+
+[dev-dependencies]
+# Generate throwaway RSA keypairs in unit tests (sign/verify Casdoor tokens).
+# Already in the lockfile via jsonwebtoken's rust_crypto backend.
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
