@@ -11,12 +11,14 @@ Flow:
   6. App uses that id_token as a Bearer token on all subsequent requests.
 """
 
+import hmac
 import json
 import os
+import re
 import socket
 import uuid
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -83,6 +85,41 @@ def _callback_url() -> str:
     return f"{base}/v1/auth/callback"
 
 
+# Native-app custom schemes the omi clients register, mirroring the allowlist
+# documented in templates/auth_callback.html:
+#   omi://            mobile (Flutter)
+#   omi-computer://   desktop prod ; omi-computer-dev:// desktop dev
+#   omi-<bundle>://   named desktop builds (the "omi-{anything}" convention)
+#   com.omi.app://    reverse-DNS form (RFC 8252-recommended)
+# Matched ASCII-only (RFC 3986 scheme grammar) so look-alike unicode schemes
+# (e.g. cyrillic "оmi") are rejected. http loopback is permitted for the
+# desktop/CLI flow (a localhost server receives the code); https never is
+# (RFC 8252 §7.3).
+_OMI_SCHEME_RE = re.compile(r"^omi(-[a-z0-9]+)*$")
+_ALLOWED_EXACT_SCHEMES = {"com.omi.app"}
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _validate_redirect_uri(redirect_uri: str) -> bool:
+    """Allowlist redirect targets so an auth code can never be delivered to an
+    attacker-controlled URL. Enforced server-side (the template's client-side
+    check is not a security boundary)."""
+    if not redirect_uri or not redirect_uri.strip():
+        return False
+    try:
+        parsed = urlparse(redirect_uri)
+    except ValueError:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    if not scheme:
+        return False
+    if _OMI_SCHEME_RE.match(scheme) or scheme in _ALLOWED_EXACT_SCHEMES:
+        return True
+    if scheme == "http" and (parsed.hostname or "").lower() in _LOOPBACK_HOSTS:
+        return True
+    return False
+
+
 # ── 1. Start sign-in ─────────────────────────────────────────────────────────
 
 
@@ -93,6 +130,9 @@ async def auth_authorize(
     state: Optional[str] = None,
 ):
     """Redirect the user to Casdoor to authenticate."""
+    if not _validate_redirect_uri(redirect_uri):
+        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+
     session_id = str(uuid.uuid4())
     set_auth_session(session_id, {"redirect_uri": redirect_uri, "state": state}, 300)
 
@@ -125,10 +165,14 @@ async def auth_callback(
     if not session_data:
         raise HTTPException(status_code=400, detail="Invalid or expired auth session")
 
+    redirect_uri = session_data.get("redirect_uri") or ""
+
     tokens = _exchange_code_for_tokens(code)
 
     auth_code = str(uuid.uuid4())
-    set_auth_code(auth_code, json.dumps(tokens), 300)
+    # Bind the redirect_uri to the code so /token can verify the redeemer
+    # presents the same value the flow was started with.
+    set_auth_code(auth_code, json.dumps({"tokens": tokens, "redirect_uri": redirect_uri}), 300)
 
     return templates.TemplateResponse(
         "auth_callback.html",
@@ -159,14 +203,28 @@ async def auth_token(
     if grant_type != "authorization_code":
         raise HTTPException(status_code=400, detail="Unsupported grant type")
 
-    tokens_json = get_auth_code(code)
-    if not tokens_json:
+    stored_json = get_auth_code(code)
+    if not stored_json:
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
+    # Single-use: consume the code before any further check so a mismatched or
+    # malformed attempt cannot be retried.
     delete_auth_code(code)
 
     try:
-        tokens = json.loads(tokens_json)
+        stored = json.loads(stored_json)
+        # New format binds redirect_uri; tolerate legacy codes (tokens stored
+        # directly) still in Redis from before this change rolled out.
+        if isinstance(stored, dict) and "tokens" in stored:
+            tokens = stored["tokens"]
+            bound_redirect_uri = stored.get("redirect_uri") or ""
+        else:
+            tokens = stored
+            bound_redirect_uri = None
+
+        if bound_redirect_uri is not None and not hmac.compare_digest(bound_redirect_uri, redirect_uri):
+            raise HTTPException(status_code=400, detail="redirect_uri mismatch")
+
         return {
             "id_token": tokens["id_token"],
             "access_token": tokens.get("access_token"),
@@ -174,6 +232,8 @@ async def auth_token(
             "token_type": "Bearer",
             "expires_in": tokens.get("expires_in", 3600),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error parsing stored tokens: {e}")
         raise HTTPException(status_code=400, detail="Invalid token data")
