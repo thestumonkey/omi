@@ -59,6 +59,7 @@ google-auth-httplib2==0.2.0
 google-cloud-core==2.4.1
 google-cloud-firestore==2.20.0
 google-crc32c==1.5.0
+pymongo==4.8.0  # required by database/mongo_firestore.py (Firestore->Mongo shim)
 google-resumable-media==2.7.1
 googleapis-common-protos==1.63.2
 graphviz==0.20.3
