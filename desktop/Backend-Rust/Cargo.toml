@@ -59,6 +59,12 @@ redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 # GCP authentication (Vertex AI service account tokens)
 gcp_auth = "0.12"
 
+# MongoDB — self-hosted data store (Phase 2 migration off Firestore). Documents
+# follow the same _id/_p/_k path-faithful model as the Python backend's
+# MongoFirestore shim so both backends share one dataset.
+mongodb = "3"
+bson = { version = "2", features = ["chrono-0_4"] }
+
 # Note: Using Firestore REST API directly instead of gcloud-sdk for compatibility
 
 [dev-dependencies]

@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::firestore_shim::{self, ShimRequest, ShimResponse};
+use super::MongoStore;
 use crate::encryption;
 
 use crate::models::{
@@ -85,6 +87,10 @@ pub struct FirestoreService {
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     /// Encryption secret for decrypting user data with enhanced protection level
     encryption_secret: Option<Vec<u8>>,
+    /// Self-hosted MongoDB. Firestore REST calls are transparently served from
+    /// here by the shim (see firestore_shim + build_request), so the upstream
+    /// methods run unchanged and nothing actually talks to Google Firestore.
+    mongo: MongoStore,
 }
 
 impl FirestoreService {
@@ -96,7 +102,16 @@ impl FirestoreService {
         let client = Client::new();
 
         // Load service account credentials from GOOGLE_APPLICATION_CREDENTIALS
+        // (only used now for the GCE Compute API — Firestore is served from Mongo).
         let credentials = Self::load_credentials()?;
+
+        // Self-hosted MongoDB that the shim serves Firestore REST calls from.
+        // `with_uri_str` is lazy, so this succeeds even if Mongo is momentarily
+        // unreachable; the first query surfaces a connection error.
+        let mongo_url = std::env::var("MONGODB_URL").unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
+        let mongo_db = std::env::var("MONGODB_DB").unwrap_or_else(|_| "omi".to_string());
+        let mongo = MongoStore::connect(&mongo_url, &mongo_db).await?;
+        tracing::info!("MongoStore connected (db={}) — Firestore calls served via shim", mongo_db);
 
         let service = Self {
             client,
@@ -104,12 +119,8 @@ impl FirestoreService {
             credentials,
             cached_token: Arc::new(RwLock::new(None)),
             encryption_secret,
+            mongo,
         };
-
-        // Pre-fetch an access token
-        if let Err(e) = service.get_access_token().await {
-            tracing::warn!("Failed to get initial access token: {}", e);
-        }
 
         Ok(service)
     }
@@ -285,15 +296,25 @@ impl FirestoreService {
     }
 
     /// Build request with auth header
-    async fn build_request(&self, method: reqwest::Method, url: &str) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
-        let mut req = self.client.request(method, url);
+    async fn build_request(&self, method: reqwest::Method, url: &str) -> Result<ShimRequest, Box<dyn std::error::Error + Send + Sync>> {
+        // Firestore REST calls are served from MongoDB by the shim — no Google,
+        // no token. Everything else (GCE Compute, Identity Toolkit) hits the real
+        // network with a service-account bearer token.
+        if firestore_shim::is_firestore_url(url) {
+            return Ok(ShimRequest::Mongo {
+                method: method.as_str().to_string(),
+                url: url.to_string(),
+                body: None,
+                mongo: self.mongo.clone(),
+            });
+        }
         let token = self.get_access_token().await?;
-        req = req.bearer_auth(token);
-        Ok(req)
+        let req = self.client.request(method, url).bearer_auth(token);
+        Ok(ShimRequest::Real(req))
     }
 
     /// Build authenticated request for GCE Compute Engine API (public for agent routes)
-    pub async fn build_compute_request(&self, method: reqwest::Method, url: &str) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn build_compute_request(&self, method: reqwest::Method, url: &str) -> Result<ShimRequest, Box<dyn std::error::Error + Send + Sync>> {
         self.build_request(method, url).await
     }
 
@@ -8567,7 +8588,6 @@ impl FirestoreService {
                     .json(&total_query)
                     .send()
                     .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
             },
             async {
                 self.build_request(reqwest::Method::POST, &agg_url)
@@ -8575,11 +8595,10 @@ impl FirestoreService {
                     .json(&completed_query)
                     .send()
                     .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
             }
         );
 
-        let parse_count = |response: reqwest::Response| async move {
+        let parse_count = |response: ShimResponse| async move {
             if !response.status().is_success() {
                 let error_text = response.text().await?;
                 return Err(format!("Firestore aggregation query error: {}", error_text).into());
@@ -10190,5 +10209,89 @@ mod tests {
             }
         });
         assert_eq!(parse_effective_plan_from_doc(&doc), "enterprise");
+    }
+
+    /// End-to-end: drive the upstream FirestoreService methods THROUGH the shim
+    /// (Firestore REST -> MongoDB) against a real Mongo. This is the proof the
+    /// shim approach works without changing any method. Run with
+    /// `MONGO_TEST_URL=mongodb://localhost:27018 cargo test -- --ignored shim_end_to_end_via_methods`.
+    #[tokio::test]
+    #[ignore]
+    async fn shim_end_to_end_via_methods() {
+        let url = std::env::var("MONGO_TEST_URL").expect("set MONGO_TEST_URL");
+        std::env::set_var("MONGODB_URL", &url);
+        std::env::set_var("MONGODB_DB", "omi_e2e_test");
+        let fs = FirestoreService::new("test-project".to_string(), None).await.unwrap();
+        let uid = "u_e2e";
+
+        // Seed a user doc (byok + subscription) directly, as the Python backend would.
+        let seed = crate::services::mongo_store::MongoStore::connect(&url, "omi_e2e_test").await.unwrap();
+        let upath = format!("users/{}", uid);
+        let _ = seed.delete(&upath).await;
+        let future = chrono::Utc::now().timestamp() + 86400;
+        seed.set(
+            &upath,
+            bson::doc! {
+                "byok": {"active": true, "fingerprints": {"openai": "fp1"}},
+                "subscription": {"plan": "unlimited", "current_period_end": future},
+            },
+        )
+        .await
+        .unwrap();
+
+        // byok + subscription read through the unchanged upstream methods (via shim).
+        let byok = fs.get_user_byok_state(uid).await.unwrap();
+        assert!(byok.active);
+        assert_eq!(byok.fingerprints.get("openai").unwrap(), "fp1");
+        assert_eq!(fs.get_user_effective_plan(uid).await.unwrap(), "unlimited");
+
+        // action_items create + query through the methods.
+        let created = fs
+            .create_action_item(uid, "buy milk", None, Some("sentry_feedback"), Some("high"), None, Some("work"), Some(5), None, None, None)
+            .await
+            .unwrap();
+        let items = fs
+            .get_action_items(uid, 50, 0, None, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let found = items.iter().find(|i| i.id == created.id).expect("created item present");
+        assert_eq!(found.description, "buy milk");
+        assert_eq!(found.source.as_deref(), Some("sentry_feedback"));
+        // landed in the shared shim collection with _p set
+        let raw = seed.get(&format!("users/{}/action_items/{}", uid, created.id)).await.unwrap().unwrap();
+        assert_eq!(raw.get_str("_p").unwrap(), format!("users/{}/action_items", uid));
+
+        // llm usage: two increments through record_llm_usage, summed via get_total_llm_cost.
+        let dk = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = seed.delete(&format!("users/{}/llm_usage/{}", uid, dk)).await;
+        fs.record_llm_usage(uid, 10, 5, 0, 0, 15, 0.25, "omi").await.unwrap();
+        fs.record_llm_usage(uid, 20, 7, 0, 0, 27, 0.25, "omi").await.unwrap();
+        let total = fs.get_total_llm_cost(uid).await.unwrap();
+        assert!((total - 0.5).abs() < 1e-9, "total cost was {}", total);
+
+        // agent_vm set/get/delete through the methods.
+        fs.set_agent_vm(uid, "vm-1", "us-central1-a", Some("10.0.0.1"), crate::models::agent::AgentVmStatus::Ready, "tok", "2026-06-08T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(fs.get_agent_vm(uid).await.unwrap().expect("vm").vm_name, "vm-1");
+        fs.delete_agent_vm(uid).await.unwrap();
+        assert!(fs.get_agent_vm(uid).await.unwrap().is_none());
+
+        // desktop_releases create/get/promote through the methods.
+        let rel = crate::routes::updates::ReleaseInfo {
+            version: "1.2.3".to_string(), build_number: 99, download_url: "u".to_string(),
+            ed_signature: "s".to_string(), published_at: "2026-06-08T00:00:00Z".to_string(),
+            changelog: vec!["a".to_string()], is_live: true, is_critical: false, channel: None,
+        };
+        let id = fs.create_desktop_release(&rel).await.unwrap();
+        assert!(fs.get_desktop_releases().await.unwrap().iter().any(|r| r.build_number == 99 && r.version == "1.2.3"));
+        let (o, n) = fs.promote_desktop_release(&id).await.unwrap();
+        assert_eq!((o.as_str(), n.as_str()), ("staging", "beta"));
+
+        // cleanup
+        let _ = seed.delete(&upath).await;
+        let _ = seed.delete(&format!("users/{}/action_items/{}", uid, created.id)).await;
+        let _ = seed.delete(&format!("users/{}/llm_usage/{}", uid, dk)).await;
+        let _ = seed.delete(&format!("desktop_releases/{}", id)).await;
     }
 }
