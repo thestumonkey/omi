@@ -156,6 +156,15 @@ backend/scripts/rag/visualizations/
 backend/google-credentials.json
 backend/google-credentials-dev.json
 
+# Repo-root credential files. Only the backend/ paths were ignored, which is how
+# these got committed to the `charts` branch (985efbba19) with a live OAuth client
+# secret and refresh token. Match them anywhere, not just at the root.
+google-credentials.json
+google-credentials-dev.json
+service-account.json
+**/google-credentials.json
+**/service-account.json
+
 startup-script.sh
 /app/lib/firebase_options_dev.dart
 /app/lib/firebase_options_prod.dart
