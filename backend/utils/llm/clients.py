@@ -50,6 +50,18 @@ _SELF_HOSTED_LLM_URL = os.environ.get('SELF_HOSTED_LLM_URL', '').strip()
 _SELF_HOSTED_LLM_MODEL = os.environ.get('SELF_HOSTED_LLM_MODEL', '').strip() or 'gpt-4.1-mini'
 _SELF_HOSTED_LLM_KEY = os.environ.get('SELF_HOSTED_LLM_KEY', '').strip() or 'sk-local'
 
+# Max simultaneous in-flight requests to the self-hosted LLM.
+#
+# A self-hosted llama.cpp/lemonade backend typically serves with `--parallel 1`: one
+# lane, shared across every model it has loaded. Post-processing fans out four LLM
+# extractions per completed conversation (see process_conversation.py) onto a 24-worker
+# pool, so without a limit a handful of conversations can put a dozen-plus concurrent
+# requests into a server that can only run one. They do not run faster for being
+# submitted together — they queue upstream, holding connections, until callers time out.
+#
+# Set to 0 to disable the limit (appropriate for elastic cloud providers).
+_SELF_HOSTED_LLM_MAX_CONCURRENCY = int(os.environ.get('SELF_HOSTED_LLM_MAX_CONCURRENCY', '1') or '1')
+
 
 class _AnthropicClientProxy:
     """Forwards every attribute to the appropriate anthropic.AsyncAnthropic for the request."""
@@ -515,6 +527,50 @@ def _get_or_create_gemini_llm(model_name: str, streaming: bool = False) -> BaseC
     return _llm_cache[key]
 
 
+_selfhosted_http_client: Optional[httpx.Client] = None
+
+
+def _get_selfhosted_http_client() -> Optional[httpx.Client]:
+    """Shared httpx client that admits only `_SELF_HOSTED_LLM_MAX_CONCURRENCY` requests.
+
+    The connection-pool limit *is* the concurrency limit: httpx blocks a caller until a
+    connection frees up, so surplus requests wait here — in our process, holding no
+    socket and consuming nothing upstream — instead of piling into the LLM server's
+    queue and holding connections open there.
+
+    `pool=None` makes a waiting request wait indefinitely rather than fail. That is
+    deliberate: unlike the desktop assistants, backend post-processing does not
+    regenerate. A shed `_extract_memories` call loses those memories for that
+    conversation permanently, so waiting is strictly better than dropping. The cost is
+    that a deep backlog holds postprocess_executor threads; if that ever starves other
+    work, give `pool` a finite timeout.
+
+    Only the sync client is limited. The async paths (notifications, app_generator,
+    openglass, fair_use_classifier) are low-volume and outside the conversation
+    post-processing hot path, and sharing one httpx.AsyncClient across the several event
+    loops this backend creates risks binding pooled connections to a dead loop.
+    """
+    global _selfhosted_http_client
+    if _SELF_HOSTED_LLM_MAX_CONCURRENCY <= 0:
+        return None
+    if _selfhosted_http_client is None:
+        _selfhosted_http_client = httpx.Client(
+            limits=httpx.Limits(
+                max_connections=_SELF_HOSTED_LLM_MAX_CONCURRENCY,
+                max_keepalive_connections=_SELF_HOSTED_LLM_MAX_CONCURRENCY,
+            ),
+            # Must be set explicitly: supplying our own client bypasses the
+            # `request_timeout` langchain would otherwise apply, and httpx's 5s default
+            # would fail every request that waits for the single connection.
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=None),
+        )
+        logger.info(
+            "self-hosted LLM: limiting to %d concurrent request(s)",
+            _SELF_HOSTED_LLM_MAX_CONCURRENCY,
+        )
+    return _selfhosted_http_client
+
+
 def _get_or_create_selfhosted_llm(streaming: bool = False) -> ChatOpenAI:
     """Single OpenAI-compatible client pointed at a self-hosted LLM (Ollama/lemonade).
 
@@ -531,6 +587,9 @@ def _get_or_create_selfhosted_llm(streaming: bool = False) -> ChatOpenAI:
             'request_timeout': 300,
             'max_retries': 2,
         }
+        http_client = _get_selfhosted_http_client()
+        if http_client is not None:
+            kwargs['http_client'] = http_client
         if streaming:
             kwargs['streaming'] = True
             kwargs['stream_options'] = {"include_usage": True}
