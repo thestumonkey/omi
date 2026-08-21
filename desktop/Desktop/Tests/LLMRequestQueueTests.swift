@@ -145,6 +145,142 @@ final class LLMRequestQueueTests: XCTestCase {
     XCTAssertEqual(stats.queued, 0)
   }
 
+  // MARK: - Admission policy
+
+  /// Interactive work must get in even when the queue is at its depth cap — a human
+  /// is waiting and there is no next tick that would regenerate it.
+  func testInteractiveAdmittedWhenQueueIsFull() async throws {
+    let queue = LLMRequestQueue(maxConcurrent: 1, maxQueueDepth: 3)
+    let occupied = XCTestExpectation(description: "slot occupied")
+    let ran = XCTestExpectation(description: "interactive ran")
+
+    let blocker = Task {
+      try? await queue.run(priority: .background, label: "blocker") {
+        occupied.fulfill()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+      }
+    }
+    await fulfillment(of: [occupied], timeout: 2)
+
+    // Fill the queue to its cap with background work.
+    let bg = (0..<3).map { i in
+      Task { try? await queue.run(priority: .background, label: "bg\(i)") {} }
+    }
+    try await Task.sleep(nanoseconds: 50_000_000)
+    let filled = await queue.stats().queued
+    XCTAssertEqual(filled, 3)
+
+    // Arrives into a full queue — must still be admitted.
+    let interactive = Task {
+      try await queue.run(priority: .interactive, label: "chat") { ran.fulfill() }
+    }
+
+    _ = await blocker.value
+    await fulfillment(of: [ran], timeout: 3)
+    _ = try? await interactive.value
+    for t in bg { _ = await t.value }
+  }
+
+  /// Admitting the newcomer must cost the *stalest* background waiter, not the newest —
+  /// the oldest queued frame is the least valuable one to spend a slot on.
+  func testEvictsStalestBackgroundWaiter() async throws {
+    let queue = LLMRequestQueue(maxConcurrent: 1, maxQueueDepth: 2)
+    let occupied = XCTestExpectation(description: "slot occupied")
+    let probe = ConcurrencyProbe()
+
+    let blocker = Task {
+      try? await queue.run(priority: .background, label: "blocker") {
+        occupied.fulfill()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+      }
+    }
+    await fulfillment(of: [occupied], timeout: 2)
+
+    // "oldest" queues first, so it accrues the longest wait.
+    let oldest = Task {
+      try await queue.run(priority: .background, label: "oldest") {
+        await probe.enter("oldest")
+      }
+    }
+    try await Task.sleep(nanoseconds: 60_000_000)
+    let newer = Task {
+      try await queue.run(priority: .background, label: "newer") {
+        await probe.enter("newer")
+      }
+    }
+    try await Task.sleep(nanoseconds: 60_000_000)
+    let atCap = await queue.stats().queued
+    XCTAssertEqual(atCap, 2, "queue should be at its cap")
+
+    // Third arrival forces an eviction.
+    let freshest = Task {
+      try await queue.run(priority: .background, label: "freshest") {
+        await probe.enter("freshest")
+      }
+    }
+
+    _ = await blocker.value
+    let oldestResult = await oldest.result
+    _ = await newer.result
+    _ = await freshest.result
+
+    // The stalest waiter was shed...
+    switch oldestResult {
+    case .failure(let error):
+      guard case LLMRequestQueue.QueueError.shed = error else {
+        return XCTFail("expected shed, got \(error)")
+      }
+    case .success:
+      XCTFail("stalest waiter should have been evicted")
+    }
+
+    // ...and never ran, while the two fresher requests did.
+    let order = await probe.order
+    XCTAssertFalse(order.contains("oldest"), "evicted waiter must not run")
+    XCTAssertTrue(order.contains("newer"))
+    XCTAssertTrue(order.contains("freshest"))
+    let shed = await queue.stats().shedCount
+    XCTAssertEqual(shed, 1)
+  }
+
+  /// With nothing droppable (every waiter interactive), a background newcomer is
+  /// rejected rather than displacing work a human is waiting on.
+  func testBackgroundRejectedWhenQueueIsAllInteractive() async throws {
+    let queue = LLMRequestQueue(maxConcurrent: 1, maxQueueDepth: 2)
+    let occupied = XCTestExpectation(description: "slot occupied")
+
+    let blocker = Task {
+      try? await queue.run(priority: .background, label: "blocker") {
+        occupied.fulfill()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+      }
+    }
+    await fulfillment(of: [occupied], timeout: 2)
+
+    let interactive = (0..<2).map { i in
+      Task { try? await queue.run(priority: .interactive, label: "chat\(i)") {} }
+    }
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let rejected = Task {
+      try await queue.run(priority: .background, label: "bg") {
+        XCTFail("rejected request must not run")
+      }
+    }
+
+    switch await rejected.result {
+    case .failure(let error):
+      guard case LLMRequestQueue.QueueError.shed = error else {
+        return XCTFail("expected shed, got \(error)")
+      }
+    case .success:
+      XCTFail("background should be rejected when nothing is droppable")
+    }
+
+    _ = await blocker.value
+    for t in interactive { _ = await t.value }
+  }
+
   /// Queue depth must be observable — this is the "representation on the desktop
   /// side" that was missing while requests piled up invisibly.
   func testStatsReportQueueDepth() async throws {

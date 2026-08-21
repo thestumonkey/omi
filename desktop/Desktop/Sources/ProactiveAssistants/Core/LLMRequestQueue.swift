@@ -149,6 +149,14 @@ actor LLMRequestQueue {
 
   /// Decide what happens to an incoming request when the queue is at capacity.
   ///
+  /// Waiters hold no connection — `acquire()` suspends on a continuation and the
+  /// URLSession task is only dispatched once a slot is granted. So queue depth costs
+  /// memory (the pending request bodies) rather than sockets or server resources, and
+  /// `urlRequest.timeoutInterval` does not start ticking while a request waits. Depth
+  /// is therefore cheap. Note the exception: `Task`-level timeouts (e.g. PTT's
+  /// `withTimeout(seconds: 2)`) wrap the whole call and *do* consume queue wait, which
+  /// is why interactive work must overtake rather than merely be queued fairly.
+  ///
   /// This is the policy knob. The trade-offs:
   ///
   /// - **Never shed** (always `.enqueue`) — no work is lost, but the queue grows
@@ -174,16 +182,32 @@ actor LLMRequestQueue {
     incoming: (priority: Priority, label: String),
     queued: [(id: UUID, priority: Priority, label: String, waitedFor: TimeInterval)]
   ) -> Admission {
-    // TODO(stu): implement the admission policy.
-    //
-    // Sketch of one reasonable shape — adjust to taste:
-    //   1. Interactive requests must always get in. If the queue is full, evict the
-    //      oldest background waiter to make room.
-    //   2. A background request arriving into a full queue is the freshest signal
-    //      available, so prefer evicting the oldest background waiter over rejecting it.
-    //   3. If every waiter is interactive, there is nothing safe to evict — reject.
-    //
-    // Return `.enqueue`, `.reject`, or `.evictThenEnqueue(victim: <id>)`.
+    // Whenever something must be dropped it is the *stalest* background waiter: it
+    // holds the oldest screen context, so it is the least valuable frame to spend a
+    // slot analysing. Its accrued wait is sunk cost — what matters is which frame we
+    // actually serve, not who queued first.
+    let stalestBackground = queued
+      .filter { $0.priority == .background }
+      .max { $0.waitedFor < $1.waitedFor }
+
+    // Interactive work is never shed: a human is waiting on it and, unlike a
+    // background assistant, there is no next timer tick that would regenerate it.
+    // It is exempt from the depth cap — safe because interactive requests are
+    // human-rate-limited, not machine-generated.
+    if incoming.priority == .interactive {
+      if let victim = stalestBackground {
+        return .evictThenEnqueue(victim: victim.id)
+      }
+      return .enqueue
+    }
+
+    // Background work: the arriving request carries the freshest screen context, so
+    // admitting it and dropping the stalest peer serves better data than the reverse.
+    if let victim = stalestBackground {
+      return .evictThenEnqueue(victim: victim.id)
+    }
+
+    // Queue is entirely interactive — nothing here is safe to drop.
     return .reject
   }
 
