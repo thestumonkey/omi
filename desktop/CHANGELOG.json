@@ -1,5 +1,7 @@
 {
-  "unreleased": [],
+  "unreleased": [
+    "Fixed background assistants overloading the AI service by queueing requests and spreading them out, so chat and voice stay responsive"
+  ],
   "releases": [
     {
       "version": "0.11.432",

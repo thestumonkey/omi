@@ -36,6 +36,10 @@ actor TaskAssistant: ProactiveAssistant {
 
     /// Always holds the most recent frame for fallback timer use
     private var latestFrame: CapturedFrame?
+    /// True once the fallback timer has been armed at least once, so the startup
+    /// phase offset is applied only to the very first arming.
+    private var didArmFallbackTimer = false
+
     /// Fallback timer that fires after extractionInterval if no context switch occurs
     private var fallbackTimerTask: Task<Void, Never>?
     // Per-(app, normalized-window) timestamp of the last yielded context switch.
@@ -223,15 +227,21 @@ actor TaskAssistant: ProactiveAssistant {
         log("Task assistant stopped")
     }
 
-    /// Start (or restart) the fallback timer that fires after extractionInterval
-    private func startFallbackTimer() {
+    /// Start (or restart) the fallback timer that fires after extractionInterval.
+    /// - Parameter initialDelay: when set, waits this long instead of a full interval.
+    ///   Used once at startup to stagger this extractor's phase (see AssistantPhase);
+    ///   every later re-arm uses the full interval.
+    private func startFallbackTimer(initialDelay: TimeInterval? = nil) {
         fallbackTimerTask?.cancel()
         fallbackTimerTask = Task {
             let interval = await self.extractionInterval
-            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            let delay = initialDelay.map {
+                AssistantPhase.firstRunDelay(offset: $0, interval: interval)
+            } ?? interval
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             guard let frame = self.latestFrame else { return }
-            log("Task: Fallback timer fired after \(Int(interval))s")
+            log("Task: Fallback timer fired after \(Int(delay))s")
             self.triggerContinuation.yield(.timerFallback(frame))
         }
     }
@@ -275,9 +285,11 @@ actor TaskAssistant: ProactiveAssistant {
         // Store as latest frame (used by fallback timer and context switch)
         latestFrame = frame
 
-        // Start fallback timer if not already running
+        // Start fallback timer if not already running. The first arming is phase-offset
+        // so Task doesn't land on top of Memory/Insight; later re-arms use the full interval.
         if fallbackTimerTask == nil {
-            startFallbackTimer()
+            startFallbackTimer(initialDelay: didArmFallbackTimer ? nil : AssistantPhase.task)
+            didArmFallbackTimer = true
         }
 
         // Fast in-app trigger: for messaging apps, arm a ~15s timer keyed to the

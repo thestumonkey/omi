@@ -1224,7 +1224,8 @@ struct OnboardingChatView: View {
 
     // Send to Gemini
     do {
-      let gemini = try GeminiClient()
+      // User is watching the onboarding screen — must not queue behind assistants.
+      let gemini = try GeminiClient(priority: .interactive)
       let prompt =
         "The user needs to grant \(permLabel) permission to the Omi app. Look at the screenshot. Tell them exactly where to click in ONE short sentence, max 15 words."
       let systemPrompt =

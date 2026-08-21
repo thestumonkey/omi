@@ -183,6 +183,11 @@ struct GeminiResponse: Decodable {
 actor GeminiClient {
   private let model: String
 
+  /// Scheduling priority for this client's requests. Background work (proactive
+  /// assistants) yields to interactive work (chat, PTT, onboarding) at the
+  /// LLMRequestQueue gate. See LLMRequestQueue.Priority.
+  private let priority: LLMRequestQueue.Priority
+
   /// Backend proxy base URL (from OMI_DESKTOP_API_URL env var)
   private static var proxyBaseURL: String {
     if let cString = getenv("OMI_DESKTOP_API_URL"), let url = String(validatingUTF8: cString), !url.isEmpty {
@@ -247,7 +252,11 @@ actor GeminiClient {
     }
   }
 
-  init(apiKey: String? = nil, model: String = ModelQoS.Gemini.proactive) throws {
+  init(
+    apiKey: String? = nil,
+    model: String = ModelQoS.Gemini.proactive,
+    priority: LLMRequestQueue.Priority = .background
+  ) throws {
     // BREAKING CHANGE (issue #5861): apiKey parameter is ignored.
     // All Gemini requests now route through the backend proxy which supplies
     // the key server-side. Defaults to production when OMI_DESKTOP_API_URL is absent
@@ -256,6 +265,7 @@ actor GeminiClient {
       throw GeminiClientError.missingAPIKey
     }
     self.model = model
+    self.priority = priority
   }
 
   /// Get Firebase auth header for proxy requests
@@ -388,7 +398,13 @@ actor GeminiClient {
         urlRequest.timeoutInterval = 300
         urlRequest.httpBody = requestBody
 
-        let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+        // Gate the network call only — never the retry backoff below, which
+        // would hold a single-slot permit idle for 2s then 8s.
+        let (data, urlResponse) = try await LLMRequestQueue.shared.run(
+          priority: priority, label: "gemini.image"
+        ) {
+          try await URLSession.shared.data(for: urlRequest)
+        }
         try checkHTTPStatus(urlResponse, data: data)
 
         let response = try JSONDecoder().decode(GeminiResponse.self, from: data)
@@ -462,7 +478,13 @@ actor GeminiClient {
         urlRequest.timeoutInterval = timeout
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+        // Gate the network call only — never the retry backoff below, which
+        // would hold a single-slot permit idle for 2s then 8s.
+        let (data, urlResponse) = try await LLMRequestQueue.shared.run(
+          priority: priority, label: "gemini.text"
+        ) {
+          try await URLSession.shared.data(for: urlRequest)
+        }
         try checkHTTPStatus(urlResponse, data: data)
 
         let response = try JSONDecoder().decode(GeminiResponse.self, from: data)
@@ -533,7 +555,13 @@ actor GeminiClient {
         urlRequest.timeoutInterval = 300
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+        // Gate the network call only — never the retry backoff below, which
+        // would hold a single-slot permit idle for 2s then 8s.
+        let (data, urlResponse) = try await LLMRequestQueue.shared.run(
+          priority: priority, label: "gemini.multipart"
+        ) {
+          try await URLSession.shared.data(for: urlRequest)
+        }
         try checkHTTPStatus(urlResponse, data: data)
 
         let response = try JSONDecoder().decode(GeminiResponse.self, from: data)
@@ -832,7 +860,13 @@ extension GeminiClient {
         urlRequest.timeoutInterval = 300
         urlRequest.httpBody = requestBody
 
-        let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+        // Gate the network call only — never the retry backoff below, which
+        // would hold a single-slot permit idle for 2s then 8s.
+        let (data, urlResponse) = try await LLMRequestQueue.shared.run(
+          priority: priority, label: "gemini.imageToolLoop"
+        ) {
+          try await URLSession.shared.data(for: urlRequest)
+        }
         try checkHTTPStatus(urlResponse, data: data)
 
         let response = try JSONDecoder().decode(GeminiToolResponse.self, from: data)

@@ -83,6 +83,13 @@ actor MemoryAssistant: ProactiveAssistant {
     private func processLoop() async {
         log("Memory assistant started")
 
+        // Stagger startup so Memory/Task/Insight — which share a 600s default
+        // interval — don't fire in lockstep. See AssistantPhase.
+        let startupInterval = await extractionInterval
+        lastAnalysisTime = AssistantPhase.seededLastAnalysisTime(
+            offset: AssistantPhase.memory, interval: startupInterval
+        )
+
         for await _ in frameSignal {
             guard isRunning else { break }
             guard pendingFrame != nil else { continue }
