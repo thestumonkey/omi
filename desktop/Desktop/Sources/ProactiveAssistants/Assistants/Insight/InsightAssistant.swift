@@ -117,6 +117,13 @@ actor InsightAssistant: ProactiveAssistant {
     private func processLoop() async {
         log("Advice assistant started")
 
+        // Stagger startup so Memory/Task/Insight — which share a 600s default
+        // interval — don't fire in lockstep. See AssistantPhase.
+        let startupInterval = await extractionInterval
+        lastAnalysisTime = AssistantPhase.seededLastAnalysisTime(
+            offset: AssistantPhase.insight, interval: startupInterval
+        )
+
         for await _ in frameSignal {
             guard isRunning else { break }
             guard pendingFrame != nil else { continue }
