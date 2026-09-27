@@ -21,7 +21,6 @@ import re
 from typing import Any, Dict, Optional
 
 import httpx
-from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
 
 from utils.llm.usage_tracker import get_usage_callback
@@ -71,7 +70,7 @@ class SelfHostedChatOpenAI(ChatOpenAI):
             payload['response_format'] = {'type': 'json_object'}
         return payload
 
-    def _create_chat_result(self, response: Any, generation_info: Optional[Dict] = None) -> ChatResult:
+    def _create_chat_result(self, response: Any, generation_info: Optional[Dict] = None) -> Any:
         result = super()._create_chat_result(response, generation_info)
         for generation in result.generations:
             content = generation.message.content
@@ -84,7 +83,7 @@ class SelfHostedChatOpenAI(ChatOpenAI):
 
 
 _http_client: Optional[httpx.Client] = None
-_llm_cache: Dict[tuple, SelfHostedChatOpenAI] = {}
+_llm_cache: Dict[tuple, Any] = {}
 
 
 def _get_selfhosted_http_client() -> Optional[httpx.Client]:

@@ -18,7 +18,7 @@ jsonschema==4.23.0
 jsonschema-specifications==2023.12.1
 
 # Google Cloud
-firebase-admin==6.5.0
+# firebase-admin omitted [fork]: backend/firebase_admin/ is a Casdoor/MongoDB shim of it.
 google-cloud-firestore==2.20.0
 google-cloud-storage==2.18.0
 google-cloud-tasks==2.16.4
@@ -97,3 +97,8 @@ langdetect==1.0.9
 
 # Speaker embedding (via speaker_identification -> speaker_embedding -> scipy)
 scipy==1.14.0
+
+# Self-hosted [fork]
+pymongo==4.8.0  # database/mongo_firestore.py
+boto3==1.35.0  # utils/other/minio_storage.py
+PyJWT==2.12.0  # firebase_admin shim: Casdoor token checks (was only pulled in by firebase-admin)

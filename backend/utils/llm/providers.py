@@ -244,9 +244,8 @@ def get_default_client(
 # OpenAI-compatible model (see utils/llm/selfhosted.py). Rebound at the end of
 # the module so `from utils.llm.providers import get_default_client` picks it up
 # and the upstream function above stays byte-identical.
-from utils.llm import selfhosted as _selfhosted  # noqa: E402
-
-if _selfhosted.SELF_HOSTED_LLM_URL:
+if os.environ.get('SELF_HOSTED_LLM_URL', '').strip():
+    from utils.llm import selfhosted as _selfhosted
 
     def get_default_client(
         model: str,

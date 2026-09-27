@@ -12,6 +12,7 @@ Flow:
   6. App uses that id_token as a Bearer token on all subsequent requests.
 """
 
+import functools
 import hmac
 import json
 import os
@@ -21,13 +22,12 @@ import uuid
 from typing import Optional
 from urllib.parse import quote, urlparse
 
-import requests
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 import pathlib
 
-from utils.executors import critical_executor, run_blocking
+from utils.http_client import get_auth_client
 
 from database.redis_db import (
     delete_auth_code,
@@ -50,8 +50,9 @@ def _casdoor_base() -> str:
     return os.environ["CASDOOR_ENDPOINT"].rstrip("/")
 
 
+@functools.lru_cache(maxsize=1)
 def _casdoor_internal_base() -> str:
-    """Internal cluster URL for server-to-server calls.
+    """Internal cluster URL for server-to-server calls. Resolved once per process.
 
     Prefers CASDOOR_INTERNAL_URL (e.g. K8s cluster DNS) when the host is
     resolvable; falls back to the public CASDOOR_ENDPOINT for Docker/Cloud Run
@@ -170,7 +171,7 @@ async def auth_callback(
 
     redirect_uri = session_data.get("redirect_uri") or ""
 
-    tokens = await run_blocking(critical_executor, _exchange_code_for_tokens, code)
+    tokens = await _exchange_code_for_tokens(code)
 
     auth_code = str(uuid.uuid4())
     # Bind the redirect_uri to the code so /token can verify the redeemer
@@ -248,9 +249,7 @@ async def auth_token(
 @router.post("/refresh")
 async def auth_refresh(refresh_token: str = Form(...)):
     """Use a refresh_token to get a new id_token from Casdoor."""
-    # requests is blocking; this is an `async def`, so it must not run on the event
-    # loop. Offloaded to critical_executor, the pool this repo reserves for auth.
-    response = await run_blocking(critical_executor, _post_refresh_token, refresh_token)
+    response = await _post_refresh_token(refresh_token)
     if response.status_code != 200:
         raise HTTPException(status_code=401, detail="Failed to refresh token")
 
@@ -267,9 +266,9 @@ async def auth_refresh(refresh_token: str = Form(...)):
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
 
-def _post_refresh_token(refresh_token: str):
-    """Blocking Casdoor refresh-token POST. Always call via run_blocking."""
-    return requests.post(
+async def _post_refresh_token(refresh_token: str):
+    """Casdoor refresh-token POST on the shared async auth client."""
+    return await get_auth_client().post(
         f"{_casdoor_internal_base()}/api/login/oauth/access_token",
         data={
             "grant_type": "refresh_token",
@@ -281,10 +280,10 @@ def _post_refresh_token(refresh_token: str):
     )
 
 
-def _exchange_code_for_tokens(code: str) -> dict:
+async def _exchange_code_for_tokens(code: str) -> dict:
     """Exchange a Casdoor authorization code for tokens."""
     token_url = f"{_casdoor_internal_base()}/api/login/oauth/access_token"
-    response = requests.post(
+    response = await get_auth_client().post(
         token_url,
         data={
             "grant_type": "authorization_code",

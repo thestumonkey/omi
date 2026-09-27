@@ -389,9 +389,10 @@ def get_users_uid() -> list[str]:
 
 # ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
 # Every Firestore client in this module comes from one of the three builders
-# above, looked up by name when first used. Rebinding them here points the whole
-# data layer at MongoDB through a Firestore-API-compatible client, while the
-# upstream code above stays byte-identical (see database/mongo_firestore.py).
+# above, looked up by name when first used. With MONGODB_URL set, rebinding them
+# here points the whole data layer at MongoDB through a Firestore-API-compatible
+# client, while the upstream code above stays byte-identical (see
+# database/mongo_firestore.py). Without it, upstream's Google clients are used.
 # Kept as a tail block so upstream edits higher in the file merge cleanly.
 _mongo_firestore_client = None
 _mongo_firestore_client_lock = Lock()
@@ -406,12 +407,13 @@ def _build_mongo_firestore_client() -> Any:
                 from database.mongo_firestore import MongoFirestore
 
                 _mongo_firestore_client = MongoFirestore(
-                    os.environ.get('MONGODB_URL', 'mongodb://localhost:27017'),
+                    os.environ['MONGODB_URL'],
                     os.environ.get('MONGODB_DB', 'omi'),
                 )
     return _mongo_firestore_client
 
 
-_build_firestore_client = _build_mongo_firestore_client
-_build_customer_firestore_client = _build_mongo_firestore_client
-_build_data_plane_firestore_client = _build_mongo_firestore_client
+if os.environ.get('MONGODB_URL', '').strip():
+    _build_firestore_client = _build_mongo_firestore_client
+    _build_customer_firestore_client = _build_mongo_firestore_client
+    _build_data_plane_firestore_client = _build_mongo_firestore_client
