@@ -1984,3 +1984,46 @@ def reconcile_basic_plan_with_stripe(uid: str, subscription: Subscription | None
         logger.error(f"[reconcile_basic_plan_with_stripe] Error reconciling Stripe subscription for user {uid}: {e}")
 
     return subscription
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# A self-hosted deployment runs its own LLM and STT at no per-call cost to the
+# operator, so there is nothing to meter: with SELF_HOSTED set, every user gets
+# the same unlimited treatment upstream gives BYOK users. The gates are rebound
+# here, at the end of the module, so both importers and calls inside this
+# module get the bypass while the upstream functions above stay byte-identical.
+# When upstream adds a new gate, add it here.
+IS_SELF_HOSTED = os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+if IS_SELF_HOSTED:
+
+    def is_trial_paywalled(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def is_desktop_trial_paywalled(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def get_chat_quota_snapshot(*_args: Any, **_kwargs: Any) -> dict:
+        return {
+            'plan': PlanType.unlimited,
+            'unit': 'questions',
+            'used': 0.0,
+            'limit': None,
+            'allowed': True,
+            'reset_at': None,
+        }
+
+    def enforce_chat_quota(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def enforce_desktop_chat_quota(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def has_transcription_credits(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    def has_conversation_processing_credits(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    def get_remaining_transcription_seconds(*_args: Any, **_kwargs: Any) -> int | None:
+        return None

@@ -237,3 +237,21 @@ def get_default_client(
     if provider == 'gemini':
         return get_or_create_gemini_llm(model, streaming, thinking_budget=options.get('thinking_budget'))
     return get_or_create_openai_compatible_llm(provider, model, streaming, options)
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# With SELF_HOSTED_LLM_URL set, every default client collapses onto one local
+# OpenAI-compatible model (see utils/llm/selfhosted.py). Rebound at the end of
+# the module so `from utils.llm.providers import get_default_client` picks it up
+# and the upstream function above stays byte-identical.
+from utils.llm import selfhosted as _selfhosted  # noqa: E402
+
+if _selfhosted.SELF_HOSTED_LLM_URL:
+
+    def get_default_client(
+        model: str,
+        provider: str,
+        streaming: bool,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> BaseChatModel:
+        return _selfhosted.get_selfhosted_llm(streaming, options)
