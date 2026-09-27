@@ -8,6 +8,9 @@ build:
     - image: 192.168.1.42:32000/backend-listen
       docker:
         dockerfile: backend/Dockerfile
+        buildArgs:
+          # Upstream's default base lives in a private registry (gcr.io/based-hardware-dev).
+          PYTHON_BASE_IMAGE: python:3.11-slim
       platforms:
         - linux/amd64
       sync:

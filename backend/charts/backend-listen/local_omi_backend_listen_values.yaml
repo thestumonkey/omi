@@ -249,6 +249,34 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: CASDOOR_CLIENT_SECRET
+  # --- Self-hosted mode ---
+  # No Omi-side metering: paywall, chat quota and credit gates return unlimited.
+  - name: SELF_HOSTED
+    value: "true"
+  # Upstream's default streaming chain lists soniox, which fails startup
+  # without SONIOX_API_KEY. Serve from the self-hosted Deepgram instead.
+  - name: STT_SERVICE_MODELS
+    value: "dg-nova-3"
+  # Default LLM clients route here (utils/llm/selfhosted.py). Optional so a
+  # missing key falls back to the cloud providers instead of blocking the pod.
+  - name: SELF_HOSTED_LLM_URL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: SELF_HOSTED_LLM_URL
+        optional: true
+  - name: SELF_HOSTED_LLM_MODEL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: SELF_HOSTED_LLM_MODEL
+        optional: true
+  - name: SELF_HOSTED_LLM_MAX_CONCURRENCY
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: SELF_HOSTED_LLM_MAX_CONCURRENCY
+        optional: true
   # - name: GOOGLE_CLOUD_PROJECT_KEY
   #   valueFrom:
   #     secretKeyRef:

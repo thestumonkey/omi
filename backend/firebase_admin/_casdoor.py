@@ -2,7 +2,7 @@
 
 Needs CASDOOR_ENDPOINT, CASDOOR_CLIENT_ID and CASDOOR_CLIENT_SECRET. Optional:
 CASDOOR_INTERNAL_URL (in-cluster address for server-to-server calls) and
-CASDOOR_ORGANIZATION (owner used when a uid is a bare Casdoor user id).
+CASDOOR_ORG_NAME (owner used when a uid is a bare Casdoor user id).
 """
 
 import os
@@ -36,7 +36,7 @@ def _lookup_params(uid: str) -> Dict[str, str]:
     if "/" in uid:
         return {"id": uid}
     params = {"userId": uid}
-    owner = os.environ.get("CASDOOR_ORGANIZATION", "").strip()
+    owner = os.environ.get("CASDOOR_ORG_NAME", "").strip()
     if owner:
         params["owner"] = owner
     return params
@@ -60,7 +60,7 @@ def get_user(uid: str) -> Optional[Dict[str, Any]]:
 
 def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     params = {**_auth_params(), "email": email}
-    owner = os.environ.get("CASDOOR_ORGANIZATION", "").strip()
+    owner = os.environ.get("CASDOOR_ORG_NAME", "").strip()
     if owner:
         params["owner"] = owner
     resp = requests.get(f"{_base_url()}/api/get-user", params=params, timeout=_TIMEOUT_SECONDS)

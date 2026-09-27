@@ -20,7 +20,7 @@ def casdoor_env(monkeypatch):
     monkeypatch.setenv("CASDOOR_CLIENT_ID", "omi-client")
     monkeypatch.setenv("CASDOOR_CLIENT_SECRET", "secret")
     monkeypatch.delenv("CASDOOR_INTERNAL_URL", raising=False)
-    monkeypatch.delenv("CASDOOR_ORGANIZATION", raising=False)
+    monkeypatch.delenv("CASDOOR_ORG_NAME", raising=False)
 
 
 def _token(**claims):
@@ -107,7 +107,7 @@ class TestUserRecords:
         assert user.user_metadata.creation_timestamp == 1767323045000
 
     def test_bare_user_id_uses_user_id_lookup(self, monkeypatch):
-        monkeypatch.setenv("CASDOOR_ORGANIZATION", "omi")
+        monkeypatch.setenv("CASDOOR_ORG_NAME", "omi")
         with patch("firebase_admin._casdoor.requests.get", return_value=_casdoor_response({"name": "a"})) as get:
             auth.get_user("7c9e6679-7425-40de-944b-e07fc1f90ae7")
         params = get.call_args.kwargs["params"]
