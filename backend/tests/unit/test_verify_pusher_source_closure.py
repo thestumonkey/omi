@@ -33,6 +33,7 @@ def test_source_closure_includes_all_dockerfile_copy_dirs() -> None:
         [
             "backend/config/",
             "backend/database/",
+            "backend/firebase_admin/",  # [fork-only] self-hosted SDK shim
             "backend/models/",
             "backend/routers/",
             "backend/services/",
@@ -60,6 +61,7 @@ def test_source_closure_cli_output_includes_chart_dir() -> None:
     for expected in [
         "backend/config/",
         "backend/database/",
+        "backend/firebase_admin/",  # [fork-only] self-hosted SDK shim
         "backend/models/",
         "backend/routers/",
         "backend/services/",

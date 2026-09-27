@@ -9,6 +9,7 @@ on:
     paths:
       - 'backend/config/**'
       - 'backend/database/**'
+      - 'backend/firebase_admin/**'
       - 'backend/models/**'
       - 'backend/routers/**'
       - 'backend/services/**'
