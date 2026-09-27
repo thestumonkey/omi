@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-minio
+  labels:
+    app: {{ .Release.Name }}-minio
+spec:
+  # ClusterIP — the omi backend reaches this at
+  #   S3_ENDPOINT_URL=http://{{ .Release.Name }}-minio:{{ .Values.service.apiPort }}
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-minio
+  ports:
+    - name: api
+      port: {{ .Values.service.apiPort }}
+      targetPort: api
+    - name: console
+      port: {{ .Values.service.consolePort }}
+      targetPort: console

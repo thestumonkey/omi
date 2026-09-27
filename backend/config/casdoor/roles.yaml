@@ -1,0 +1,7 @@
+# Casdoor Role Definitions
+# Apply with: just casdoor-setup
+
+roles:
+  - name: omi-admin
+    displayName: "Omi Admin"
+    description: "Full access to Omi backend"

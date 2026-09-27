@@ -265,3 +265,20 @@ def local_public_url(bucket_name: str | None, blob_name: str) -> str | None:
         return None
     client = LocalStorageClient.from_env()
     return client.bucket(bucket_name).blob(blob_name).public_url if client is not None else None
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# Every storage client comes from create_storage_client(). When an S3 endpoint
+# is configured (MinIO in self-hosted), return an S3-backed client with the same
+# bucket/blob API instead of Google Cloud Storage. Rebound at the end of the
+# module so importers (`from ... import create_storage_client`) pick it up and
+# the upstream function above stays byte-identical.
+_upstream_create_storage_client = create_storage_client
+
+
+def create_storage_client():
+    if os.environ.get('S3_ENDPOINT_URL', '').strip():
+        from utils.other.minio_storage import MinioStorageClient
+
+        return MinioStorageClient()
+    return _upstream_create_storage_client()
