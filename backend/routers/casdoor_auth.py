@@ -28,6 +28,7 @@ from fastapi.templating import Jinja2Templates
 import pathlib
 
 from utils.http_client import get_auth_client
+from routers.auth import _build_callback_redirect_url
 
 from database.redis_db import (
     delete_auth_code,
@@ -184,11 +185,11 @@ async def auth_callback(
             "request": request,
             "code": auth_code,
             "state": session_data.get("state") or "",
-            # Thread the session's redirect_uri through so the callback page returns
-            # to the originating app's scheme (e.g. omi-computer-dev://, omi-<bundle>://).
-            # Without this the template falls back to the omi:// default, which only
-            # the mobile app registers — breaking every desktop named bundle.
-            "redirect_uri": session_data.get("redirect_uri"),
+            # The page navigates to redirect_url: the app's own scheme (omi://,
+            # omi-computer-dev://, ...) with code and state appended. Built by
+            # upstream's helper so the page and our router stay in step.
+            "redirect_uri": redirect_uri,
+            "redirect_url": _build_callback_redirect_url(redirect_uri, auth_code, session_data.get("state")),
         },
     )
 

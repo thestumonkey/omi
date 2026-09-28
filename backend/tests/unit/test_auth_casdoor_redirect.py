@@ -190,3 +190,37 @@ class TestAuthCodeBinding:
                 )
             )
         assert exc.value.status_code == 400
+
+
+# ── Callback page: hands the app a complete redirect_url ─────────────────────
+
+
+class TestCallbackPage:
+    def _render(self, app_redirect_uri: str) -> str:
+        from starlette.requests import Request
+
+        from routers import casdoor_auth
+
+        async def _tokens(_code):
+            return {"id_token": "t"}
+
+        request = Request(
+            {"type": "http", "method": "GET", "path": "/v1/auth/callback", "headers": [], "query_string": b""}
+        )
+        with patch.object(
+            casdoor_auth, "get_auth_session", return_value={"redirect_uri": app_redirect_uri, "state": "app-state"}
+        ), patch.object(casdoor_auth, "_exchange_code_for_tokens", _tokens), patch.object(
+            casdoor_auth, "set_auth_code"
+        ):
+            response = _run(casdoor_auth.auth_callback(request, code="casdoor-code", state="session-1"))
+        return response.body.decode()
+
+    def test_page_gets_app_link_with_code_and_state(self):
+        # The page refuses to navigate ("Invalid redirect target") when redirect_url is empty.
+        html = self._render("omi-computer-dev://auth/callback")
+        assert '"omi-computer-dev://auth/callback?code=' in html
+        assert "state=app-state" in html
+
+    def test_existing_query_on_app_link_is_kept(self):
+        html = self._render("omi://auth/callback?flow=signin")
+        assert "omi://auth/callback?flow=signin\\u0026code=" in html or "omi://auth/callback?flow=signin&code=" in html
