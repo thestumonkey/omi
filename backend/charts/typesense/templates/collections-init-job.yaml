@@ -1,0 +1,55 @@
+# Creates the collections the app queries but never creates itself. The memory
+# keyword collection is created by the app on first use, so only
+# "conversations" is here. files/conversations.schema is a copy of
+# backend/typesense/conversations.schema (helm cannot read outside the chart).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: typesense-schemas
+data:
+  conversations.schema: |-
+{{ .Files.Get "files/conversations.schema" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: typesense-collections-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: curlimages/curl:8.10.1
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.apiKeyKey }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              base=http://typesense:{{ .Values.service.port }}
+              until curl -sf "$base/health" >/dev/null; do echo "waiting for typesense..."; sleep 3; done
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-TYPESENSE-API-KEY: $API_KEY" "$base/collections/conversations")
+              if [ "$code" = "404" ]; then
+                curl -sf -X POST -H "X-TYPESENSE-API-KEY: $API_KEY" -H 'Content-Type: application/json' \
+                  --data @/schemas/conversations.schema "$base/collections"
+                echo; echo "created collection conversations"
+              else
+                echo "collection conversations: HTTP $code (not creating)"
+              fi
+          volumeMounts:
+            - name: schemas
+              mountPath: /schemas
+      volumes:
+        - name: schemas
+          configMap:
+            name: typesense-schemas

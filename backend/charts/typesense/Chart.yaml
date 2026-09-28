@@ -1,0 +1,6 @@
+apiVersion: v2
+name: typesense
+description: Self-hosted Typesense search for the omi backend (conversation search + memory keyword index) [fork-only]
+type: application
+version: 0.1.0
+appVersion: "27.1"

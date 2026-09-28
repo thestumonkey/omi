@@ -1,0 +1,27 @@
+# Same major version upstream pins for its own Typesense (27.1).
+image:
+  repository: typesense/typesense
+  tag: "27.1"
+
+storage:
+  size: 5Gi
+  storageClassName: ""
+
+# Port the Service exposes; the app reads it as TYPESENSE_HOST_PORT.
+service:
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+nodeSelector: {}
+
+# Admin API key comes from the backend secret the app already reads as
+# TYPESENSE_API_KEY, so server and clients share one source.
+auth:
+  existingSecret: dev-omi-backend-secrets
+  apiKeyKey: TYPESENSE_API_KEY

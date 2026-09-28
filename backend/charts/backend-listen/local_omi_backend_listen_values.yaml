@@ -128,6 +128,13 @@ env:
       configMapKeyRef:
         name: omi-backend-config
         key: TYPESENSE_HOST_PORT
+  # Typesense runs in-cluster over plain http (charts/typesense); the client defaults to https.
+  - name: TYPESENSE_PROTOCOL
+    valueFrom:
+      configMapKeyRef:
+        name: omi-backend-config
+        key: TYPESENSE_PROTOCOL
+        optional: true
   # HOSTED_PUSHER_API_URL: not set — backend uses local processing fallback
   - name: HOSTED_VAD_API_URL
     valueFrom:

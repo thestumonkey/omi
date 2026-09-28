@@ -1,0 +1,3 @@
+storage:
+  size: 5Gi
+  storageClassName: longhorn
