@@ -7,7 +7,7 @@ replicaCount: 1
 
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
-  repository: 192.168.1.43:5000/backend-listen
+  repository: 192.168.1.42:32000/backend-listen
   tag: "local"
   pullPolicy: Always
 
@@ -253,8 +253,20 @@ env:
   # No Omi-side metering: paywall, chat quota and credit gates return unlimited.
   - name: SELF_HOSTED
     value: "true"
+  # Upstream's canonical memory intake; the pusher refuses to start without it.
+  - name: MEMORY_ENABLED
+    value: "on"
+  - name: MEMORY_V3_CURSOR_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: MEMORY_V3_CURSOR_SECRET
+  # Pusher subservice (deployed from the same image; see pusher Deployment).
+  - name: HOSTED_PUSHER_API_URL
+    value: "http://pusher.omi:8080"
   # Upstream's default streaming chain lists soniox, which fails startup
-  # without SONIOX_API_KEY. Serve from the self-hosted Deepgram instead.
+  # without SONIOX_API_KEY. Serve from Deepgram (cloud or self-hosted, per
+  # DEEPGRAM_SELF_HOSTED_ENABLED) instead.
   - name: STT_SERVICE_MODELS
     value: "dg-nova-3"
   # Default LLM clients route here (utils/llm/selfhosted.py). Optional so a
@@ -430,7 +442,7 @@ volumeMounts: []
 #   readOnly: true
 
 nodeSelector:
-  kubernetes.io/hostname: anubis
+  kubernetes.io/hostname: erebus
 
 tolerations: []
 
