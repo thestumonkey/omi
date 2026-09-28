@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pymongo import ASCENDING, DESCENDING, MongoClient
-from pymongo.errors import ConfigurationError, InvalidOperation, OperationFailure
+from pymongo.errors import ConfigurationError, DuplicateKeyError, InvalidOperation, OperationFailure
 
 # The one exception google's @firestore.transactional retries. Raising it from
 # Transaction._commit lets upstream's retry semantics work over Mongo unchanged.
@@ -204,6 +204,22 @@ class DocumentReference:
             doc.update(spec.get('$set', {}))
             self._mc().replace_one({'_id': self.path}, doc, upsert=True, session=s)
 
+    def create(self, data: dict, transaction=None):
+        """Write a new document; fail with Conflict (409) if it already exists, like Firestore."""
+        spec = _split_transforms(data)
+        doc = {'_id': self.path, '_p': self._parent, '_k': self.id}
+        doc.update(spec.pop('$set', {}))
+        s = self._session(transaction)
+        try:
+            self._mc().insert_one(doc, session=s)
+        except DuplicateKeyError as e:
+            from google.api_core.exceptions import Conflict
+
+            raise Conflict(f'Document already exists: {self.path}') from e
+        if spec:
+            # Transforms (Increment, ArrayUnion, ...) apply on top of the new document.
+            self._mc().update_one({'_id': self.path}, spec, session=s)
+
     def update(self, data: dict, transaction=None):
         spec = _split_transforms(data)
         spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id})
@@ -377,6 +393,9 @@ class WriteBatch:
     def set(self, ref, data, merge: bool = False):
         self._ops.append(('set', ref, data, merge))
 
+    def create(self, ref, data):
+        self._ops.append(('create', ref, data, None))
+
     def update(self, ref, data):
         self._ops.append(('update', ref, data, None))
 
@@ -387,6 +406,8 @@ class WriteBatch:
         for kind, ref, data, merge in self._ops:
             if kind == 'set':
                 ref.set(data, merge=merge)
+            elif kind == 'create':
+                ref.create(data)
             elif kind == 'update':
                 ref.update(data)
             elif kind == 'delete':
@@ -426,6 +447,9 @@ class Transaction:
     # buffered write API
     def set(self, ref, data, merge: bool = False):
         self._writes.append(lambda: ref.set(data, merge=merge, transaction=self))
+
+    def create(self, ref, data):
+        self._writes.append(lambda: ref.create(data, transaction=self))
 
     def update(self, ref, data):
         self._writes.append(lambda: ref.update(data, transaction=self))
