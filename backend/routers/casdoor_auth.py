@@ -12,7 +12,9 @@ Flow:
   6. App uses that id_token as a Bearer token on all subsequent requests.
 """
 
+import base64
 import functools
+import hashlib
 import hmac
 import json
 import os
@@ -23,10 +25,12 @@ from typing import Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import pathlib
 
+from firebase_admin import auth as firebase_auth
+from utils.executors import critical_executor, run_blocking
 from utils.http_client import get_auth_client
 from routers.auth import _build_callback_redirect_url
 
@@ -133,13 +137,24 @@ async def auth_authorize(
     request: Request,
     redirect_uri: str,
     state: Optional[str] = None,
+    provider: Optional[str] = None,
+    code_challenge: Optional[str] = None,
+    code_challenge_method: Optional[str] = None,
 ):
-    """Redirect the user to Casdoor to authenticate."""
+    """Redirect the user to Casdoor to authenticate.
+
+    ``provider`` (google/apple from upstream's sign-in buttons) is accepted and
+    ignored: Casdoor shows its own provider choice. A PKCE ``code_challenge``
+    (S256 only) binds the eventual /token call to the app that started the flow.
+    """
+    del provider
     if not _validate_redirect_uri(redirect_uri):
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+    if code_challenge and (code_challenge_method or "").upper() != "S256":
+        raise HTTPException(status_code=400, detail="Unsupported code_challenge_method")
 
     session_id = str(uuid.uuid4())
-    set_auth_session(session_id, {"redirect_uri": redirect_uri, "state": state}, 300)
+    set_auth_session(session_id, {"redirect_uri": redirect_uri, "state": state, "code_challenge": code_challenge}, 300)
 
     auth_url = (
         f"{_casdoor_base()}/login/oauth/authorize?"
@@ -177,7 +192,13 @@ async def auth_callback(
     auth_code = str(uuid.uuid4())
     # Bind the redirect_uri to the code so /token can verify the redeemer
     # presents the same value the flow was started with.
-    set_auth_code(auth_code, json.dumps({"tokens": tokens, "redirect_uri": redirect_uri}), 300)
+    set_auth_code(
+        auth_code,
+        json.dumps(
+            {"tokens": tokens, "redirect_uri": redirect_uri, "code_challenge": session_data.get("code_challenge")}
+        ),
+        300,
+    )
 
     return templates.TemplateResponse(
         "auth_callback.html",
@@ -203,10 +224,20 @@ async def auth_token(
     grant_type: str = Form(...),
     code: str = Form(...),
     redirect_uri: str = Form(...),
+    code_verifier: Optional[str] = Form(None),
+    use_custom_token: Optional[str] = Form(None),
 ):
-    """Exchange a short-lived auth code for the Casdoor id_token."""
+    """Exchange a short-lived auth code for the Casdoor id_token.
+
+    With ``use_custom_token`` (upstream's desktop app), the response also carries
+    a one-time ``custom_token`` that the app redeems at the Firebase REST
+    stand-in below (``accounts:signInWithCustomToken``) for the same tokens.
+    """
     if grant_type != "authorization_code":
         raise HTTPException(status_code=400, detail="Unsupported grant type")
+    # Direct (non-HTTP) callers leave the optional fields as FastAPI Form markers.
+    code_verifier = code_verifier if isinstance(code_verifier, str) else None
+    use_custom_token = use_custom_token if isinstance(use_custom_token, str) else None
 
     stored_json = get_auth_code(code)
     if not stored_json:
@@ -223,20 +254,27 @@ async def auth_token(
         if isinstance(stored, dict) and "tokens" in stored:
             tokens = stored["tokens"]
             bound_redirect_uri = stored.get("redirect_uri") or ""
+            code_challenge = stored.get("code_challenge")
         else:
             tokens = stored
             bound_redirect_uri = None
+            code_challenge = None
 
         if bound_redirect_uri is not None and not hmac.compare_digest(bound_redirect_uri, redirect_uri):
             raise HTTPException(status_code=400, detail="redirect_uri mismatch")
+        if code_challenge and not _pkce_matches(code_verifier, code_challenge):
+            raise HTTPException(status_code=400, detail="code_verifier mismatch")
 
-        return {
+        response = {
             "id_token": tokens["id_token"],
             "access_token": tokens.get("access_token"),
             "refresh_token": tokens.get("refresh_token"),
             "token_type": "Bearer",
             "expires_in": tokens.get("expires_in", 3600),
         }
+        if (use_custom_token or "").lower() in ("1", "true", "yes"):
+            response["custom_token"] = _mint_custom_token(tokens)
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -262,6 +300,36 @@ async def auth_refresh(refresh_token: str = Form(...)):
         "token_type": "Bearer",
         "expires_in": tokens.get("expires_in", 3600),
     }
+
+
+_CUSTOM_TOKEN_PREFIX = "casdoor-ct."
+
+
+def _pkce_matches(code_verifier: Optional[str], code_challenge: str) -> bool:
+    """RFC 7636 S256: base64url(sha256(verifier)) without padding == challenge."""
+    if not code_verifier:
+        return False
+    digest = hashlib.sha256(code_verifier.encode("ascii", errors="ignore")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return hmac.compare_digest(expected, code_challenge)
+
+
+def _mint_custom_token(tokens: dict) -> str:
+    """One-time, short-lived handle for the tokens; redeemed by signInWithCustomToken."""
+    handle = f"ct_{uuid.uuid4().hex}"
+    set_auth_code(handle, json.dumps(tokens), 300)
+    return _CUSTOM_TOKEN_PREFIX + handle
+
+
+def _redeem_custom_token(custom_token: str) -> Optional[dict]:
+    if not custom_token or not custom_token.startswith(_CUSTOM_TOKEN_PREFIX):
+        return None
+    handle = custom_token[len(_CUSTOM_TOKEN_PREFIX) :]
+    stored = get_auth_code(handle)
+    if not stored:
+        return None
+    delete_auth_code(handle)
+    return json.loads(stored)
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -300,3 +368,71 @@ async def _exchange_code_for_tokens(code: str) -> dict:
         raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
 
     return response.json()
+
+
+# ── Firebase REST stand-in (for upstream's desktop app) ──────────────────────
+#
+# Upstream's macOS app finishes sign-in against Google's Firebase REST API:
+# it redeems the custom_token from /v1/auth/token at identitytoolkit
+# (accounts:signInWithCustomToken) and refreshes at securetoken. With
+# OMI_FIREBASE_REST_BASE_URL pointing at this backend, those calls land here
+# instead and are answered from Casdoor, in Firebase's response format.
+
+firebase_rest_router = APIRouter(tags=["authentication"])
+
+
+def _firebase_error(status_code: int, message: str) -> JSONResponse:
+    # Firebase REST error envelope; the app keys session death off `message`.
+    return JSONResponse(status_code=status_code, content={"error": {"code": status_code, "message": message}})
+
+
+@firebase_rest_router.post("/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken")
+async def firebase_sign_in_with_custom_token(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _firebase_error(400, "INVALID_CUSTOM_TOKEN")
+    tokens = _redeem_custom_token(str((body or {}).get("token") or ""))
+    if not tokens or not tokens.get("id_token"):
+        return _firebase_error(400, "INVALID_CUSTOM_TOKEN")
+    try:
+        claims = await run_blocking(critical_executor, firebase_auth.verify_id_token, tokens["id_token"])
+    except firebase_auth.InvalidIdTokenError:
+        return _firebase_error(400, "INVALID_CUSTOM_TOKEN")
+    return {
+        "kind": "identitytoolkit#VerifyCustomTokenResponse",
+        "idToken": tokens["id_token"],
+        "refreshToken": tokens.get("refresh_token") or "",
+        "expiresIn": str(tokens.get("expires_in", 3600)),
+        "localId": claims["uid"],
+        "isNewUser": False,
+    }
+
+
+@firebase_rest_router.post("/securetoken.googleapis.com/v1/token")
+async def firebase_refresh_token(grant_type: str = Form(...), refresh_token: str = Form(...)):
+    if grant_type != "refresh_token":
+        return _firebase_error(400, "INVALID_GRANT_TYPE")
+    try:
+        response = await _post_refresh_token(refresh_token)
+    except Exception:
+        # Casdoor unreachable: not a session death, the app retries later.
+        return _firebase_error(503, "UNAVAILABLE")
+    tokens = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    if response.status_code >= 500:
+        return _firebase_error(503, "UNAVAILABLE")
+    if response.status_code != 200 or not tokens.get("id_token") or tokens.get("error"):
+        return _firebase_error(400, "INVALID_REFRESH_TOKEN")
+    try:
+        claims = await run_blocking(critical_executor, firebase_auth.verify_id_token, tokens["id_token"])
+    except firebase_auth.InvalidIdTokenError:
+        return _firebase_error(400, "INVALID_REFRESH_TOKEN")
+    return {
+        "access_token": tokens.get("access_token") or tokens["id_token"],
+        "expires_in": str(tokens.get("expires_in", 3600)),
+        "token_type": "Bearer",
+        "refresh_token": tokens.get("refresh_token") or refresh_token,
+        "id_token": tokens["id_token"],
+        "user_id": claims["uid"],
+        "project_id": "selfhosted",
+    }
