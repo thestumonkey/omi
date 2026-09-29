@@ -15,6 +15,7 @@ Settings:
 Embeddings are not affected.
 """
 
+import json
 import logging
 import os
 import re
@@ -145,3 +146,110 @@ def get_selfhosted_llm(streaming: bool = False, options: Optional[Dict[str, Any]
             kwargs['stream_options'] = {'include_usage': True}
         _llm_cache[key] = SelfHostedChatOpenAI(model=_SELF_HOSTED_LLM_MODEL, **kwargs)
     return _llm_cache[key]
+
+
+# ── Omi LLM gateway stand-in (desktop backend) ───────────────────────────────
+#
+# The desktop backend's managed LLM traffic (Gemini proxy, desktop chat,
+# proactivity) already speaks OpenAI chat to the internal "LLM gateway", after
+# upstream's own Gemini<->OpenAI translation. Pointing that gateway client at the
+# self-hosted server needs only a request rewrite: the gateway's lane ids
+# ("omi:auto:...") become the local model name, gateway-only fields are dropped,
+# and embeddings go to the embedding server. Wired in by the tail block of
+# utils/http_client.py (get_llm_gateway_client) when SELF_HOSTED_LLM_URL is set.
+#
+#   SELF_HOSTED_EMBED_URL    OpenAI-compatible embeddings base, including /v1
+#                            (default: SELF_HOSTED_LLM_URL)
+#   SELF_HOSTED_EMBED_MODEL  embedding model name (default nomic-embed-text)
+
+_SELF_HOSTED_EMBED_URL = os.environ.get('SELF_HOSTED_EMBED_URL', '').strip()
+_SELF_HOSTED_EMBED_MODEL = os.environ.get('SELF_HOSTED_EMBED_MODEL', '').strip() or 'nomic-embed-text'
+
+# Keys the OpenAI chat/embeddings API defines; anything else the gateway
+# understood (google, metadata, prompt_cache_options, ...) is dropped.
+_OPENAI_CHAT_KEYS = frozenset(
+    {
+        'messages',
+        'model',
+        'stream',
+        'stream_options',
+        'temperature',
+        'top_p',
+        'max_tokens',
+        'max_completion_tokens',
+        'stop',
+        'tools',
+        'tool_choice',
+        'parallel_tool_calls',
+        'response_format',
+        'n',
+        'presence_penalty',
+        'frequency_penalty',
+        'seed',
+        'logit_bias',
+        'user',
+    }
+)
+_OPENAI_EMBED_KEYS = frozenset({'input', 'model', 'dimensions', 'encoding_format', 'user'})
+
+
+def _join(base: str, suffix: str) -> str:
+    return base.rstrip('/') + '/' + suffix.lstrip('/')
+
+
+def rewrite_gateway_request(path: str, body: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """Map one gateway request (path under /v1, JSON body) onto the self-hosted servers.
+
+    Returns the absolute target URL and the body to send.
+    """
+    if path.endswith('/embeddings'):
+        payload = {k: v for k, v in body.items() if k in _OPENAI_EMBED_KEYS}
+        payload['model'] = _SELF_HOSTED_EMBED_MODEL
+        # Local embedding models have a fixed width; the OpenAI `dimensions`
+        # knob is not honoured by them and some servers reject it.
+        payload.pop('dimensions', None)
+        return _join(_SELF_HOSTED_EMBED_URL or SELF_HOSTED_LLM_URL, 'embeddings'), payload
+    payload = {k: v for k, v in body.items() if k in _OPENAI_CHAT_KEYS}
+    payload['model'] = _SELF_HOSTED_LLM_MODEL
+    return _join(SELF_HOSTED_LLM_URL, path.split('/v1', 1)[-1] or 'chat/completions'), payload
+
+
+class _SelfHostedGatewayTransport(httpx.AsyncBaseTransport):
+    def __init__(self, inner: httpx.AsyncBaseTransport):
+        self._inner = inner
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == 'POST' and ('/chat/completions' in path or '/embeddings' in path):
+            body = json.loads((await request.aread()) or b'{}')
+            target, payload = rewrite_gateway_request(path, body)
+            headers = {
+                k: v
+                for k, v in request.headers.items()
+                if k.lower() not in ('host', 'content-length', 'authorization') and not k.lower().startswith('x-omi')
+            }
+            headers['authorization'] = f'Bearer {_SELF_HOSTED_LLM_KEY}'
+            request = httpx.Request(
+                'POST', target, headers=headers, content=json.dumps(payload).encode(), extensions=request.extensions
+            )
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def make_gateway_client() -> httpx.AsyncClient:
+    """AsyncClient that serves gateway calls from the self-hosted servers.
+
+    Timeouts are set here because callers pass none (the gateway client's own
+    are 20s, too short for a local model). ``pool=None`` queues requests beyond
+    the concurrency cap instead of failing them.
+    """
+    limit = _SELF_HOSTED_LLM_MAX_CONCURRENCY if _SELF_HOSTED_LLM_MAX_CONCURRENCY > 0 else 24
+    inner = httpx.AsyncHTTPTransport(
+        limits=httpx.Limits(max_connections=limit, max_keepalive_connections=limit),
+    )
+    return httpx.AsyncClient(
+        transport=_SelfHostedGatewayTransport(inner),
+        timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=None),
+    )

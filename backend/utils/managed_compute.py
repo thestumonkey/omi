@@ -480,3 +480,32 @@ def managed_compute_decision_for(uid: str) -> Callable[[str], Decision]:
         return authorize_managed_compute(uid, feature, owner)
 
     return decision_for
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# Self-hosted compute has no per-call cost to the operator (see the matching
+# block at the end of utils/subscription.py): with SELF_HOSTED set, every
+# managed-compute request is allowed. Rebound at the end of the module so
+# importers and in-module callers get it; the upstream function stays intact.
+import os as _os  # noqa: E402
+
+if _os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+
+    def authorize_managed_compute(
+        uid: str | None,
+        feature: str,
+        funding_owner: str,
+        *,
+        subscription: Any = _UNRESOLVED,
+        byok_active: Any = _UNRESOLVED,
+    ) -> Decision:
+        decision = _decision(
+            allowed=True,
+            reason='self_hosted',
+            feature=feature,
+            funding_owner=funding_owner,
+            plan=None,
+            plan_resolved=False,
+        )
+        _emit_managed_compute_decision(decision)
+        return decision

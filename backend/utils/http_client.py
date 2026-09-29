@@ -587,3 +587,18 @@ async def close_all_clients():
     _webhook_circuit_breakers.clear()
     _latest_wins_versions.clear()
     _latest_wins_last_seen.clear()
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# With SELF_HOSTED_LLM_URL set, the "LLM gateway" client serves every gateway
+# call from the self-hosted LLM and embedding servers (see
+# utils/llm/selfhosted.py). Rebound at the end of the module so importers pick
+# it up and the upstream function above stays byte-identical.
+import os as _os  # noqa: E402
+
+if _os.environ.get('SELF_HOSTED_LLM_URL', '').strip():
+
+    def get_llm_gateway_client() -> httpx.AsyncClient:
+        from utils.llm import selfhosted
+
+        return _get_client('llm_gateway_selfhosted', selfhosted.make_gateway_client)
