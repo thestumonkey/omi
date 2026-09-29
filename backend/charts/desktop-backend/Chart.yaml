@@ -1,0 +1,9 @@
+apiVersion: v2
+name: desktop-backend
+description: Omi desktop backend (upstream backend/desktop_backend.py) for self-hosting [fork-only; upstream deleted its Rust chart]
+
+type: application
+
+version: 0.1.0
+
+appVersion: "0.1.0"

@@ -1,0 +1,82 @@
+# Self-hosted desktop backend (upstream backend/desktop_backend.py), deployed
+# alongside the legacy Rust desktop-backend release until the new macOS app
+# replaces the old one. Release name: desktop-backend-py.
+image:
+  repository: 192.168.1.42:32000/desktop-backend-py
+  tag: local
+  pullPolicy: Always
+
+strategy:
+  type: Recreate
+
+nodeSelector:
+  kubernetes.io/hostname: erebus
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+livenessProbe:
+  httpGet: {path: /health, port: 8080}
+  initialDelaySeconds: 10
+  periodSeconds: 30
+readinessProbe:
+  httpGet: {path: /health, port: 8080}
+  initialDelaySeconds: 5
+  periodSeconds: 10
+startupProbe:
+  httpGet: {path: /health, port: 8080}
+  periodSeconds: 10
+  failureThreshold: 30
+
+tailscale:
+  enabled: true
+  hostname: desktop-backend-py
+  proxyGroup: ushadow-proxies
+
+env:
+  # ── Identity / data (same sources as omi-backend) ──
+  - {name: BASE_API_URL, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: BASE_API_URL}}}
+  - {name: CASDOOR_ENDPOINT, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: CASDOOR_ENDPOINT}}}
+  - {name: CASDOOR_INTERNAL_URL, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: CASDOOR_INTERNAL_URL}}}
+  - {name: CASDOOR_ORG_NAME, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: CASDOOR_ORG_NAME}}}
+  - {name: CASDOOR_CLIENT_ID, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: CASDOOR_CLIENT_ID}}}
+  - {name: CASDOOR_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: CASDOOR_CLIENT_SECRET}}}
+  - {name: MONGODB_URL, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: MONGODB_URL}}}
+  - {name: MONGODB_DB, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: MONGODB_DB}}}
+  - {name: REDIS_DB_HOST, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: REDIS_DB_HOST}}}
+  - {name: REDIS_DB_PORT, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: REDIS_DB_PORT}}}
+  - {name: REDIS_DB_PASSWORD, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: REDIS_DB_PASSWORD}}}
+  - {name: ENCRYPTION_SECRET, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: ENCRYPTION_SECRET}}}
+  - {name: ADMIN_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: ADMIN_KEY}}}
+  - {name: PINECONE_API_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: PINECONE_API_KEY}}}
+  - {name: PINECONE_INDEX_NAME, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: PINECONE_INDEX_NAME}}}
+  - {name: S3_ENDPOINT_URL, value: "http://omi-minio:9000"}
+  - {name: S3_ACCESS_KEY_ID, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: S3_ACCESS_KEY_ID}}}
+  - {name: S3_SECRET_ACCESS_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: S3_SECRET_ACCESS_KEY}}}
+  - {name: MEMORY_ENABLED, value: "on"}
+  - {name: MEMORY_V3_CURSOR_SECRET, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: MEMORY_V3_CURSOR_SECRET}}}
+  - {name: STT_SERVICE_MODELS, value: "dg-nova-3"}
+  - {name: DEEPGRAM_API_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: DEEPGRAM_API_KEY}}}
+  # Realtime voice and TTS still go straight to the provider with these keys.
+  - {name: OPENAI_API_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: OPENAI_API_KEY}}}
+  - {name: GEMINI_API_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: GEMINI_API_KEY}}}
+  - {name: USE_VERTEX_AI, value: "false"}
+  # ── Self-hosted mode ──
+  - {name: SELF_HOSTED, value: "true"}
+  - {name: SELF_HOSTED_LLM_URL, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: SELF_HOSTED_LLM_URL}}}
+  - {name: SELF_HOSTED_LLM_MODEL, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: SELF_HOSTED_LLM_MODEL}}}
+  - {name: SELF_HOSTED_LLM_MAX_CONCURRENCY, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: SELF_HOSTED_LLM_MAX_CONCURRENCY, optional: true}}}
+  - {name: SELF_HOSTED_EMBED_URL, value: "http://ollama-embed.omi:11434/v1"}
+  - {name: SELF_HOSTED_EMBED_MODEL, value: "nomic-embed-text"}
+  # Route managed desktop LLM traffic through the "LLM gateway" client, which
+  # the SELF_HOSTED_LLM_URL seam serves from the local servers. Desktop-only:
+  # on omi-backend these would reroute every feature.
+  - {name: OMI_LLM_GATEWAY_FEATURE_MODE, value: "gateway"}
+  - {name: OMI_LLM_CHAT_AGENT_ROUTE, value: "gateway"}
+  - {name: OMI_LLM_GATEWAY_ALLOW_PROD_FEATURE_MODE, value: "true"}
+  - {name: OMI_LLM_GATEWAY_URL, value: "http://gpu.chakra-sacral"}
