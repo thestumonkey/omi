@@ -292,3 +292,11 @@ pnpm-workspace.yaml
 
 +# amp orb portal links (generated); .amp/services.yaml stays tracked
 +.amp/portals/
+
+# [fork] Credential files, matched anywhere (they were once committed from the
+# repo root with a live OAuth client secret and refresh token).
+google-credentials.json
+google-credentials-dev.json
+service-account.json
+**/google-credentials.json
+**/service-account.json

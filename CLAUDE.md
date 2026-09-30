@@ -16,3 +16,20 @@ look for `CLAUDE.md` by name — it is the one such pointer in the repo.
   file stays a pointer so there is only ever one source of truth to maintain.
 
 @AGENTS.md
+
+## [fork] Self-hosted fork and shared ecosystem
+
+This fork runs upstream Omi on Casdoor + MongoDB + MinIO + a local LLM by
+shimming, not rewriting: `backend/firebase_admin/` (SDK stand-in) and
+env-gated tail blocks at the end of a few upstream modules. Keep upstream files
+byte-identical; add behaviour in a fork-only file or a tail seam. Fork-only
+files are marked `[fork-only]`.
+
+Before creating anything new, search for what already exists and extend it.
+Shared ushadow skills live in `.claude/skills/` (read the file directly):
+
+| Trigger | Skill file |
+|---|---|
+| Extracting, reusing, or sharing code across projects | `.claude/skills/extract-component.md` |
+| Using `@ushadow-io/ui`, `ushadow-common`, or any shared dep | `.claude/skills/use-shared.md` |
+| Deploying a service, creating a namespace, or wiring k8s network policies | `.claude/skills/k8s-service.md` |
