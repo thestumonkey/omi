@@ -9,6 +9,10 @@ image:
 strategy:
   type: Recreate
 
+# Admits the pod through the chakra-sacral NetworkPolicy to the self-hosted LLM.
+podLabels:
+  access-gpu: "true"
+
 nodeSelector:
   kubernetes.io/hostname: erebus
 

@@ -2184,7 +2184,8 @@ class AuthService {
   private func exchangeCustomTokenForIdToken(customToken: String) async throws -> FirebaseTokenResult {
     let apiKey = try requireFirebaseApiKey()
     guard
-      let url = URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
+      let url = SelfHostedFirebaseREST.url("identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
+        ?? URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
     else {
       throw AuthError.invalidURL
     }
@@ -2237,7 +2238,9 @@ class AuthService {
 
     let apiKey = try requireFirebaseApiKey()
     let refreshURL: URL
-    if let hostPort = DesktopLocalProfile.authEmulatorHost {
+    if let selfHosted = SelfHostedFirebaseREST.url("securetoken.googleapis.com/v1/token?key=\(apiKey)") {
+      refreshURL = selfHosted
+    } else if let hostPort = DesktopLocalProfile.authEmulatorHost {
       guard let url = URL(string: "http://\(hostPort)/securetoken.googleapis.com/v1/token?key=\(apiKey)") else {
         throw AuthError.invalidURL
       }

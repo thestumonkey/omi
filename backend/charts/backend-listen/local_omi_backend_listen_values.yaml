@@ -34,7 +34,10 @@ serviceAccount:
 podAnnotations: {}
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
-podLabels: {}
+# Admits the pod through the chakra-sacral NetworkPolicy to the self-hosted LLM
+# (was only set by hand on the live Deployment).
+podLabels:
+  access-gpu: "true"
 
 podSecurityContext: {}
   # fsGroup: 2000
