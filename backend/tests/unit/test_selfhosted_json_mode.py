@@ -1,5 +1,7 @@
 """SelfHostedChatOpenAI turns on JSON mode only for prompts that ask for JSON. [fork-only]"""
 
+import json
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel
@@ -102,3 +104,42 @@ def test_gateway_embeddings_go_to_embedding_server(monkeypatch):
     )
     assert url == "http://embed.local:11434/v1/embeddings"
     assert body == {"model": "nomic-embed-text", "input": ["a"]}
+
+
+# ── Repair of replies that ignore JSON mode ──────────────────────────────────
+
+
+class _Items(BaseModel):
+    action_items: list[_Title]
+
+
+def _roundtrip(model, reply):
+    llm = _llm()
+    instructions = PydanticOutputParser(pydantic_object=model).get_format_instructions()
+    llm._get_request_payload([SystemMessage(instructions), HumanMessage("go")])
+    return llm._create_chat_result(_response(reply)).generations[0].message.content
+
+
+def test_unquoted_emoji_value_is_quoted():
+    fixed = _roundtrip(_Title, '{\n  "emoji": 📝,\n  "title": "Errands"\n}')
+    assert json.loads(fixed) == {"emoji": "📝", "title": "Errands"}
+
+
+def test_bare_list_is_wrapped_for_single_list_schema():
+    fixed = _roundtrip(_Items, '[{"title": "Buy milk"}]')
+    assert PydanticOutputParser(pydantic_object=_Items).parse(fixed).action_items[0].title == "Buy milk"
+
+
+def test_prose_around_object_is_dropped():
+    assert json.loads(_roundtrip(_Title, 'Sure! {"title": "Standup"} Hope that helps.')) == {"title": "Standup"}
+
+
+def test_bare_list_is_not_wrapped_for_multi_field_schema():
+    assert _roundtrip(_Title, '[{"title": "x"}]') == '[{"title": "x"}]'
+
+
+def test_plain_chat_reply_is_never_repaired():
+    llm = _llm()
+    llm._get_request_payload([HumanMessage("how was my day?")])
+    reply = 'You said: 📝, then left.'
+    assert llm._create_chat_result(_response(reply)).generations[0].message.content == reply

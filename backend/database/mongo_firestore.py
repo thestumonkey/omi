@@ -95,27 +95,78 @@ def _filter_to_mongo(f) -> dict:
     return _clause_to_mongo(f.field_path, f.op_string, f.value)
 
 
-def _split_transforms(data: Dict[str, Any]) -> Dict[str, Dict]:
-    """Expand Firestore sentinels into a Mongo update spec."""
+def _is_sentinel(val) -> bool:
+    return isinstance(val, (Increment, ArrayUnion, ArrayRemove)) or val is DELETE_FIELD or val is SERVER_TIMESTAMP
+
+
+def _sentinel_op(val) -> Tuple[str, Any]:
+    if isinstance(val, Increment):
+        return '$inc', val.value
+    if isinstance(val, ArrayUnion):
+        return '$addToSet', {'$each': list(val.values)}
+    if isinstance(val, ArrayRemove):
+        return '$pull', {'$in': list(val.values)}
+    if val is DELETE_FIELD:
+        return '$unset', ''
+    return '$set', _now()  # SERVER_TIMESTAMP
+
+
+def _split_transforms(data: Dict[str, Any], merge: bool = False) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
+    """Expand Firestore sentinels into Mongo update specs: `(spec, later)`.
+
+    `merge=True` (set(..., merge=True)) deep-merges like Firestore: every leaf
+    becomes its own dotted path, so `{'a': {'b': Increment(1)}}` is `$inc a.b`
+    and sibling keys already stored under `a` survive. Everything is in `spec`.
+
+    Otherwise a map value replaces the whole field. Sentinels nested inside such
+    a map cannot share one Mongo update with the `$set` of their parent (Mongo
+    rejects the path conflict), so they come back in `later`, to apply after.
+    """
     spec: Dict[str, Dict] = {}
+    later: Dict[str, Dict] = {}
 
-    def put(op, field, val):
-        spec.setdefault(op, {})[field] = val
+    def put(target, op, field, val):
+        target.setdefault(op, {})[field] = val
 
+    def flatten(prefix, obj):
+        for key, val in obj.items():
+            path = f'{prefix}.{key}' if prefix else key
+            if _is_sentinel(val):
+                op, arg = _sentinel_op(val)
+                put(spec, op, path, arg)
+            elif isinstance(val, dict) and val:
+                flatten(path, val)
+            else:
+                put(spec, '$set', path, val)
+
+    def strip(prefix, obj):
+        # Plain copy of a map for `$set`; nested sentinels move to `later`.
+        out = {}
+        for key, val in obj.items():
+            path = f'{prefix}.{key}'
+            if val is SERVER_TIMESTAMP:
+                out[key] = _now()
+            elif _is_sentinel(val):
+                op, arg = _sentinel_op(val)
+                put(later, op, path, arg)
+            elif isinstance(val, dict):
+                out[key] = strip(path, val)
+            else:
+                out[key] = val
+        return out
+
+    if merge:
+        flatten('', data)
+        return spec, later
     for field, val in data.items():
-        if isinstance(val, Increment):
-            put('$inc', field, val.value)
-        elif isinstance(val, ArrayUnion):
-            put('$addToSet', field, {'$each': list(val.values)})
-        elif isinstance(val, ArrayRemove):
-            put('$pull', field, {'$in': list(val.values)})
-        elif val is DELETE_FIELD:
-            put('$unset', field, '')
-        elif val is SERVER_TIMESTAMP:
-            put('$set', field, _now())
+        if _is_sentinel(val):
+            op, arg = _sentinel_op(val)
+            put(spec, op, field, arg)
+        elif isinstance(val, dict):
+            put(spec, '$set', field, strip(field, val))
         else:
-            put('$set', field, val)
-    return spec
+            put(spec, '$set', field, val)
+    return spec, later
 
 
 class _AggResult:
@@ -193,7 +244,7 @@ class DocumentReference:
         return transaction._session if transaction is not None else None
 
     def set(self, data: dict, merge: bool = False, transaction=None):
-        spec = _split_transforms(data)
+        spec, later = _split_transforms(data, merge=merge)
         base = {'_id': self.path, '_p': self._parent, '_k': self.id}
         s = self._session(transaction)
         if merge:
@@ -201,12 +252,16 @@ class DocumentReference:
             self._mc().update_one({'_id': self.path}, spec, upsert=True, session=s)
         else:
             doc = dict(base)
-            doc.update(spec.get('$set', {}))
+            doc.update(spec.pop('$set', {}))
             self._mc().replace_one({'_id': self.path}, doc, upsert=True, session=s)
+            # Transforms (Increment, ArrayUnion, ...) apply on top of the new document.
+            for extra in (spec, later):
+                if extra:
+                    self._mc().update_one({'_id': self.path}, extra, session=s)
 
     def create(self, data: dict, transaction=None):
         """Write a new document; fail with Conflict (409) if it already exists, like Firestore."""
-        spec = _split_transforms(data)
+        spec, later = _split_transforms(data)
         doc = {'_id': self.path, '_p': self._parent, '_k': self.id}
         doc.update(spec.pop('$set', {}))
         s = self._session(transaction)
@@ -216,18 +271,22 @@ class DocumentReference:
             from google.api_core.exceptions import Conflict
 
             raise Conflict(f'Document already exists: {self.path}') from e
-        if spec:
-            # Transforms (Increment, ArrayUnion, ...) apply on top of the new document.
-            self._mc().update_one({'_id': self.path}, spec, session=s)
+        # Transforms (Increment, ArrayUnion, ...) apply on top of the new document.
+        for extra in (spec, later):
+            if extra:
+                self._mc().update_one({'_id': self.path}, extra, session=s)
 
     def update(self, data: dict, transaction=None):
-        spec = _split_transforms(data)
+        spec, later = _split_transforms(data)
         spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id})
-        res = self._mc().update_one({'_id': self.path}, spec, upsert=False, session=self._session(transaction))
+        s = self._session(transaction)
+        res = self._mc().update_one({'_id': self.path}, spec, upsert=False, session=s)
         if res.matched_count == 0:
             from google.api_core.exceptions import NotFound
 
             raise NotFound(f'No document to update: {self.path}')
+        if later:
+            self._mc().update_one({'_id': self.path}, later, session=s)
 
     def get(self, field_paths=None, transaction=None) -> DocumentSnapshot:
         # Firestore's DocumentReference.get(field_paths=None, transaction=None):

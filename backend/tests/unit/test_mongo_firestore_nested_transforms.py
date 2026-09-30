@@ -1,0 +1,42 @@
+"""MongoFirestore: Increment and friends inside nested maps. [fork-only]
+
+`llm_usage.record_llm_usage` writes `set(_nested({'a.b.c': Increment(n)}), merge=True)`.
+Needs MONGO_FIRESTORE_TEST_URL (see test_mongo_firestore_create.py).
+"""
+
+import os
+import uuid
+
+import pytest
+from google.cloud import firestore
+
+TEST_URL = os.environ.get("MONGO_FIRESTORE_TEST_URL", "")
+pytestmark = pytest.mark.skipif(not TEST_URL, reason="MONGO_FIRESTORE_TEST_URL not set")
+
+
+@pytest.fixture
+def ref():
+    from database.mongo_firestore import MongoFirestore
+
+    name = f"shim_nested_{uuid.uuid4().hex[:8]}"
+    store = MongoFirestore(TEST_URL, name)
+    yield store.collection("users").document("u1").collection("llm_usage").document("2026-09-30")
+    store._client.drop_database(name)
+
+
+def test_merge_set_increments_nested_counter_and_keeps_siblings(ref):
+    ref.set({"chat": {"llama": {"calls": firestore.Increment(1), "keep": "x"}}}, merge=True)
+    ref.set({"chat": {"llama": {"calls": firestore.Increment(2)}, "other": {"calls": 5}}}, merge=True)
+    assert ref.get().to_dict() == {"chat": {"llama": {"calls": 3, "keep": "x"}, "other": {"calls": 5}}}
+
+
+def test_plain_set_replaces_map_then_applies_nested_counter(ref):
+    ref.set({"chat": {"old": 1}})
+    ref.set({"chat": {"llama": {"calls": firestore.Increment(4)}, "note": "n"}})
+    assert ref.get().to_dict() == {"chat": {"llama": {"calls": 4}, "note": "n"}}
+
+
+def test_update_with_nested_counter(ref):
+    ref.set({"chat": {"calls": 1}})
+    ref.update({"chat": {"calls": firestore.Increment(1), "tag": "t"}, "top": firestore.Increment(2)})
+    assert ref.get().to_dict() == {"chat": {"tag": "t", "calls": 1}, "top": 2}

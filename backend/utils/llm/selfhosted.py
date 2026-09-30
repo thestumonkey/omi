@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
 import httpx
@@ -41,16 +42,71 @@ _SELF_HOSTED_LLM_MAX_CONCURRENCY = int(os.environ.get('SELF_HOSTED_LLM_MAX_CONCU
 # Text that PydanticOutputParser.get_format_instructions() puts in a prompt.
 _JSON_FORMAT_MARKERS = ('formatted as a JSON instance',)
 _FENCED_BLOCK = re.compile(r'^```[a-zA-Z]*\s*\n?(.*?)\n?\s*```$', re.DOTALL)
+# PydanticOutputParser embeds the JSON schema after this phrase.
+_OUTPUT_SCHEMA = re.compile(r'Here is the output schema:\s*```\s*(\{.*?\})\s*```', re.DOTALL)
+# An unquoted non-ASCII value, e.g. `"emoji": 📝,` — the commonest local-model slip.
+_BARE_NON_ASCII_VALUE = re.compile(r'(:\s*)([^\x00-\x7f\s][^,\n}\]]*?)(\s*[,}\]\n])')
+
+# Set while building a request that asked for JSON; read when its reply comes back.
+# `None` = not a JSON request. Otherwise the single array property of the schema, or "".
+_json_reply_wrap_key: ContextVar[Optional[str]] = ContextVar('selfhosted_json_reply_wrap_key', default=None)
 
 
-def _asks_for_json(messages: Any) -> bool:
+def _message_texts(messages: Any):
     for message in messages or []:
         content = message.get('content') if isinstance(message, dict) else None
         if isinstance(content, list):
             content = ' '.join(part.get('text', '') for part in content if isinstance(part, dict))
-        if isinstance(content, str) and any(marker in content for marker in _JSON_FORMAT_MARKERS):
-            return True
-    return False
+        if isinstance(content, str):
+            yield content
+
+
+def _asks_for_json(messages: Any) -> bool:
+    return any(marker in text for text in _message_texts(messages) for marker in _JSON_FORMAT_MARKERS)
+
+
+def _single_array_property(messages: Any) -> str:
+    """Name of the schema's only property when that property is a list, else "".
+
+    Small models asked for `{"action_items": [...]}` often answer with just the
+    list. Only a one-property schema makes the wrapper unambiguous.
+    """
+    for text in _message_texts(messages):
+        match = _OUTPUT_SCHEMA.search(text)
+        if not match:
+            continue
+        try:
+            properties = json.loads(match.group(1)).get('properties') or {}
+        except (ValueError, AttributeError):
+            return ''
+        if len(properties) == 1:
+            ((name, spec),) = properties.items()
+            if isinstance(spec, dict) and spec.get('type') == 'array':
+                return name
+        return ''
+    return ''
+
+
+def _repair_json_reply(text: str, wrap_key: str) -> str:
+    """Best-effort fix of a JSON reply the strict parser would reject.
+
+    Returns `text` unchanged when it is already valid (and needs no wrapper) or
+    when no repair produces valid JSON, so the parser still reports the real error.
+    """
+    candidates = [text, _BARE_NON_ASCII_VALUE.sub(r'\1"\2"\3', text)]
+    start, end = text.find('{'), text.rfind('}')
+    if 0 < start < end:  # prose around the object
+        inner = text[start : end + 1]
+        candidates += [inner, _BARE_NON_ASCII_VALUE.sub(r'\1"\2"\3', inner)]
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate, strict=False)
+        except ValueError:
+            continue
+        if wrap_key and isinstance(parsed, list):
+            return json.dumps({wrap_key: parsed})
+        return candidate
+    return text
 
 
 class SelfHostedChatOpenAI(ChatOpenAI):
@@ -61,14 +117,20 @@ class SelfHostedChatOpenAI(ChatOpenAI):
     the JSON in prose or code fences, the strict parser fails, and the user sees
     empty titles and summaries. When a request carries those instructions (and
     no tools or explicit response format), this turns on the server's JSON mode,
-    which grammar-constrains generation to valid JSON. Any reply that is just a
-    fenced code block is also unwrapped. Upstream call sites stay unchanged.
+    which grammar-constrains generation to valid JSON where the server supports
+    it. Not every server does (lemonade still returns `"emoji": 📝`), so replies
+    to those requests are also repaired when they fail to parse. Any reply that
+    is just a fenced code block is unwrapped. Upstream call sites stay unchanged.
     """
 
     def _get_request_payload(self, input_: Any, *, stop: Optional[list] = None, **kwargs: Any) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        if 'tools' not in payload and 'response_format' not in payload and _asks_for_json(payload.get('messages')):
+        messages = payload.get('messages')
+        if 'tools' not in payload and 'response_format' not in payload and _asks_for_json(messages):
             payload['response_format'] = {'type': 'json_object'}
+            _json_reply_wrap_key.set(_single_array_property(messages))
+        else:
+            _json_reply_wrap_key.set(None)
         return payload
 
     def _create_chat_result(self, response: Any, generation_info: Optional[Dict] = None) -> Any:
@@ -78,8 +140,13 @@ class SelfHostedChatOpenAI(ChatOpenAI):
             if isinstance(content, str):
                 match = _FENCED_BLOCK.match(content.strip())
                 if match:
-                    generation.message.content = match.group(1).strip()
-                    generation.text = generation.message.content
+                    content = match.group(1).strip()
+                wrap_key = _json_reply_wrap_key.get()
+                if wrap_key is not None:
+                    content = _repair_json_reply(content, wrap_key)
+                if content != generation.message.content:
+                    generation.message.content = content
+                    generation.text = content
         return result
 
 
