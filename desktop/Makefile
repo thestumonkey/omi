@@ -15,6 +15,10 @@ APP_NAME ?= omi-selfhosted
 MACOS    := $(CURDIR)/macos
 ENV_APP  := $(MACOS)/.env.app
 
+# run.sh also needs the backend URLs in its own environment (not only in the
+# bundle), or it asks for a local backend/.env.
+env_app = $(shell sed -n 's/^$(1)=//p' "$(ENV_APP)" 2>/dev/null | tail -1)
+
 .DEFAULT_GOAL := help
 .PHONY: help run-selfhosted
 
@@ -28,4 +32,7 @@ run-selfhosted: ## Build and open the Mac app against the deployed self-hosted b
 	@grep -q '^OMI_FIREBASE_REST_BASE_URL=' "$(ENV_APP)" 2>/dev/null || { \
 		echo "ERROR: $(ENV_APP) is missing or has no OMI_FIREBASE_REST_BASE_URL." >&2; exit 1; }
 	cd "$(MACOS)" && OMI_APP_NAME="$(APP_NAME)" OMI_SKIP_BACKEND=1 OMI_SKIP_TUNNEL=1 \
+		OMI_PYTHON_API_URL="$(call env_app,OMI_PYTHON_API_URL)" \
+		OMI_AUTH_API_URL="$(call env_app,OMI_AUTH_API_URL)" \
+		OMI_DESKTOP_API_URL="$(call env_app,OMI_DESKTOP_API_URL)" \
 		./run.sh $(if $(FULL),--full)
