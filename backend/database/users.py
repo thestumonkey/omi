@@ -2359,3 +2359,28 @@ def update_ai_user_profile(
     user_ref.update({'ai_user_profile': existing})
     invalidate(_USER_AI_PROFILE_CACHE, uid)
     return existing
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# With SELF_HOSTED set, every user holds the top plan (Architect: full desktop
+# access and every AI feature) with no limits. Clients read their entitlements
+# from this subscription, so the backend-side paywall bypass in
+# utils/subscription.py alone left the desktop app in its free mode (local-only
+# transcription, AI features off). Rebound at the end of the module so the ~27
+# callers pick it up; the upstream function above stays byte-identical.
+import os as _os  # noqa: E402
+
+if _os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    from models.users import PlanLimits as _PlanLimits
+
+    _SELF_HOSTED_PERIOD_END = 4102444800  # 2100-01-01: never lapses
+
+    def get_user_valid_subscription(
+        uid: str, *, firestore_client: Any | None = None, provision: bool = True
+    ) -> Optional[Subscription]:
+        return Subscription(
+            plan=PlanType.architect,
+            status=SubscriptionStatus.active,
+            current_period_end=_SELF_HOSTED_PERIOD_END,
+            limits=_PlanLimits(transcription_seconds=None, words_transcribed=None, insights_gained=None),
+        )

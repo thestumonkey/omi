@@ -2005,7 +2005,7 @@ if IS_SELF_HOSTED:
 
     def get_chat_quota_snapshot(*_args: Any, **_kwargs: Any) -> dict:
         return {
-            'plan': PlanType.unlimited,
+            'plan': PlanType.architect,
             'unit': 'questions',
             'used': 0.0,
             'limit': None,
