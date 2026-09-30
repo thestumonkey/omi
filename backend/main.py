@@ -251,10 +251,11 @@ app.include_router(calendar_meetings.router)
 app.include_router(google_calendar.router)
 app.include_router(calendar_onboarding.router)
 app.include_router(oauth.router)  # Added oauth router (for Omi Apps)
-from routers import casdoor_auth  # [fork-only] self-hosted sign-in; must precede auth.router so its routes win
+from routers import casdoor_auth, selfhosted_settings  # [fork-only] self-hosted sign-in (before auth.router) + settings
 
 app.include_router(casdoor_auth.router)
 app.include_router(casdoor_auth.firebase_rest_router)
+app.include_router(selfhosted_settings.router)
 app.include_router(auth.router)  # Added auth router (for the main Omi App, this is the core auth router)
 
 

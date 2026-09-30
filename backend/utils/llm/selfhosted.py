@@ -8,7 +8,9 @@ utils/llm/providers.py, which rebinds ``get_default_client``.
 Settings:
   SELF_HOSTED_LLM_URL              OpenAI-compatible base URL, including /v1
   SELF_HOSTED_LLM_MODEL            replaces every model in the QoS profile
-                                   (the cloud names do not exist locally)
+                                   (the cloud names do not exist locally);
+                                   the model picked in the app's settings
+                                   (``current_model``) wins over it
   SELF_HOSTED_LLM_KEY              sent as the API key (default "sk-local")
   SELF_HOSTED_LLM_MAX_CONCURRENCY  max in-flight requests (default 1; 0 = no limit)
 
@@ -19,6 +21,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
@@ -153,6 +156,66 @@ class SelfHostedChatOpenAI(ChatOpenAI):
 _http_client: Optional[httpx.Client] = None
 _llm_cache: Dict[tuple, Any] = {}
 
+# ── Chat model picked in the app's settings ──────────────────────────────────
+#
+# One server-wide choice, stored as the Mongo document selfhosted_settings/llm
+# so omi-backend, the pusher and the desktop backend all see it. Each process
+# re-reads it at most every _MODEL_CACHE_SECONDS.
+
+_MODEL_CACHE_SECONDS = 30.0
+_SETTINGS_COLLECTION, _SETTINGS_DOC = 'selfhosted_settings', 'llm'
+_saved_model: Dict[str, Any] = {'value': None, 'read_at': None}
+
+
+def _settings_ref():
+    from database._client import db
+
+    return db.collection(_SETTINGS_COLLECTION).document(_SETTINGS_DOC)
+
+
+def _read_saved_model() -> Optional[str]:
+    if not os.environ.get('MONGODB_URL', '').strip():
+        return None  # no shim database (unit tests, cloud deploys)
+    try:
+        snapshot = _settings_ref().get()
+    except Exception as e:  # a settings read must never break an LLM call
+        logger.warning('self-hosted LLM: cannot read saved model: %s', e)
+        return _saved_model['value']
+    model = (snapshot.to_dict() or {}).get('model') if snapshot.exists else None
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def current_model() -> str:
+    """Chat model to use now: the one saved from settings, else SELF_HOSTED_LLM_MODEL."""
+    now = time.monotonic()
+    read_at = _saved_model['read_at']
+    if read_at is None or now - read_at >= _MODEL_CACHE_SECONDS:
+        _saved_model['value'] = _read_saved_model()
+        _saved_model['read_at'] = now
+    return _saved_model['value'] or _SELF_HOSTED_LLM_MODEL
+
+
+def save_model(model: Optional[str]) -> None:
+    """Store the settings choice; None or "" goes back to SELF_HOSTED_LLM_MODEL."""
+    _settings_ref().set({'model': (model or '').strip() or None, 'updated_at': time.time()})
+    _saved_model['value'] = (model or '').strip() or None
+    _saved_model['read_at'] = time.monotonic()
+
+
+def default_model() -> str:
+    return _SELF_HOSTED_LLM_MODEL
+
+
+def list_models() -> list[str]:
+    """Model ids the self-hosted server offers (OpenAI `GET /models`)."""
+    response = httpx.get(
+        _join(SELF_HOSTED_LLM_URL, 'models'),
+        headers={'authorization': f'Bearer {_SELF_HOSTED_LLM_KEY}'},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    return sorted({item['id'] for item in response.json().get('data', []) if isinstance(item, dict) and item.get('id')})
+
 
 def _get_selfhosted_http_client() -> Optional[httpx.Client]:
     """Shared httpx client that admits only _SELF_HOSTED_LLM_MAX_CONCURRENCY requests.
@@ -194,7 +257,8 @@ def get_selfhosted_llm(streaming: bool = False, options: Optional[Dict[str, Any]
     """
     options = options or {}
     temperature = options.get('temperature')
-    key = (streaming, temperature)
+    model = current_model()
+    key = (streaming, temperature, model)
     if key not in _llm_cache:
         kwargs: Dict[str, Any] = {
             'api_key': _SELF_HOSTED_LLM_KEY,
@@ -211,7 +275,7 @@ def get_selfhosted_llm(streaming: bool = False, options: Optional[Dict[str, Any]
         if streaming:
             kwargs['streaming'] = True
             kwargs['stream_options'] = {'include_usage': True}
-        _llm_cache[key] = SelfHostedChatOpenAI(model=_SELF_HOSTED_LLM_MODEL, **kwargs)
+        _llm_cache[key] = SelfHostedChatOpenAI(model=model, **kwargs)
     return _llm_cache[key]
 
 
@@ -277,7 +341,7 @@ def rewrite_gateway_request(path: str, body: Dict[str, Any]) -> tuple[str, Dict[
         payload.pop('dimensions', None)
         return _join(_SELF_HOSTED_EMBED_URL or SELF_HOSTED_LLM_URL, 'embeddings'), payload
     payload = {k: v for k, v in body.items() if k in _OPENAI_CHAT_KEYS}
-    payload['model'] = _SELF_HOSTED_LLM_MODEL
+    payload['model'] = current_model()
     return _join(SELF_HOSTED_LLM_URL, path.split('/v1', 1)[-1] or 'chat/completions'), payload
 
 

@@ -840,6 +840,12 @@ class AuthService {
     try await signIn(provider: "google")
   }
 
+  /// [fork-only] Self-hosted sign-in: Casdoor shows its own provider choice.
+  @MainActor
+  func signInWithCasdoor() async throws {
+    try await signIn(provider: "casdoor")
+  }
+
   // MARK: - Generic OAuth Sign In
 
   @MainActor
@@ -2184,7 +2190,8 @@ class AuthService {
   private func exchangeCustomTokenForIdToken(customToken: String) async throws -> FirebaseTokenResult {
     let apiKey = try requireFirebaseApiKey()
     guard
-      let url = SelfHostedFirebaseREST.url("identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
+      let url = SelfHostedFirebaseREST.url(
+        "identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
         ?? URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")
     else {
       throw AuthError.invalidURL

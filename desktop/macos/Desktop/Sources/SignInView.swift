@@ -53,16 +53,24 @@ struct SignInView: View {
             .padding(.top, InkLayout.rhythm[5])
 
           VStack(spacing: InkLayout.rhythm[6]) {
-            signInButton(
-              title: "Continue with Apple",
-              kind: .primary,
-              leading: { Image(systemName: "applelogo").font(.system(size: 13)) },
-              action: { signIn(apple: true) })
-            signInButton(
-              title: "Continue with Google",
-              kind: .secondary,
-              leading: { GoogleLogo().frame(width: 15, height: 15) },
-              action: { signIn(apple: false) })
+            if SelfHostedSettings.isEnabled {  // [fork-only] one Casdoor button replaces Apple/Google
+              signInButton(
+                title: "Continue with Casdoor",
+                kind: .primary,
+                leading: { Image(systemName: "person.badge.key.fill").font(.system(size: 13)) },
+                action: { signInWithCasdoor() })
+            } else {
+              signInButton(
+                title: "Continue with Apple",
+                kind: .primary,
+                leading: { Image(systemName: "applelogo").font(.system(size: 13)) },
+                action: { signIn(apple: true) })
+              signInButton(
+                title: "Continue with Google",
+                kind: .secondary,
+                leading: { GoogleLogo().frame(width: 15, height: 15) },
+                action: { signIn(apple: false) })
+            }
           }
           // This used to be a fixed 320pt column. When the window was
           // narrower (or its usable width was reduced by window chrome),
@@ -140,6 +148,21 @@ struct SignInView: View {
     }
     .buttonStyle(InkButtonStyle(kind: kind))
     .disabled(authState.isLoading)
+  }
+
+  /// [fork-only]
+  private func signInWithCasdoor() {
+    Task {
+      do {
+        try await AuthService.shared.signInWithCasdoor()
+      } catch is CancellationError {
+      } catch AuthError.cancelled {
+      } catch {
+        let errorMsg = UserFacingErrorPresentation.message(for: error, while: .signIn)
+        authState.error = errorMsg
+        NSLog("OMI Sign in error: %@", errorMsg)
+      }
+    }
   }
 
   private func signIn(apple: Bool) {

@@ -22,6 +22,10 @@ extension SettingsContentView {
     VStack(spacing: OmiSpacing.xxl) {
       advancedCategoryHeader(title: "AI Setup", icon: "cpu")
       aiSetupSubsection
+      if SelfHostedSettings.isEnabled {  // [fork-only]
+        advancedCategoryHeader(title: "Self-hosted Server", icon: "server.rack")
+        selfHostedSubsection
+      }
       // HIDDEN DELIBERATELY (Nik, 2026-08-25): the Task/Insight/Memory Assistant panes are
       // intentionally not rendered. This is product direction, not dead code — do NOT re-wire
       // them the way 73c7f85fbc ("give the three proactive assistants a pane you can reach")

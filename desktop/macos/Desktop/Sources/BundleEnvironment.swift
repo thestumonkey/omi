@@ -87,6 +87,7 @@ enum BundleEnvironment {
       }
     }
 
+    SelfHostedSettings.applyOverrides()  // [fork-only] server addresses chosen in Settings
     DesktopBackendEnvironment.applyReleaseChannelDefaults()
     log("Environment loaded (API keys will be fetched from backend after auth)")
   }
