@@ -387,6 +387,11 @@ class Query:
         and_parts: List[dict] = []
         if not self._group:
             and_parts.append({'_p': self._coll_path})
+        else:
+            # Only documents this shim wrote. A collection can also hold rows in
+            # another layout (e.g. the pre-shim native rewrite, keyed by bare id),
+            # which have no path and are not Firestore documents.
+            and_parts.append({'_p': {'$exists': True}})
         and_parts.extend(self._filters)
         if self._cursor and self._order:
             and_parts.append(self._cursor_filter())

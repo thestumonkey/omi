@@ -1,20 +1,23 @@
 """Move memory-search vectors from Pinecone to the cluster's Typesense. [fork-only]
 
-Pinecone records carry labels (metadata) but not their text, and the new
-embedding model makes different vectors, so each record is rebuilt:
-labels from Pinecone, text from MongoDB, vector from the local embedding
-server (SELF_HOSTED_EMBED_URL). Records whose source document is gone are
-skipped (they belong to deleted items or the old pre-shim data layout).
+The new embedding model makes different vectors, so every record is rebuilt
+with the local embedding server (SELF_HOSTED_EMBED_URL):
 
-    ns1  conversations   text: str(Structured(**conversation.structured))
-    ns2  memories        text: memory.content
-    ns4  tasks           text: action_item.description
+    ns1  conversations   rebuilt from MongoDB by upstream's save_structured_vector
+                         (one local-LLM call each for people/topics/entities),
+                         for every completed, non-discarded conversation
+    ns2  memories        labels from Pinecone, text = memory.content
+    ns4  tasks           labels from Pinecone, text = action_item.description
+
+Pinecone records whose source document is gone are skipped (deleted items or
+the old pre-shim data layout).
 
     python scripts/selfhosted_migrate_vectors.py           # dry run: counts only
     python scripts/selfhosted_migrate_vectors.py --apply   # embed + write
 
 Needs PINECONE_API_KEY/PINECONE_INDEX_NAME (read only), MONGODB_URL,
-SELF_HOSTED_EMBED_URL and TYPESENSE_*. Safe to run again (upserts).
+SELF_HOSTED_EMBED_URL, SELF_HOSTED_VECTOR_STORE=typesense and TYPESENSE_*.
+Safe to run again (upserts).
 """
 
 import argparse
@@ -37,15 +40,6 @@ def _doc(db, uid: str, collection: str, doc_id: str) -> Optional[Dict[str, Any]]
     return data
 
 
-def _conversation_text(db, md: Dict[str, Any]) -> Optional[str]:
-    from models.structured import Structured
-
-    data = _doc(db, md.get('uid'), 'conversations', md.get('memory_id'))
-    if not data or not data.get('structured'):
-        return None
-    return str(Structured(**data['structured']))
-
-
 def _memory_text(db, md: Dict[str, Any]) -> Optional[str]:
     data = _doc(db, md.get('uid'), 'memories', md.get('memory_id'))
     return (data or {}).get('content') or None
@@ -57,7 +51,6 @@ def _task_text(db, md: Dict[str, Any]) -> Optional[str]:
 
 
 SOURCES: Dict[str, Callable[[Any, Dict[str, Any]], Optional[str]]] = {
-    'ns1': _conversation_text,
     'ns2': _memory_text,
     'ns4': _task_text,
 }
@@ -68,6 +61,35 @@ def _pinecone_records(index, namespace: str):
         fetched = index.fetch(ids=list(page), namespace=namespace)
         for vid, vector in fetched.vectors.items():
             yield vid, dict(vector.metadata or {})
+
+
+def rebuild_conversations(db, apply: bool) -> None:
+    from models.conversation import Conversation
+    from utils.conversations.process_conversation import save_structured_vector
+
+    done = skipped = failed = 0
+    for snapshot in db.collection_group('conversations').stream():
+        data = snapshot.to_dict() or {}
+        parts = snapshot.reference.path.split('/')
+        if len(parts) != 4 or parts[0] != 'users':
+            continue
+        if data.get('deleted') or data.get('discarded') or data.get('status') != 'completed':
+            skipped += 1
+            continue
+        if not (data.get('structured') or {}).get('title'):
+            skipped += 1
+            continue
+        if not apply:
+            done += 1
+            continue
+        try:
+            save_structured_vector(parts[1], Conversation(**{**data, 'id': parts[3]}))
+            done += 1
+        except Exception as e:  # one bad record must not stop the rest
+            failed += 1
+            print(f'  ns1 {parts[3]}: {type(e).__name__}: {e}'[:200])
+    verb = 'rebuilt' if apply else 'to rebuild'
+    print(f'ns1: {done} {verb}, {skipped} skipped (discarded/unfinished/untitled), {failed} failed')
 
 
 def main():
@@ -84,6 +106,10 @@ def main():
     source = Pinecone(api_key=os.environ['PINECONE_API_KEY']).Index(os.environ['PINECONE_INDEX_NAME'])
     target = TypesenseVectorIndex()
     embeddings = make_embeddings()
+
+    if os.environ.get('SELF_HOSTED_VECTOR_STORE', '').strip().lower() != 'typesense':
+        sys.exit('Set SELF_HOSTED_VECTOR_STORE=typesense so conversation vectors go to Typesense.')
+    rebuild_conversations(db, args.apply)
 
     for namespace, text_for in SOURCES.items():
         pending: List[Dict[str, Any]] = []
