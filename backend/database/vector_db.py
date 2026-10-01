@@ -1239,3 +1239,13 @@ def delete_transcript_chunk_vectors_batch(
         raise RuntimeError(f'transcript chunk vector delete failed for {failures} conversation(s)')
     logger.info(f'delete_transcript_chunk_vectors_batch uid={uid} total_deleted={deleted}')
     return deleted
+
+
+# ── [fork-only] self-hosted vector store ─────────────────────────────────────
+# SELF_HOSTED_VECTOR_STORE=typesense serves every vector call above from the
+# cluster's Typesense instead of Pinecone's cloud (database/typesense_vectors.py).
+if os.environ.get('SELF_HOSTED_VECTOR_STORE', '').strip().lower() == 'typesense':
+    from database.typesense_vectors import TypesenseVectorIndex
+
+    pc = None
+    index = TypesenseVectorIndex()

@@ -990,3 +990,14 @@ def gemini_embed_query(text: str) -> List[float]:
     resp = httpx.post(url, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
     return resp.json()['embedding']['values']
+
+
+# ── [fork-only] self-hosted embeddings ───────────────────────────────────────
+# With SELF_HOSTED_EMBED_URL set, every embedding (conversation, memory and
+# task vectors; generate_embedding) comes from the local embedding server
+# instead of OpenAI. The vector store must use the same model's width
+# (SELF_HOSTED_EMBED_DIM, see database/typesense_vectors.py).
+if os.environ.get('SELF_HOSTED_EMBED_URL', '').strip():
+    from utils.llm import selfhosted as _selfhosted
+
+    embeddings = _selfhosted.make_embeddings()

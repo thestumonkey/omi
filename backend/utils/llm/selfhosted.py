@@ -298,6 +298,26 @@ _OPENAI_CHAT_KEYS = frozenset(
 _OPENAI_EMBED_KEYS = frozenset({'input', 'model', 'dimensions', 'encoding_format', 'user'})
 
 
+def make_embeddings():
+    """Embeddings client for the self-hosted embedding server (OpenAI-compatible).
+
+    Replaces upstream's OpenAI text-embedding-3-large client (tail block of
+    utils/llm/clients.py) when SELF_HOSTED_EMBED_URL is set. Inputs go as plain
+    strings: the token-chunking that langchain does for OpenAI models uses
+    OpenAI's tokenizer, which other servers do not accept.
+    """
+    from langchain_openai import OpenAIEmbeddings
+
+    return OpenAIEmbeddings(
+        model=_SELF_HOSTED_EMBED_MODEL,
+        base_url=_SELF_HOSTED_EMBED_URL,
+        api_key=_SELF_HOSTED_LLM_KEY,
+        check_embedding_ctx_length=False,
+        request_timeout=120,
+        max_retries=2,
+    )
+
+
 def _join(base: str, suffix: str) -> str:
     return base.rstrip('/') + '/' + suffix.lstrip('/')
 
