@@ -64,6 +64,7 @@ def _pinecone_records(index, namespace: str):
 
 
 def rebuild_conversations(db, apply: bool) -> None:
+    import database.conversations as conversations_db
     from models.conversation import Conversation
     from utils.conversations.process_conversation import save_structured_vector
 
@@ -83,7 +84,9 @@ def rebuild_conversations(db, apply: bool) -> None:
             done += 1
             continue
         try:
-            save_structured_vector(parts[1], Conversation(**{**data, 'id': parts[3]}))
+            # get_conversation decrypts transcript fields stored encrypted at rest.
+            full = conversations_db.get_conversation(parts[1], parts[3])
+            save_structured_vector(parts[1], Conversation(**full))
             done += 1
         except Exception as e:  # one bad record must not stop the rest
             failed += 1

@@ -77,6 +77,12 @@ env:
   - {name: SELF_HOSTED_LLM_MAX_CONCURRENCY, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: SELF_HOSTED_LLM_MAX_CONCURRENCY, optional: true}}}
   - {name: SELF_HOSTED_EMBED_URL, value: "http://ollama-embed.omi:11434/v1"}
   - {name: SELF_HOSTED_EMBED_MODEL, value: "nomic-embed-text"}
+  # Memory-search vectors in the cluster's Typesense, not Pinecone.
+  - {name: SELF_HOSTED_VECTOR_STORE, value: "typesense"}
+  - {name: TYPESENSE_HOST, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: TYPESENSE_HOST}}}
+  - {name: TYPESENSE_HOST_PORT, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: TYPESENSE_HOST_PORT}}}
+  - {name: TYPESENSE_PROTOCOL, valueFrom: {configMapKeyRef: {name: omi-backend-config, key: TYPESENSE_PROTOCOL, optional: true}}}
+  - {name: TYPESENSE_API_KEY, valueFrom: {secretKeyRef: {name: dev-omi-backend-secrets, key: TYPESENSE_API_KEY}}}
   # Route managed desktop LLM traffic through the "LLM gateway" client, which
   # the SELF_HOSTED_LLM_URL seam serves from the local servers. Desktop-only:
   # on omi-backend these would reroute every feature.

@@ -299,6 +299,14 @@ env:
         name: omi-backend-config
         key: SELF_HOSTED_LLM_MAX_CONCURRENCY
         optional: true
+  # Embeddings from the local embedding server and memory-search vectors in
+  # the cluster's Typesense, instead of OpenAI and Pinecone.
+  - name: SELF_HOSTED_EMBED_URL
+    value: "http://ollama-embed.omi:11434/v1"
+  - name: SELF_HOSTED_EMBED_MODEL
+    value: "nomic-embed-text"
+  - name: SELF_HOSTED_VECTOR_STORE
+    value: "typesense"
   # - name: GOOGLE_CLOUD_PROJECT_KEY
   #   valueFrom:
   #     secretKeyRef:
