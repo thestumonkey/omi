@@ -4,18 +4,22 @@
                              the self-hosted LLM server offers
     POST /v1/selfhosted/llm  {"model": "<id>"} picks one; null goes back to the
                              SELF_HOSTED_LLM_MODEL default
+    GET  /v1/selfhosted/voice   live voice mode: "off" or "cloud" (OpenAI/Gemini)
+    POST /v1/selfhosted/voice   {"mode": "off" | "cloud"}
 
 The choice is server-wide (one household server, one model), so it reaches the
-pusher and desktop backend too. 404 when SELF_HOSTED_LLM_URL is not set.
+pusher and desktop backend too. The llm routes 404 when SELF_HOSTED_LLM_URL
+is not set.
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from utils import selfhosted_config
 from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
@@ -75,3 +79,19 @@ def update_llm_settings(body: LlmSettingsUpdate, uid: str = Depends(auth.get_cur
     selfhosted.save_model(model)
     logger.info('self-hosted LLM: model set to %s by %s', model or '(default)', uid)
     return _settings(selfhosted)
+
+
+class VoiceSettings(BaseModel):
+    mode: Literal['off', 'cloud']
+
+
+@router.get('/voice', response_model=VoiceSettings)
+def get_voice_settings(uid: str = Depends(auth.get_current_user_uid)):
+    return VoiceSettings(mode=selfhosted_config.voice_mode())
+
+
+@router.post('/voice', response_model=VoiceSettings)
+def update_voice_settings(body: VoiceSettings, uid: str = Depends(auth.get_current_user_uid)):
+    selfhosted_config.write('voice', {'mode': body.mode})
+    logger.info('self-hosted voice: mode set to %s by %s', body.mode, uid)
+    return VoiceSettings(mode=selfhosted_config.voice_mode())

@@ -525,3 +525,17 @@ async def _relay_session(
         # accept, a cancelled handshake or the pumps.
         if enrolled:
             _release_relay_socket(uid)
+
+
+# ── [fork-only] self-hosted: live voice can be switched off ──────────────────
+# The relay forwards audio to OpenAI or Gemini. When the server's voice mode is
+# "off" (the self-hosted default), no upstream is offered.
+_upstream_cloud = _upstream
+
+
+def _upstream(provider, model):  # noqa: F811
+    from utils import selfhosted_config
+
+    if selfhosted_config.voice_mode() == selfhosted_config.VOICE_OFF:
+        return None, "live voice is off on this server"
+    return _upstream_cloud(provider, model)

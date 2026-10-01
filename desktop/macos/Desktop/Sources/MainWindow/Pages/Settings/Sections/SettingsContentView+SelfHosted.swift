@@ -4,8 +4,8 @@ import SwiftUI
 // Settings → AI & Automation → Self-hosted Server. [fork-only]
 //
 // Server addresses (applied at the next launch, see `SelfHostedSettings`), the
-// chat model the self-hosted server uses (server-wide, applied at once), and
-// the cloud speech-to-text switch.
+// chat model and live voice mode the self-hosted server uses (server-wide,
+// applied at once), and the cloud speech-to-text switch.
 
 extension SettingsContentView {
   var selfHostedSubsection: some View {
@@ -32,6 +32,11 @@ private struct SelfHostedLLMUpdate: Encodable {
   let model: String?
 }
 
+/// "off" or "cloud". Cloud sends voice and personal context to OpenAI/Google.
+private struct SelfHostedVoiceSettings: Codable {
+  let mode: String
+}
+
 struct SelfHostedServerSettingsView: View {
   @State private var omiURL = SelfHostedSettings.savedURL(SelfHostedSettings.omiBackendURLKey) ?? ""
   @State private var desktopURL = SelfHostedSettings.savedURL(SelfHostedSettings.desktopBackendURLKey) ?? ""
@@ -44,6 +49,9 @@ struct SelfHostedServerSettingsView: View {
   @State private var modelMessage: String?
   @State private var isSavingModel = false
 
+  @State private var voiceMode: String?
+  @State private var voiceMessage: String?
+
   @AppStorage("forceCloudSTT") private var forceCloudSTT = false
 
   var body: some View {
@@ -51,6 +59,8 @@ struct SelfHostedServerSettingsView: View {
       urlFields
       Divider()
       modelPicker
+      Divider()
+      voicePicker
       Divider()
       Toggle(isOn: $forceCloudSTT) {
         VStack(alignment: .leading, spacing: 2) {
@@ -66,7 +76,10 @@ struct SelfHostedServerSettingsView: View {
       }
       .toggleStyle(.switch)
     }
-    .task { await loadModels() }
+    .task {
+      await loadModels()
+      await loadVoice()
+    }
   }
 
   // MARK: Server addresses
@@ -114,6 +127,60 @@ struct SelfHostedServerSettingsView: View {
     } else {
       urlMessageIsError = true
       urlMessage = "Use a full address, like https://omi.example.ts.net/"
+    }
+  }
+
+  // MARK: Live voice
+
+  private var voicePicker: some View {
+    VStack(alignment: .leading, spacing: OmiSpacing.sm) {
+      HStack {
+        Text("Live voice")
+          .scaledFont(size: OmiType.subheading, weight: .semibold)
+          .foregroundColor(Ink.primary)
+        Spacer()
+        if let voiceMode {
+          SettingsMenuPicker(
+            selection: Binding(
+              get: { voiceMode },
+              set: { newValue in Task { await saveVoice(newValue) } })
+          ) {
+            Text("Off").tag("off")
+            Text("Cloud (OpenAI / Gemini)").tag("cloud")
+          }
+        } else {
+          ProgressView().scaleEffect(0.6)
+        }
+      }
+      Text(
+        voiceMessage
+          ?? (voiceMode == "cloud"
+            ? "Talking to Omi uses OpenAI or Google. Your voice and personal context leave your server."
+            : "Talking to Omi out loud is off. No voice or context goes to OpenAI or Google. Restart Omi after a change.")
+      )
+      .scaledFont(size: OmiType.caption)
+      .foregroundColor(voiceMode == "cloud" ? Ink.errorRed : Ink.secondary)
+    }
+  }
+
+  private func loadVoice() async {
+    do {
+      let settings: SelfHostedVoiceSettings = try await APIClient.shared.get("v1/selfhosted/voice")
+      voiceMode = settings.mode
+    } catch {
+      voiceMessage = "Could not load the live voice setting: \(error.localizedDescription)"
+    }
+  }
+
+  private func saveVoice(_ mode: String) async {
+    guard mode != voiceMode else { return }
+    do {
+      let settings: SelfHostedVoiceSettings = try await APIClient.shared.post(
+        "v1/selfhosted/voice", body: SelfHostedVoiceSettings(mode: mode))
+      voiceMode = settings.mode
+      voiceMessage = nil
+    } catch {
+      voiceMessage = "Could not change live voice: \(error.localizedDescription)"
     }
   }
 

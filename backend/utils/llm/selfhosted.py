@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import re
-import time
 from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
@@ -158,48 +157,23 @@ _llm_cache: Dict[tuple, Any] = {}
 
 # ── Chat model picked in the app's settings ──────────────────────────────────
 #
-# One server-wide choice, stored as the Mongo document selfhosted_settings/llm
-# so omi-backend, the pusher and the desktop backend all see it. Each process
-# re-reads it at most every _MODEL_CACHE_SECONDS.
-
-_MODEL_CACHE_SECONDS = 30.0
-_SETTINGS_COLLECTION, _SETTINGS_DOC = 'selfhosted_settings', 'llm'
-_saved_model: Dict[str, Any] = {'value': None, 'read_at': None}
-
-
-def _settings_ref():
-    from database._client import db
-
-    return db.collection(_SETTINGS_COLLECTION).document(_SETTINGS_DOC)
-
-
-def _read_saved_model() -> Optional[str]:
-    if not os.environ.get('MONGODB_URL', '').strip():
-        return None  # no shim database (unit tests, cloud deploys)
-    try:
-        snapshot = _settings_ref().get()
-    except Exception as e:  # a settings read must never break an LLM call
-        logger.warning('self-hosted LLM: cannot read saved model: %s', e)
-        return _saved_model['value']
-    model = (snapshot.to_dict() or {}).get('model') if snapshot.exists else None
-    return model.strip() if isinstance(model, str) and model.strip() else None
+# One server-wide choice (utils/selfhosted_config, group "llm"), so omi-backend,
+# the pusher and the desktop backend all use it within CACHE_SECONDS.
 
 
 def current_model() -> str:
     """Chat model to use now: the one saved from settings, else SELF_HOSTED_LLM_MODEL."""
-    now = time.monotonic()
-    read_at = _saved_model['read_at']
-    if read_at is None or now - read_at >= _MODEL_CACHE_SECONDS:
-        _saved_model['value'] = _read_saved_model()
-        _saved_model['read_at'] = now
-    return _saved_model['value'] or _SELF_HOSTED_LLM_MODEL
+    from utils import selfhosted_config
+
+    model = selfhosted_config.read('llm').get('model')
+    return model.strip() if isinstance(model, str) and model.strip() else _SELF_HOSTED_LLM_MODEL
 
 
 def save_model(model: Optional[str]) -> None:
     """Store the settings choice; None or "" goes back to SELF_HOSTED_LLM_MODEL."""
-    _settings_ref().set({'model': (model or '').strip() or None, 'updated_at': time.time()})
-    _saved_model['value'] = (model or '').strip() or None
-    _saved_model['read_at'] = time.monotonic()
+    from utils import selfhosted_config
+
+    selfhosted_config.write('llm', {'model': (model or '').strip() or None})
 
 
 def default_model() -> str:

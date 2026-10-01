@@ -299,3 +299,18 @@ async def report_usage(report: UsageReport, uid: str = Depends(get_current_user_
         logger.error("realtime usage record failed for uid=%s", uid)
         return Response(status_code=502)
     return Response(status_code=204)
+
+
+# ── [fork-only] self-hosted: live voice can be switched off ──────────────────
+# Both providers are cloud services. When the server's voice mode is "off"
+# (the self-hosted default; Settings > Self-hosted Server), every token mint
+# answers provider_not_configured without contacting OpenAI or Google.
+_upstream_post_json = _post_json
+
+
+async def _post_json(url, provider, headers, body, params=None):  # noqa: F811
+    from utils import selfhosted_config
+
+    if selfhosted_config.voice_mode() == selfhosted_config.VOICE_OFF:
+        return None, _error(503, "provider_not_configured", "Live voice is off on this server", provider)
+    return await _upstream_post_json(url, provider, headers, body, params)
