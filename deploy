@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# [fork-only] One command for the self-hosted backend. Run from anywhere.
+#
+#   ./deploy            build the current commit's images, then deploy them
+#   ./deploy status     show what is running
+#   ./deploy diarizer   build + deploy the CPU diarizer
+#   ./deploy <target>   any target in backend/Makefile (help, build, deploy, ...)
+set -euo pipefail
+exec make -C "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backend" "${1:-release}" "${@:2}"
