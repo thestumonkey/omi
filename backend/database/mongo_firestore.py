@@ -169,6 +169,31 @@ def _split_transforms(data: Dict[str, Any], merge: bool = False) -> Tuple[Dict[s
     return spec, later
 
 
+_MISSING = object()
+
+
+def _dotted_parents(*specs) -> set:
+    """Every proper prefix of a dotted field path in these update specs."""
+    parents = set()
+    for spec in specs:
+        for op, fields in (spec or {}).items():
+            if not op.startswith('$') or not isinstance(fields, dict):
+                continue
+            for key in fields:
+                parts = key.split('.')
+                parents.update('.'.join(parts[:i]) for i in range(1, len(parts)))
+    return parents
+
+
+def _value_at(doc: dict, path: str):
+    cur = doc
+    for part in path.split('.'):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
 class _AggResult:
     """Mirrors Firestore aggregation result row: rows[0][0].value"""
 
@@ -243,12 +268,34 @@ class DocumentReference:
     def _session(self, transaction):
         return transaction._session if transaction is not None else None
 
+    def _replace_non_map_parents(self, specs, session):
+        """Firestore writes ``a.b`` even when ``a`` is null or a scalar: ``a``
+        becomes a map. Mongo refuses ("Cannot create field 'b' in element
+        {a: null}"), so turn such parents into empty maps first."""
+        parents = _dotted_parents(*specs)
+        if not parents:
+            return
+        top = {p.split('.')[0]: 1 for p in parents}
+        raw = self._mc().find_one({'_id': self.path}, top, session=session)
+        if not raw:
+            return
+        fix = {}
+        for path in sorted(parents, key=lambda p: p.count('.')):
+            if any(path.startswith(f + '.') for f in fix):
+                continue
+            value = _value_at(raw, path)
+            if value is not _MISSING and not isinstance(value, dict):
+                fix[path] = {}
+        if fix:
+            self._mc().update_one({'_id': self.path}, {'$set': fix}, session=session)
+
     def set(self, data: dict, merge: bool = False, transaction=None):
         spec, later = _split_transforms(data, merge=merge)
         base = {'_id': self.path, '_p': self._parent, '_k': self.id}
         s = self._session(transaction)
         if merge:
             spec.setdefault('$set', {}).update(base)
+            self._replace_non_map_parents((spec, later), s)
             self._mc().update_one({'_id': self.path}, spec, upsert=True, session=s)
         else:
             doc = dict(base)
@@ -280,6 +327,7 @@ class DocumentReference:
         spec, later = _split_transforms(data)
         spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id})
         s = self._session(transaction)
+        self._replace_non_map_parents((spec, later), s)
         res = self._mc().update_one({'_id': self.path}, spec, upsert=False, session=s)
         if res.matched_count == 0:
             from google.api_core.exceptions import NotFound

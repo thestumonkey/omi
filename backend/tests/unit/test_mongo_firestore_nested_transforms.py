@@ -48,3 +48,23 @@ def test_collection_group_skips_rows_in_another_layout(ref):
     store._db[store._safe("llm_usage")].insert_one({"_id": "legacy-row", "uid": "u0", "n": 2})
     rows = [s.to_dict() for s in store.collection_group("llm_usage").stream()]
     assert rows == [{"n": 1}]
+
+
+def test_update_dotted_path_under_null_parent(ref):
+    # conversations: speaker_resolution is null, then upstream writes
+    # 'speaker_resolution.participant_speaker_ids'. Firestore turns it into a map.
+    ref.set({"speaker_resolution": None, "keep": 1})
+    ref.update({"speaker_resolution.participant_speaker_ids": ["s1"]})
+    assert ref.get().to_dict() == {"speaker_resolution": {"participant_speaker_ids": ["s1"]}, "keep": 1}
+
+
+def test_update_dotted_path_under_scalar_and_missing_parents(ref):
+    ref.set({"a": "text"})
+    ref.update({"a.b.c": 1, "x.y": 2})
+    assert ref.get().to_dict() == {"a": {"b": {"c": 1}}, "x": {"y": 2}}
+
+
+def test_merge_set_into_null_parent(ref):
+    ref.set({"chat": None})
+    ref.set({"chat": {"calls": firestore.Increment(1)}}, merge=True)
+    assert ref.get().to_dict() == {"chat": {"calls": 1}}
