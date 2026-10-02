@@ -21,6 +21,12 @@ with patch('utils.other.minio_storage._s3_client', return_value=s3), \\
     pr.prerecorded('https://files.example.ts.net/omi-sync/syncing/u/a%20b.wav?X-Amz-Signature=x', language='multi')
 print('bytes', calls[0][0].decode(), calls[0][1])
 print('key', s3.get_object.call_args.kwargs['Bucket'], s3.get_object.call_args.kwargs['Key'])
+for bad in ['http://169.254.169.254/latest/meta-data', 'https://evil.example/x/y', 'file:///etc/passwd']:
+    try:
+        pr._selfhosted_audio_bytes(bad)
+        print('fetched', bad)
+    except ValueError:
+        print('refused', bad)
 """
 
 
@@ -35,6 +41,7 @@ def test_self_hosted_uploads_use_deepgram_bytes_from_internal_storage():
     assert "service deepgram" in out
     assert "bytes RIFFwav nova-3" in out
     assert "key omi-sync syncing/u/a b.wav" in out
+    assert "fetched" not in out and out.count("refused") == 3
 
 
 def test_upstream_default_is_unchanged():
