@@ -1262,3 +1262,84 @@ def postprocess_words(
     segments = _merge_segments(cleaned_words, skip_n_seconds, user_speaker_id)
     segments_objs = _segments_as_objects(segments)
     return segments_objs
+
+
+# ── [fork-only] self-hosted: uploaded audio goes to Deepgram ─────────────────
+# Upstream transcribes uploaded audio only with Parakeet or Modulate, neither
+# of which a self-hosted server runs; live audio already uses Deepgram. With
+# SELF_HOSTED and DEEPGRAM_API_KEY set, uploads use Deepgram too. Deepgram's
+# cloud cannot fetch our private storage URLs, so the bytes are sent instead.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') and os.getenv('DEEPGRAM_API_KEY'):
+    from urllib.parse import unquote as _unquote
+    from urllib.parse import urlparse as _urlparse
+
+    _SELFHOSTED_DEEPGRAM_MODEL = 'nova-3'
+
+    def _selfhosted_audio_bytes(audio_url: str) -> bytes:
+        """Read a presigned storage URL from inside the cluster."""
+        public = (os.getenv('S3_PRESIGN_ENDPOINT_URL') or '').rstrip('/')
+        if public and audio_url.startswith(public + '/'):
+            from utils.other.minio_storage import _s3_client
+
+            bucket, _, key = _unquote(_urlparse(audio_url).path).lstrip('/').partition('/')
+            return _s3_client().get_object(Bucket=bucket, Key=key)['Body'].read()
+        response = httpx.get(audio_url, timeout=120.0)
+        response.raise_for_status()
+        return response.content
+
+    class _SelfHostedDeepgramProvider(PrerecordedSTTProvider):
+        def transcribe_url(
+            self,
+            audio_url,
+            speakers_count=None,
+            attempts=0,
+            return_language=False,
+            diarize=True,
+            language=None,
+            keywords=None,
+        ):
+            return self.transcribe_bytes(
+                _selfhosted_audio_bytes(audio_url),
+                diarize=diarize,
+                attempts=attempts,
+                language=language,
+                return_language=return_language,
+                keywords=keywords,
+            )
+
+        def transcribe_bytes(
+            self,
+            audio_bytes,
+            sample_rate=16000,
+            diarize=True,
+            attempts=0,
+            encoding=None,
+            channels=1,
+            language=None,
+            return_language=False,
+            keywords=None,
+        ):
+            return deepgram_prerecorded_from_bytes(
+                audio_bytes,
+                sample_rate=sample_rate,
+                diarize=diarize,
+                attempts=attempts,
+                encoding=encoding,
+                channels=channels,
+                language=language,
+                model=_SELFHOSTED_DEEPGRAM_MODEL,
+                return_language=return_language,
+                keywords=keywords,
+            )
+
+    def get_prerecorded_service(language: Optional[str] = 'en') -> Tuple[str, Optional[str], str]:  # noqa: F811
+        return PrerecordedSTTService.DEEPGRAM, normalized_stt_language(language) or 'multi', _SELFHOSTED_DEEPGRAM_MODEL
+
+    _upstream_get_prerecorded_provider = get_prerecorded_provider
+
+    def get_prerecorded_provider(language: Optional[str] = 'en') -> PrerecordedSTTProvider:  # noqa: F811
+        from utils.stt.prerecorded_stub import prerecorded_stub_enabled
+
+        if prerecorded_stub_enabled():
+            return _upstream_get_prerecorded_provider(language)
+        return _SelfHostedDeepgramProvider()
