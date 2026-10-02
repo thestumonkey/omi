@@ -36,4 +36,4 @@ buckets:
 tailscale:
   enabled: true
   hostname: omi-files
-  proxyGroup: chakra-ingress
+  proxyGroup: ushadow-proxies
