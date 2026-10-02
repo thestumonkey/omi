@@ -20,6 +20,7 @@ import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/conversation_summary_selection.dart';
 import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/utils/audio/audio_timeline_mapper.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/ui/ui.dart';
@@ -74,6 +75,11 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
   bool _singleArtifact = false;
   AudioTimelineMapper? _timelineMapper;
   StreamSubscription<Duration>? _segmentStopSubscription;
+  // [fork] Recording is paused while a conversation plays, so the pendant
+  // does not record the playback from the phone speaker.
+  StreamSubscription<PlayerState>? _playbackCaptureSubscription;
+  CaptureProvider? _captureProvider;
+  bool _capturePausedForPlayback = false;
 
   /// Bumped on every segment seek / scrub so a stale end-handler cannot pause
   /// a newer tap's playback (#4471 cubic).
@@ -109,8 +115,32 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
   @override
   void dispose() {
     _segmentStopSubscription?.cancel();
+    _playbackCaptureSubscription?.cancel();
+    if (_capturePausedForPlayback) {
+      _capturePausedForPlayback = false;
+      unawaited(_captureProvider?.resumeCapture().catchError((_) {}));
+    }
     _audioPlayer?.dispose();
     super.dispose();
+  }
+
+  Future<void> _onPlaybackStateForCapture(PlayerState state) async {
+    final provider = _captureProvider;
+    if (provider == null) return;
+    final audible = state.playing && state.processingState != ProcessingState.completed;
+    try {
+      if (audible && !_capturePausedForPlayback && !provider.isPaused) {
+        _capturePausedForPlayback = true;
+        await provider.pauseCapture();
+      } else if (!audible && _capturePausedForPlayback) {
+        _capturePausedForPlayback = false;
+        await provider.resumeCapture();
+      }
+    } catch (e) {
+      // Nothing was recording (or the source refused): leave capture as it is.
+      Logger.debug('Playback capture pause/resume skipped: $e');
+      if (audible) _capturePausedForPlayback = false;
+    }
   }
 
   void _calculateTotalDuration() {
@@ -243,6 +273,8 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
 
     try {
       _audioPlayer = AudioPlayer();
+      _captureProvider ??= context.read<CaptureProvider?>();
+      _playbackCaptureSubscription = _audioPlayer!.playerStateStream.listen(_onPlaybackStateForCapture);
 
       // The backend builds playback artifacts asynchronously; poll while any
       // file is pending instead of streaming through the merge-in-request
