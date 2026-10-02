@@ -35,6 +35,16 @@ enum AppEnvironmentProfile {
     authCallbackScheme: 'omi',
     usesFirebaseAuthEmulator: false,
     allowsProductionData: true,
+  ),
+  // [fork] Self-hosted backend. Firebase Auth runs in emulator mode so that
+  // sign-in goes to the backend's Casdoor stand-in; see app/scripts/selfhosted-ios.sh.
+  selfHosted(
+    name: 'self_hosted',
+    defaultApiBaseUrl: String.fromEnvironment('OMI_API_BASE_URL'),
+    firebaseProjectId: 'omi-selfhosted',
+    authCallbackScheme: 'omi-selfhosted',
+    usesFirebaseAuthEmulator: true,
+    allowsProductionData: true,
   );
 
   const AppEnvironmentProfile({

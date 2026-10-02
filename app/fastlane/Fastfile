@@ -1,0 +1,111 @@
+# [fork-only] TestFlight for the self-hosted iOS build.
+#
+# The build itself is scripts/selfhosted-ios.sh (it sets up the self-hosted
+# sign-in, placeholder Firebase and signing). This file adds the App Store
+# Connect parts: the next build number, and the upload.
+#
+# Run from app/:
+#   fastlane ios beta     # next build number, build, upload to TestFlight
+#   fastlane ios upload   # upload the last built .ipa again
+#   fastlane ios check    # show whether the app and its bundle IDs exist in App Store Connect
+#   fastlane ios register # register the app, widget and watch bundle IDs (once)
+#
+# Settings come from app/.env.selfhosted (see scripts/selfhosted-ios.sh), plus
+# an App Store Connect API key (same names as the Ushadow mobile app):
+#   APP_STORE_CONNECT_API_KEY_KEY_ID=...
+#   APP_STORE_CONNECT_API_KEY_ISSUER_ID=...
+#   APP_STORE_CONNECT_API_KEY_KEY_FILEPATH=~/path/to/AuthKey_XXXX.p8
+
+default_platform(:ios)
+
+APP_DIR = File.expand_path("..", __dir__)
+
+# KEY=VALUE lines from .env.selfhosted; the environment wins.
+def selfhosted_env
+  path = File.join(APP_DIR, ".env.selfhosted")
+  UI.user_error!("Missing #{path} (see scripts/selfhosted-ios.sh)") unless File.exist?(path)
+  File.readlines(path).each_with_object({}) do |line, env|
+    next if line.strip.empty? || line.strip.start_with?("#")
+    key, value = line.strip.split("=", 2)
+    env[key] = ENV[key] || value.to_s.gsub(/\A["']|["']\z/, "")
+  end
+end
+
+platform :ios do
+  private_lane :api_key do
+    env = selfhosted_env
+    ids = %w[KEY_ID ISSUER_ID KEY_FILEPATH].map { |k| env["APP_STORE_CONNECT_API_KEY_#{k}"] }
+    UI.user_error!("Set APP_STORE_CONNECT_API_KEY_KEY_ID, _ISSUER_ID and _KEY_FILEPATH in .env.selfhosted") if ids.any?(&:nil?)
+    app_store_connect_api_key(
+      key_id: ids[0].strip,
+      issuer_id: ids[1].strip,
+      key_filepath: File.expand_path(ids[2].strip),
+    )
+  end
+
+  desc "Next build number, build the self-hosted app, upload to TestFlight"
+  lane :beta do
+    key = api_key
+    bundle_id = selfhosted_env.fetch("IOS_BUNDLE_ID")
+
+    latest = begin
+      app_store_build_number(app_identifier: bundle_id, live: false, api_key: key).to_i
+    rescue => e
+      UI.important("No TestFlight build found yet (#{e.message}); starting at 1")
+      0
+    end
+    build_number = latest + 1
+    UI.message("Building #{bundle_id} build #{build_number}")
+
+    sh("cd #{APP_DIR} && BUILD_NUMBER=#{build_number} scripts/selfhosted-ios.sh ipa")
+    upload(api_key: key)
+  end
+
+  desc "Show whether the app record and bundle IDs exist in App Store Connect"
+  lane :check do
+    api_key
+    bundle_id = selfhosted_env.fetch("IOS_BUNDLE_ID")
+    app = Spaceship::ConnectAPI::App.find(bundle_id)
+    UI.message(app ? "App record: #{app.name} (#{bundle_id})" : "App record: missing for #{bundle_id}")
+    ids = Spaceship::ConnectAPI::BundleId.all.map(&:identifier).select { |i| i.start_with?(bundle_id) }
+    UI.message("Bundle IDs: #{ids.sort.join(', ')}")
+  end
+
+  desc "Show an App Store Connect app by its Apple ID (e.g. fastlane ios show id:6745551184)"
+  lane :show do |options|
+    api_key
+    app = Spaceship::ConnectAPI::App.get(app_id: options[:id].to_s)
+    UI.message("App #{options[:id]}: #{app.name} bundle=#{app.bundle_id}")
+    ids = Spaceship::ConnectAPI::BundleId.all.map(&:identifier).select { |i| i.start_with?(app.bundle_id) }
+    UI.message("Bundle IDs: #{ids.sort.join(', ')}")
+  end
+
+  desc "Register the app, widget and watch bundle IDs (once)"
+  lane :register do
+    api_key
+    bundle_id = selfhosted_env.fetch("IOS_BUNDLE_ID")
+    name = selfhosted_env["IOS_DISPLAY_NAME"] || "Omi SH"
+    existing = Spaceship::ConnectAPI::BundleId.all.map(&:identifier)
+    { bundle_id => name, "#{bundle_id}.widget" => "#{name} Widget", "#{bundle_id}.watchapp" => "#{name} Watch" }.each do |id, label|
+      if existing.include?(id)
+        UI.message("Exists: #{id}")
+      else
+        Spaceship::ConnectAPI::BundleId.create(name: label.gsub(/[^A-Za-z0-9 ]/, ""), platform: "IOS", identifier: id)
+        UI.success("Registered: #{id}")
+      end
+    end
+  end
+
+  desc "Upload the last built .ipa to TestFlight"
+  lane :upload do |options|
+    ipa = Dir[File.join(APP_DIR, "build/ios/ipa/*.ipa")].max_by { |f| File.mtime(f) }
+    UI.user_error!("No .ipa in build/ios/ipa; run 'fastlane ios beta'") unless ipa
+    upload_to_testflight(
+      api_key: options[:api_key] || api_key,
+      ipa: ipa,
+      skip_waiting_for_build_processing: true,
+      distribute_external: false,
+    )
+    UI.success("Uploaded #{File.basename(ipa)}. It shows in TestFlight in about 10 minutes.")
+  end
+end
