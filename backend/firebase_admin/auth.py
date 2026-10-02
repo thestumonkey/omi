@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 import jwt
 import requests
 
-from firebase_admin import _casdoor
+from firebase_admin import _casdoor, _wrapped_token
 from firebase_admin.exceptions import InvalidArgumentError, NotFoundError, UnavailableError, UnknownError
 
 # ── Errors (same names and hierarchy as the real SDK) ────────────────────────
@@ -102,6 +102,9 @@ def verify_id_token(
         # An InvalidIdTokenError (not a crash) keeps upstream's LOCAL_DEVELOPMENT
         # fallback working on a machine with no Casdoor.
         raise InvalidIdTokenError("Casdoor is not configured (CASDOOR_ENDPOINT unset)")
+    # Sign-in hands mobile apps a Firebase-shaped outer token; trust only the
+    # Casdoor token inside it.
+    id_token = _wrapped_token.unwrap(id_token)
     try:
         claims = verify_oidc_token(id_token)
     except jwt.ExpiredSignatureError as e:

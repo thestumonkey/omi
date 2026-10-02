@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import pathlib
 
-from firebase_admin import auth as firebase_auth
+from firebase_admin import _wrapped_token, auth as firebase_auth
 from utils.executors import critical_executor, run_blocking
 from utils.http_client import get_auth_client
 from routers.auth import _build_callback_redirect_url
@@ -372,11 +372,14 @@ async def _exchange_code_for_tokens(code: str) -> dict:
 
 # ── Firebase REST stand-in (for upstream's desktop app) ──────────────────────
 #
-# Upstream's macOS app finishes sign-in against Google's Firebase REST API:
-# it redeems the custom_token from /v1/auth/token at identitytoolkit
-# (accounts:signInWithCustomToken) and refreshes at securetoken. With
-# OMI_FIREBASE_REST_BASE_URL pointing at this backend, those calls land here
-# instead and are answered from Casdoor, in Firebase's response format.
+# Upstream's apps finish sign-in against Google's Firebase REST API: they
+# redeem the custom_token from /v1/auth/token at identitytoolkit
+# (accounts:signInWithCustomToken), read the account (accounts:lookup) and
+# refresh at securetoken. The macOS app sends these here when
+# OMI_FIREBASE_REST_BASE_URL is set; the phone app does when its Firebase Auth
+# SDK is in emulator mode. They are answered from Casdoor, in Firebase's
+# response format. ID tokens go out wrapped (firebase_admin/_wrapped_token.py)
+# because the phone SDK needs claims that Casdoor tokens lack.
 
 firebase_rest_router = APIRouter(tags=["authentication"])
 
@@ -401,7 +404,7 @@ async def firebase_sign_in_with_custom_token(request: Request):
         return _firebase_error(400, "INVALID_CUSTOM_TOKEN")
     return {
         "kind": "identitytoolkit#VerifyCustomTokenResponse",
-        "idToken": tokens["id_token"],
+        "idToken": _wrapped_token.wrap(tokens["id_token"], claims),
         "refreshToken": tokens.get("refresh_token") or "",
         "expiresIn": str(tokens.get("expires_in", 3600)),
         "localId": claims["uid"],
@@ -410,7 +413,20 @@ async def firebase_sign_in_with_custom_token(request: Request):
 
 
 @firebase_rest_router.post("/securetoken.googleapis.com/v1/token")
-async def firebase_refresh_token(grant_type: str = Form(...), refresh_token: str = Form(...)):
+async def firebase_refresh_token(request: Request):
+    # The macOS app posts a form (grant_type); the phone SDK posts JSON (grantType).
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        body = body if isinstance(body, dict) else {}
+        grant_type, refresh_token = body.get("grantType"), body.get("refreshToken")
+    else:
+        form = await request.form()
+        grant_type, refresh_token = form.get("grant_type"), form.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        return _firebase_error(400, "MISSING_REFRESH_TOKEN")
     if grant_type != "refresh_token":
         return _firebase_error(400, "INVALID_GRANT_TYPE")
     try:
@@ -427,12 +443,59 @@ async def firebase_refresh_token(grant_type: str = Form(...), refresh_token: str
         claims = await run_blocking(critical_executor, firebase_auth.verify_id_token, tokens["id_token"])
     except firebase_auth.InvalidIdTokenError:
         return _firebase_error(400, "INVALID_REFRESH_TOKEN")
+    id_token = _wrapped_token.wrap(tokens["id_token"], claims)
     return {
-        "access_token": tokens.get("access_token") or tokens["id_token"],
+        # The phone SDK uses access_token as its ID token.
+        "access_token": id_token,
         "expires_in": str(tokens.get("expires_in", 3600)),
         "token_type": "Bearer",
         "refresh_token": tokens.get("refresh_token") or refresh_token,
-        "id_token": tokens["id_token"],
+        "id_token": id_token,
         "user_id": claims["uid"],
         "project_id": "selfhosted",
     }
+
+
+async def _claims_from_body(request: Request) -> Optional[dict]:
+    try:
+        body = await request.json()
+        return await run_blocking(critical_executor, firebase_auth.verify_id_token, str(body.get("idToken") or ""))
+    except Exception:
+        return None
+
+
+def _firebase_user(claims: dict, display_name: Optional[str] = None) -> dict:
+    return {
+        "localId": claims["uid"],
+        "email": claims.get("email") or "",
+        "emailVerified": True,
+        "displayName": display_name or claims.get("displayName") or claims.get("name") or "",
+        "providerUserInfo": [],
+    }
+
+
+@firebase_rest_router.post("/identitytoolkit.googleapis.com/v1/accounts:lookup")
+async def firebase_lookup_account(request: Request):
+    claims = await _claims_from_body(request)
+    if not claims:
+        return _firebase_error(400, "INVALID_ID_TOKEN")
+    return {"kind": "identitytoolkit#GetAccountInfoResponse", "users": [_firebase_user(claims)]}
+
+
+@firebase_rest_router.post("/identitytoolkit.googleapis.com/v1/accounts:update")
+async def firebase_update_account(request: Request):
+    # Profile edits are not stored in Casdoor; echo the name so the SDK call
+    # succeeds. The app also saves the name to the backend profile.
+    claims = await _claims_from_body(request)
+    if not claims:
+        return _firebase_error(400, "INVALID_ID_TOKEN")
+    body = await request.json()
+    display_name = body.get("displayName") if isinstance(body.get("displayName"), str) else None
+    return {"kind": "identitytoolkit#SetAccountInfoResponse", **_firebase_user(claims, display_name)}
+
+
+# The iOS SDK (11.x) uses the older relyingparty paths for the same calls.
+_V3 = "/www.googleapis.com/identitytoolkit/v3/relyingparty"
+firebase_rest_router.add_api_route(f"{_V3}/verifyCustomToken", firebase_sign_in_with_custom_token, methods=["POST"])
+firebase_rest_router.add_api_route(f"{_V3}/getAccountInfo", firebase_lookup_account, methods=["POST"])
+firebase_rest_router.add_api_route(f"{_V3}/setAccountInfo", firebase_update_account, methods=["POST"])
