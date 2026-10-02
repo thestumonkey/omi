@@ -40,3 +40,11 @@ def test_update_with_nested_counter(ref):
     ref.set({"chat": {"calls": 1}})
     ref.update({"chat": {"calls": firestore.Increment(1), "tag": "t"}, "top": firestore.Increment(2)})
     assert ref.get().to_dict() == {"chat": {"tag": "t", "calls": 1}, "top": 2}
+
+
+def test_collection_group_skips_rows_in_another_layout(ref):
+    ref.set({"n": 1})
+    store = ref._store
+    store._db[store._safe("llm_usage")].insert_one({"_id": "legacy-row", "uid": "u0", "n": 2})
+    rows = [s.to_dict() for s in store.collection_group("llm_usage").stream()]
+    assert rows == [{"n": 1}]
