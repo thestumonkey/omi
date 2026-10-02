@@ -1,0 +1,26 @@
+{{- /*
+[fork-only] Plain-HTTP tailnet address for the phone app's sign-in.
+The Firebase Auth SDK on iOS speaks only http in emulator mode, which is how
+the self-hosted app sends sign-in to this backend. Tailnet traffic is
+encrypted by WireGuard, so http here does not cross an open network.
+*/ -}}
+{{- if and .Values.tailscaleHttp .Values.tailscaleHttp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backend-listen.fullname" . }}-ts-http
+  labels:
+    {{- include "backend-listen.labels" . | nindent 4 }}
+  annotations:
+    tailscale.com/hostname: {{ .Values.tailscaleHttp.hostname | quote }}
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "backend-listen.selectorLabels" . | nindent 4 }}
+{{- end }}

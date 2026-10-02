@@ -1,0 +1,29 @@
+# [fork-only] CPU build of the diarizer (speaker embeddings and diarization).
+# Same code and pins as Dockerfile, but CPU wheels of torch/torchaudio and none
+# of the CUDA packages: the self-hosted cluster has no usable GPU for it, and a
+# speech-profile embedding is a few short clips, which a CPU handles quickly.
+# Build from the repo root:
+#   docker build -f backend/diarizer/Dockerfile.cpu .
+FROM python:3.11-slim AS builder
+
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m venv /opt/venv
+
+COPY backend/diarizer/requirements.txt /tmp/requirements.txt
+RUN grep -vE '^(nvidia-|triton==|torch==|torchaudio==)' /tmp/requirements.txt > /tmp/requirements.cpu.txt && \
+    pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r /tmp/requirements.cpu.txt
+
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN apt-get update && apt-get -y install --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+COPY backend/diarizer/ .
+
+EXPOSE 8080
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]

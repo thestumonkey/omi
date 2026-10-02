@@ -57,6 +57,11 @@ service:
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 8080
   annotations: {}
+# [fork-only] Plain-HTTP tailnet address for the iOS app's sign-in
+# (templates/tailscale-http-service.yaml).
+tailscaleHttp:
+  enabled: true
+  hostname: omi-auth
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false
@@ -139,6 +144,9 @@ env:
         key: TYPESENSE_PROTOCOL
         optional: true
   # HOSTED_PUSHER_API_URL: not set — backend uses local processing fallback
+  # [fork-only] CPU diarizer (charts/diarizer/local_omi_diarizer_values.yaml).
+  - name: HOSTED_SPEAKER_EMBEDDING_API_URL
+    value: http://diarizer.omi:8080
   - name: HOSTED_VAD_API_URL
     valueFrom:
       configMapKeyRef:

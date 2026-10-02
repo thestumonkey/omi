@@ -1,0 +1,53 @@
+# [fork-only] Self-hosted diarizer on CPU (image from diarizer/Dockerfile.cpu).
+# The backend reaches it at http://diarizer.omi:8080 (HOSTED_SPEAKER_EMBEDDING_API_URL).
+fullnameOverride: diarizer
+
+image:
+  repository: 192.168.1.42:32000/diarizer
+  pullPolicy: IfNotPresent
+  tag: cpu-1001
+
+service:
+  type: ClusterIP
+  port: 8080
+
+nodeSelector:
+  kubernetes.io/hostname: babel
+
+env:
+  - name: HUGGINGFACE_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: HUGGINGFACE_TOKEN
+  - name: OMP_NUM_THREADS
+    value: "4"
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: "4"
+    memory: 6Gi
+
+# Model download on first start can take a few minutes.
+startupProbe:
+  tcpSocket:
+    port: 8080
+  failureThreshold: 60
+  periodSeconds: 10
+livenessProbe:
+  tcpSocket:
+    port: 8080
+  periodSeconds: 20
+readinessProbe:
+  tcpSocket:
+    port: 8080
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+
+ingress:
+  enabled: false
