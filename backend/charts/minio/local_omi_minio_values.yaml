@@ -26,6 +26,11 @@ buckets:
   - omi-chakra-convos
   - omi-chakra-apps
   - omi-private-cloud-sync
+  - omi-chakra-sync-temp
+  - omi-chakra-chat-files
+  - omi-chakra-app-thumbnails
+  - omi-chakra-screen-frames
+  - omi-chakra-desktop-updates
 
 # Tailnet https address for presigned playback links (templates/tailscale-ingress.yaml).
 tailscale:

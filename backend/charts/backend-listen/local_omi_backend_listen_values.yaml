@@ -209,6 +209,18 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: BUCKET_POSTPROCESSING
+  # [fork-only] Buckets upstream reads from env with no default; storage.py
+  # crashes on None. Created by charts/minio (local_omi_minio_values.yaml).
+  - name: BUCKET_TEMPORAL_SYNC_LOCAL
+    value: omi-chakra-sync-temp
+  - name: BUCKET_CHAT_FILES
+    value: omi-chakra-chat-files
+  - name: BUCKET_APP_THUMBNAILS
+    value: omi-chakra-app-thumbnails
+  - name: BUCKET_SCREEN_FRAMES
+    value: omi-chakra-screen-frames
+  - name: BUCKET_DESKTOP_UPDATES
+    value: omi-chakra-desktop-updates
   - name: PINECONE_API_KEY
     valueFrom:
       secretKeyRef:
