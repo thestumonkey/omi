@@ -214,6 +214,10 @@ env:
   # [fork-only] Build playback artifacts (merged MP3 + spans) in-process
   # instead of Cloud Tasks (utils/cloud_tasks.py tail). Needed to start
   # playback at a tapped transcript line.
+  # Upstream's capture-sample audio clock: playback time maps follow the
+  # audio itself, not packet arrival time (which put pendant audio ~2-3 s late).
+  - name: AUDIO_TIMELINE_V2
+    value: "true"
   - name: AUDIO_MERGE_DISPATCH_MODE
     value: local
   - name: BUCKET_TEMPORAL_SYNC_LOCAL
