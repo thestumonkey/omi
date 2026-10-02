@@ -46,3 +46,15 @@ def test_presigned_url_uses_public_endpoint(bucket, monkeypatch):
     monkeypatch.setenv("S3_PRESIGN_ENDPOINT_URL", "https://files.example.ts.net")
     url = bucket.blob("b").generate_signed_url(expiration=60)
     assert urlparse(url).netloc == "files.example.ts.net"
+
+
+def test_listed_blobs_carry_metadata(bucket):
+    blob = bucket.blob("chunks/c1/1780000000.000.bin")
+    blob.metadata = {"span_start": "1780000000.0", "span_end": "1780000005.0"}
+    blob.upload_from_string(b"pcm")
+    bucket.blob("chunks/c1/plain.bin").upload_from_string(b"x")
+    listed = {b.name: b.metadata for b in bucket.list_blobs(prefix="chunks/c1/")}
+    assert listed == {
+        "chunks/c1/1780000000.000.bin": {"span_start": "1780000000.0", "span_end": "1780000005.0"},
+        "chunks/c1/plain.bin": None,
+    }

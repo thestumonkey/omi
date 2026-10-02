@@ -80,7 +80,26 @@ class Blob:
         self.name = name
         self.size = None
         # GCS custom metadata: set before an upload to store it; filled by reload().
-        self.metadata = None
+        # A blob from list_blobs loads it on first read, like GCS listings carry it.
+        self._metadata = None
+        self._metadata_pending = False
+
+    @property
+    def metadata(self):
+        if self._metadata_pending:
+            self._metadata_pending = False
+            try:
+                head = self._s3.head_object(Bucket=self._bucket, Key=self.name)
+                self._metadata = head.get('Metadata') or None
+            except ClientError as e:
+                if not _is_404(e):
+                    raise
+        return self._metadata
+
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata_pending = False
+        self._metadata = value
 
     def _metadata_args(self) -> dict:
         if not self.metadata:
@@ -184,6 +203,7 @@ class Bucket:
             for obj in page.get('Contents', []):
                 b = Blob(self._s3, self.name, obj['Key'])
                 b.size = obj.get('Size')
+                b._metadata_pending = True
                 yield b
 
     def copy_blob(self, blob: Blob, destination_bucket: 'Bucket', new_name: str = None, *_, **__) -> Blob:
