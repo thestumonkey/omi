@@ -473,3 +473,63 @@ def verify_listen_finalization_cloud_tasks_oidc(request: Request) -> int:
         audience=_listen_finalization_audience(),
         invoker_sa=_listen_finalization_invoker_sa(),
     )
+
+
+# ── [fork-only] self-hosted: run audio-merge jobs in-process ──────────────────
+# Upstream builds the conversation playback artifact (one MP3 + time spans,
+# which the app needs to start playback at a tapped line) only through Cloud
+# Tasks. With SELF_HOSTED and AUDIO_MERGE_DISPATCH_MODE=local, the same
+# handler (routers/sync.run_audio_merge_job) runs on a small background
+# worker in this process instead. Named-task dedupe becomes an in-flight set;
+# 409/500 answers are retried with a delay, like the queue would.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') and (
+    os.getenv('AUDIO_MERGE_DISPATCH_MODE', '') == 'local'
+):
+    import asyncio as _asyncio
+    import threading as _threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+
+    _LOCAL_MERGE_ATTEMPTS = 5
+    _local_merge_pool = _ThreadPoolExecutor(max_workers=2, thread_name_prefix='local-audio-merge')
+    _local_merge_inflight: set = set()
+    _local_merge_lock = _threading.Lock()
+
+    class _LocalMergeRequest:
+        def __init__(self, payload: Dict[str, Any]):
+            self._payload = payload
+
+        async def json(self) -> Dict[str, Any]:
+            return self._payload
+
+    def _local_merge_task_id(payload: Dict[str, Any]) -> str:
+        if payload.get('schema_version') == 2:
+            return f"amc-{payload['conversation_id']}-{payload['fingerprint']}"
+        return f"am-{payload['conversation_id']}-{payload['audio_file_id']}"
+
+    def _run_local_merge(task_id: str, payload: Dict[str, Any]) -> None:
+        from routers.sync import run_audio_merge_job
+
+        try:
+            for attempt in range(_LOCAL_MERGE_ATTEMPTS):
+                response = _asyncio.run(run_audio_merge_job(_LocalMergeRequest(payload), task_retry_count=attempt))
+                if response.status_code < 300:
+                    return
+                _time.sleep(5 * (attempt + 1))
+            logger.error('audio_merge local: gave up task=%s', task_id)
+        except Exception:
+            logger.exception('audio_merge local: task=%s failed', task_id)
+        finally:
+            with _local_merge_lock:
+                _local_merge_inflight.discard(task_id)
+
+    def is_audio_merge_dispatch_enabled() -> bool:  # noqa: F811
+        return True
+
+    def enqueue_audio_merge_job(payload: Dict[str, Any]) -> None:  # noqa: F811
+        task_id = _local_merge_task_id(payload)
+        with _local_merge_lock:
+            if task_id in _local_merge_inflight:
+                return
+            _local_merge_inflight.add(task_id)
+        _local_merge_pool.submit(_run_local_merge, task_id, payload)

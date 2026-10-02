@@ -211,6 +211,11 @@ env:
         key: BUCKET_POSTPROCESSING
   # [fork-only] Buckets upstream reads from env with no default; storage.py
   # crashes on None. Created by charts/minio (local_omi_minio_values.yaml).
+  # [fork-only] Build playback artifacts (merged MP3 + spans) in-process
+  # instead of Cloud Tasks (utils/cloud_tasks.py tail). Needed to start
+  # playback at a tapped transcript line.
+  - name: AUDIO_MERGE_DISPATCH_MODE
+    value: local
   - name: BUCKET_TEMPORAL_SYNC_LOCAL
     value: omi-chakra-sync-temp
   - name: BUCKET_CHAT_FILES
