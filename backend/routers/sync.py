@@ -2447,3 +2447,23 @@ async def _run_conversation_merge_job(payload: dict, task_retry_count: int):
         return JSONResponse(status_code=200, content={'status': 'done'})
     finally:
         await run_blocking(db_executor, release_job_run_lock, lock_key, lock_token)
+
+
+# ── [fork-only] self-hosted: no Cloud Tasks queue for backfill ────────────────
+# Upstream runs "backfill" uploads (older recordings, or recordings without a
+# device capture proof, which is every pendant recording from the iOS app) only
+# on a dedicated Cloud Tasks queue, and answers 503 without one. A self-hosted
+# server has no such queue, so with SELF_HOSTED set and inline dispatch those
+# uploads take the fresh lane and are processed in the request, like any other.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    import dataclasses as _dataclasses
+
+    from utils.cloud_tasks import is_cloud_tasks_dispatch_enabled as _cloud_tasks_enabled
+
+    _upstream_classify_sync_lane = classify_sync_lane
+
+    def classify_sync_lane(filenames, *, client_device_id, now=None):  # noqa: F811
+        decision = _upstream_classify_sync_lane(filenames, client_device_id=client_device_id, now=now)
+        if decision.lane == SyncLane.BACKFILL and not _cloud_tasks_enabled():
+            return _dataclasses.replace(decision, lane=SyncLane.FRESH)
+        return decision
