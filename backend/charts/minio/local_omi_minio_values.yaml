@@ -26,3 +26,9 @@ buckets:
   - omi-chakra-convos
   - omi-chakra-apps
   - omi-private-cloud-sync
+
+# Tailnet https address for presigned playback links (templates/tailscale-ingress.yaml).
+tailscale:
+  enabled: true
+  hostname: omi-files
+  proxyGroup: chakra-ingress

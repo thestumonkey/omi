@@ -1,0 +1,32 @@
+{{- /*
+Tailnet https address for the MinIO API, so phones can open the presigned
+playback links the backend hands out (S3_PRESIGN_ENDPOINT_URL). Presigned
+URLs carry their own signature and expiry; nothing is public.
+*/ -}}
+{{- if and .Values.tailscale .Values.tailscale.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-minio-ts
+  labels:
+    app: {{ .Release.Name }}-minio
+  {{- with .Values.tailscale.proxyGroup }}
+  annotations:
+    tailscale.com/proxy-group: {{ . }}
+  {{- end }}
+spec:
+  ingressClassName: tailscale
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-minio
+                port:
+                  name: api
+  tls:
+    - hosts:
+        - {{ .Values.tailscale.hostname }}
+{{- end }}

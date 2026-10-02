@@ -16,6 +16,8 @@ Backend = any S3-compatible store (MinIO, AWS S3, Cloudflare R2). Config via env
   S3_ENDPOINT_URL (e.g. http://minio:9000; omit for AWS S3)
   S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY (fall back to AWS_* names)
   S3_REGION (default us-east-1) ; S3_PUBLIC_URL_BASE (optional, for public_url)
+  S3_PRESIGN_ENDPOINT_URL (optional) — address clients use for presigned URLs,
+      when S3_ENDPOINT_URL is only reachable inside the cluster
 
 Raises google.cloud.exceptions.NotFound on missing objects so storage.py's
 existing `except NotFound` handlers keep working — that exception type needs no
@@ -32,10 +34,10 @@ from botocore.exceptions import ClientError
 from google.cloud.exceptions import NotFound
 
 
-def _s3_client():
+def _s3_client(endpoint_url=None):
     return boto3.client(
         's3',
-        endpoint_url=os.getenv('S3_ENDPOINT_URL') or None,
+        endpoint_url=endpoint_url or os.getenv('S3_ENDPOINT_URL') or None,
         aws_access_key_id=os.getenv('S3_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID'),
         aws_secret_access_key=os.getenv('S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY'),
         region_name=os.getenv('S3_REGION', 'us-east-1'),
@@ -77,16 +79,23 @@ class Blob:
         self._bucket = bucket_name
         self.name = name
         self.size = None
+        # GCS custom metadata: set before an upload to store it; filled by reload().
+        self.metadata = None
+
+    def _metadata_args(self) -> dict:
+        if not self.metadata:
+            return {}
+        return {'Metadata': {str(k): str(v) for k, v in self.metadata.items() if v is not None}}
 
     # ---- uploads ----
     def upload_from_filename(self, file_path: str, content_type=None, *_, **__):
-        extra = {'ContentType': content_type} if content_type else None
-        self._s3.upload_file(file_path, self._bucket, self.name, ExtraArgs=extra)
+        extra = {**({'ContentType': content_type} if content_type else {}), **self._metadata_args()}
+        self._s3.upload_file(file_path, self._bucket, self.name, ExtraArgs=extra or None)
 
     def upload_from_string(self, data, content_type=None, *_, **__):
         if isinstance(data, str):
             data = data.encode('utf-8')
-        kwargs = {'Bucket': self._bucket, 'Key': self.name, 'Body': data}
+        kwargs = {'Bucket': self._bucket, 'Key': self.name, 'Body': data, **self._metadata_args()}
         if content_type:
             kwargs['ContentType'] = content_type
         self._s3.put_object(**kwargs)
@@ -127,6 +136,7 @@ class Blob:
         try:
             head = self._s3.head_object(Bucket=self._bucket, Key=self.name)
             self.size = head.get('ContentLength')
+            self.metadata = head.get('Metadata') or None
         except ClientError as e:
             if _is_404(e):
                 raise NotFound(self.name)
@@ -151,7 +161,10 @@ class Blob:
         else:
             expires = 3600
         op = 'get_object' if str(method).upper() == 'GET' else 'put_object'
-        return self._s3.generate_presigned_url(op, Params={'Bucket': self._bucket, 'Key': self.name}, ExpiresIn=expires)
+        # The signature covers the host, so sign with the address the client will use.
+        public_endpoint = os.getenv('S3_PRESIGN_ENDPOINT_URL')
+        signer = _s3_client(public_endpoint) if public_endpoint else self._s3
+        return signer.generate_presigned_url(op, Params={'Bucket': self._bucket, 'Key': self.name}, ExpiresIn=expires)
 
 
 class Bucket:

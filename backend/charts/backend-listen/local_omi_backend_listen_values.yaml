@@ -232,6 +232,10 @@ env:
   # --- S3/MinIO storage (replaces GCS) ---
   - name: S3_ENDPOINT_URL
     value: "http://omi-minio:9000"
+  # [fork-only] Presigned links (audio playback) must open on phones: sign
+  # them for MinIO's tailnet address (charts/minio tailscale-ingress).
+  - name: S3_PRESIGN_ENDPOINT_URL
+    value: "https://omi-files.spangled-kettle.ts.net"
   - name: S3_ACCESS_KEY_ID
     valueFrom:
       secretKeyRef:
