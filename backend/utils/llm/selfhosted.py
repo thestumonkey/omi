@@ -15,6 +15,9 @@ Settings:
   SELF_HOSTED_LLM_MAX_CONCURRENCY  max in-flight requests (default 1; 0 = no limit)
   SELF_HOSTED_LLM_READ_TIMEOUT     seconds to wait for a reply (default 300);
                                    background jobs with long prompts need more
+  SELF_HOSTED_LLM_MAX_TOKENS       reply-length cap sent when the caller sets none
+                                   (default 8192; servers default lower, e.g.
+                                   lemonade 4096, which cuts long JSON replies)
   SELF_HOSTED_LLM_THINKING         "on" lets hybrid reasoning models (Qwen3, ...)
                                    think before answering; default off, because
                                    the backend's calls want short, direct JSON
@@ -45,6 +48,7 @@ _SELF_HOSTED_LLM_KEY = os.environ.get('SELF_HOSTED_LLM_KEY', '').strip() or 'sk-
 # conversation onto a large worker pool; without a limit they pile into the
 # server's queue, holding connections until callers time out.
 _SELF_HOSTED_LLM_MAX_CONCURRENCY = int(os.environ.get('SELF_HOSTED_LLM_MAX_CONCURRENCY', '1') or '1')
+_SELF_HOSTED_LLM_MAX_TOKENS = int(os.environ.get('SELF_HOSTED_LLM_MAX_TOKENS', '8192') or '8192')
 _SELF_HOSTED_LLM_READ_TIMEOUT = float(os.environ.get('SELF_HOSTED_LLM_READ_TIMEOUT', '300') or '300')
 
 # Text that PydanticOutputParser.get_format_instructions() puts in a prompt.
@@ -139,6 +143,8 @@ class SelfHostedChatOpenAI(ChatOpenAI):
 
     def _get_request_payload(self, input_: Any, *, stop: Optional[list] = None, **kwargs: Any) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if _SELF_HOSTED_LLM_MAX_TOKENS > 0 and not (payload.get('max_tokens') or payload.get('max_completion_tokens')):
+            payload['max_tokens'] = _SELF_HOSTED_LLM_MAX_TOKENS
         if _TEMPLATE_KWARGS:
             extra = dict(payload.get('extra_body') or {})
             extra.setdefault('chat_template_kwargs', dict(_TEMPLATE_KWARGS))
@@ -352,6 +358,8 @@ def rewrite_gateway_request(path: str, body: Dict[str, Any]) -> tuple[str, Dict[
         return _join(_SELF_HOSTED_EMBED_URL or SELF_HOSTED_LLM_URL, 'embeddings'), payload
     payload = {k: v for k, v in body.items() if k in _OPENAI_CHAT_KEYS}
     payload['model'] = current_model()
+    if _SELF_HOSTED_LLM_MAX_TOKENS > 0 and not (payload.get('max_tokens') or payload.get('max_completion_tokens')):
+        payload['max_tokens'] = _SELF_HOSTED_LLM_MAX_TOKENS
     if _TEMPLATE_KWARGS:
         payload['chat_template_kwargs'] = dict(_TEMPLATE_KWARGS)
     return _join(SELF_HOSTED_LLM_URL, path.split('/v1', 1)[-1] or 'chat/completions'), payload

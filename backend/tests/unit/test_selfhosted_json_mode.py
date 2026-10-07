@@ -94,6 +94,7 @@ def test_gateway_chat_gets_local_model_and_loses_gateway_fields(monkeypatch):
         "messages": [{"role": "user", "content": "hi"}],
         "stream": True,
         "tools": [{"type": "function"}],
+        "max_tokens": 8192,
         "chat_template_kwargs": {"enable_thinking": False},
     }
 
@@ -149,3 +150,10 @@ def test_plain_chat_reply_is_never_repaired():
 def test_thinking_is_off_by_default():
     payload = _llm()._get_request_payload([HumanMessage("hi")])
     assert payload["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_reply_length_cap_is_raised_unless_caller_sets_one():
+    assert _llm()._get_request_payload([HumanMessage("hi")])["max_tokens"] == 8192
+    capped = SelfHostedChatOpenAI(model="llama", api_key="k", base_url="http://localhost:9/v1", max_tokens=100)
+    payload = capped._get_request_payload([HumanMessage("hi")])
+    assert (payload.get("max_tokens") or payload.get("max_completion_tokens")) == 100
