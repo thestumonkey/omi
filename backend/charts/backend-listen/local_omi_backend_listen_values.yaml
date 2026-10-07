@@ -514,3 +514,8 @@ memoryMaintenance:
     - {name: MEMORY_CANONICAL_GRAPH_BACKFILL_ENABLED, value: "false"}
     - {name: FRAME_REQUEST_RETENTION_INDEPENDENT_HEALTHY, value: "true"}
     - {name: SELF_HOSTED_MEMORY_EXPIRY, value: "off"}
+    # A local 27B model writes ~12 tokens/s: 20 memories per decision call
+    # (upstream default) outruns the 300 s request timeout; 5 fit.
+    - {name: MEMORY_CANONICAL_CONSOLIDATION_BATCH_CAP, value: "5"}
+    # Background job: a 5-memory decision takes ~4 min on the local model.
+    - {name: SELF_HOSTED_LLM_READ_TIMEOUT, value: "900"}

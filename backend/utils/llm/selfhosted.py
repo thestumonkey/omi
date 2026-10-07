@@ -13,6 +13,8 @@ Settings:
                                    (``current_model``) wins over it
   SELF_HOSTED_LLM_KEY              sent as the API key (default "sk-local")
   SELF_HOSTED_LLM_MAX_CONCURRENCY  max in-flight requests (default 1; 0 = no limit)
+  SELF_HOSTED_LLM_READ_TIMEOUT     seconds to wait for a reply (default 300);
+                                   background jobs with long prompts need more
   SELF_HOSTED_LLM_THINKING         "on" lets hybrid reasoning models (Qwen3, ...)
                                    think before answering; default off, because
                                    the backend's calls want short, direct JSON
@@ -43,6 +45,7 @@ _SELF_HOSTED_LLM_KEY = os.environ.get('SELF_HOSTED_LLM_KEY', '').strip() or 'sk-
 # conversation onto a large worker pool; without a limit they pile into the
 # server's queue, holding connections until callers time out.
 _SELF_HOSTED_LLM_MAX_CONCURRENCY = int(os.environ.get('SELF_HOSTED_LLM_MAX_CONCURRENCY', '1') or '1')
+_SELF_HOSTED_LLM_READ_TIMEOUT = float(os.environ.get('SELF_HOSTED_LLM_READ_TIMEOUT', '300') or '300')
 
 # Text that PydanticOutputParser.get_format_instructions() puts in a prompt.
 _JSON_FORMAT_MARKERS = ('formatted as a JSON instance',)
@@ -229,7 +232,7 @@ def _get_selfhosted_http_client() -> Optional[httpx.Client]:
             # Set explicitly: a caller-supplied client bypasses langchain's
             # request_timeout, and httpx's 5s default would fail any request
             # waiting for the single connection.
-            timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=None),
+            timeout=httpx.Timeout(connect=10.0, read=_SELF_HOSTED_LLM_READ_TIMEOUT, write=30.0, pool=None),
         )
         logger.info('self-hosted LLM: limiting to %d concurrent request(s)', _SELF_HOSTED_LLM_MAX_CONCURRENCY)
     return _http_client
@@ -251,7 +254,7 @@ def get_selfhosted_llm(streaming: bool = False, options: Optional[Dict[str, Any]
             'api_key': _SELF_HOSTED_LLM_KEY,
             'base_url': SELF_HOSTED_LLM_URL,
             'callbacks': [get_usage_callback()],
-            'request_timeout': 300,
+            'request_timeout': _SELF_HOSTED_LLM_READ_TIMEOUT,
             'max_retries': 2,
         }
         http_client = _get_selfhosted_http_client()
@@ -391,5 +394,5 @@ def make_gateway_client() -> httpx.AsyncClient:
     )
     return httpx.AsyncClient(
         transport=_SelfHostedGatewayTransport(inner),
-        timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=None),
+        timeout=httpx.Timeout(connect=10.0, read=_SELF_HOSTED_LLM_READ_TIMEOUT, write=30.0, pool=None),
     )
