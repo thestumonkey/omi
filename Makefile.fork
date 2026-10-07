@@ -1,0 +1,13 @@
+# [fork-only] Self-hosted fork targets, included from the end of Makefile.
+
+.PHONY: mobile-ios mobile-ios-run mobile-ios-upload
+
+# Self-hosted iOS app. Settings: app/.env.selfhosted (see app/scripts/selfhosted-ios.sh).
+mobile-ios:          ## build the .ipa
+	$(BASH) app/scripts/selfhosted-ios.sh ipa
+
+mobile-ios-run:      ## install on a connected iPhone (ARGS="-d <device-id>" to pick one)
+	$(BASH) app/scripts/selfhosted-ios.sh run $(ARGS)
+
+mobile-ios-upload:   ## build and upload to TestFlight (bump BUILD_NUMBER first)
+	$(BASH) app/scripts/selfhosted-ios.sh upload

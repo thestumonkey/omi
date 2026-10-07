@@ -49,6 +49,9 @@
     "phoneCallUpsellUpgradeTapped",
     "phoneCallUpsellDismissed",
     "deviceDisconnected",
+    "deviceDisconnectedDetailed",
+    "diagnosticsSent",
+    "diagnosticsSendFailed",
     "speechProfileCapturePageClicked",
     "speechProfileSkipped",
     "speechProfileUploadSucceeded",
@@ -125,7 +128,10 @@
     "liveTranscriptCardClicked",
     "appleRemindersSyncCompleted",
     "wrappedGenerationCompleted",
-    "voiceReplyPlayback"
+    "voiceReplyPlayback",
+    "pendantVoiceQuestionDropped",
+    "onboardingSetupRatingPromptShown",
+    "onboardingSetupRatingPromptAnswered"
   ],
   "namespace_property": "$app_namespace",
   "dimensions": [

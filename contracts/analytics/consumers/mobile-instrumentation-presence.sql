@@ -47,11 +47,16 @@ WHERE app_namespace = :app_namespace AND build_number = :build_number
     'Phone Call Upsell Upgrade Tapped',
     'Phone Call Upsell Dismissed',
     'Device Disconnected',
+    'Device Disconnected Detailed',
+    'Diagnostics Sent',
+    'Diagnostics Send Failed',
     'Speech Profile Capture Page Clicked',
     'Speech Profile Skipped',
     'Speech Profile Upload Succeeded',
     'Speech Profile Embedding Stored',
     'Onboarding Step Speech Profile Continued',
+    'Onboarding Setup Rating Prompt Shown',
+    'Onboarding Setup Rating Prompt Answered',
     'Use Without Device Onboarding Welcome',
     'Use Without Device Onboarding Find Devices',
     'Fact Page Edited Fact',
@@ -123,6 +128,7 @@ WHERE app_namespace = :app_namespace AND build_number = :build_number
     'Live Transcript Card Clicked',
     'Apple Reminders Sync Completed',
     'Wrapped Generation Completed',
-    'Voice Reply Playback'
+    'Voice Reply Playback',
+    'Pendant Voice Question Dropped'
   )
 GROUP BY event ORDER BY event;

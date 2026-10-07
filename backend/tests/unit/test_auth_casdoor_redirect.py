@@ -30,8 +30,11 @@ os.environ.setdefault("ENCRYPTION_SECRET", "omi_test_secret_for_casdoor_redirect
 os.environ.setdefault("BASE_API_URL", "http://localhost:8080")
 
 # Pre-mock heavy deps before importing the module under test.
+# Restored right after the import so later test files see the real modules.
 _mock = MagicMock()
-for _m in ["firebase_admin.auth", "database.redis_db", "utils.http_client", "utils.log_sanitizer"]:
+_STUBBED = ["firebase_admin.auth", "database.redis_db", "utils.http_client", "utils.log_sanitizer"]
+_saved_modules = {_m: sys.modules.get(_m) for _m in _STUBBED}
+for _m in _STUBBED:
     sys.modules.setdefault(_m, _mock)
 
 _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -39,6 +42,12 @@ if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
 from routers.casdoor_auth import _validate_redirect_uri, auth_token  # noqa: E402
+
+for _m, _orig in _saved_modules.items():
+    if _orig is None:
+        sys.modules.pop(_m, None)
+    else:
+        sys.modules[_m] = _orig
 
 # ── Validator: accept every shape a real omi client sends ────────────────────
 

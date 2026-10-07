@@ -80,6 +80,17 @@ ingress:
   #      - chart-example.local
 
 env:
+  # ── Upstream rollout flags, pinned as in dev_omi_backend_listen_values.yaml ──
+  - name: LIVE_CAPTURE_WINDOW_RETENTION
+    value: 'false'
+  - name: LIVE_CAPTURE_WINDOW_STRICT_PROJECTION
+    value: 'false'
+  - name: LIVE_CAPTURE_WINDOW_MERGE_PRESERVATION
+    value: 'false'
+  - name: LIVE_CAPTURE_WINDOW_MERGE_UNION
+    value: 'false'
+  - name: LIVE_CAPTURE_WINDOW_TRANSLATOR_SENDS
+    value: "false"
   # ── Config (non-sensitive) ── from ConfigMap omi-backend-config ──────────
   - name: BASE_API_URL
     valueFrom:

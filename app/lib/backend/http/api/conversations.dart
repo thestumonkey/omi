@@ -12,6 +12,8 @@ import 'package:omi/backend/schema/gen/conversation_wire.g.dart' as wire;
 import 'package:omi/backend/schema/gen/misc_wire.g.dart' as misc_wire;
 import 'package:omi/backend/schema/schema.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/capture/calendar_capture_gap_monitor.dart';
+import 'package:omi/services/integrations/google_calendar_service.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -114,7 +116,13 @@ Future<({List<ServerConversation> items, bool ok, bool truncated})> getConversat
   return (items: <ServerConversation>[], ok: false, truncated: false);
 }
 
-Future<ServerConversation?> reProcessConversationServer(String conversationId, {String? appId}) async {
+bool hasSpeakerReceiptSummaryCapability(Map<String, String> headers) => headers['x-omi-speaker-receipt-summary'] == '1';
+
+Future<ServerConversation?> reProcessConversationServer(
+  String conversationId, {
+  String? appId,
+  bool requireSpeakerReceipt = false,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',
     headers: {},
@@ -124,6 +132,10 @@ Future<ServerConversation?> reProcessConversationServer(String conversationId, {
   if (response == null) return null;
   Logger.debug('reProcessConversationServer: ${response.body}');
   if (response.statusCode == 200) {
+    // A pre-fix backend can return 200 with a summary made from stale speaker
+    // labels. Keep the detail page's retry action until the receipt-aware
+    // processor explicitly acknowledges its summary path.
+    if (requireSpeakerReceipt && !hasSpeakerReceiptSummaryCapability(response.headers)) return null;
     return ServerConversation.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
   return null;
@@ -203,6 +215,7 @@ Future<List<CalendarEventLink>> listGoogleCalendarEvents({
   String? query,
   int maxResults = 20,
 }) async {
+  final cacheOwner = GoogleCalendarService.meetingCacheOwner;
   String url = '${Env.apiBaseUrl}v1/calendar/google/events?max_results=$maxResults';
 
   if (timeMin != null) {
@@ -219,41 +232,23 @@ Future<List<CalendarEventLink>> listGoogleCalendarEvents({
   if (response == null) return [];
   if (response.statusCode == 200) {
     var body = utf8.decode(response.bodyBytes);
-    return (jsonDecode(body) as List<dynamic>)
+    final events = (jsonDecode(body) as List<dynamic>)
         .map(
           (event) =>
               CalendarEventLink.fromGenerated(wire.GeneratedCalendarEventLink.fromJson(event as Map<String, dynamic>)),
         )
         .toList();
+    if (cacheOwner == GoogleCalendarService.meetingCacheOwner) {
+      GoogleCalendarService.rememberMeetings(
+        cacheOwner,
+        events.map((e) => CalendarCaptureWindow(e.eventId, e.startTime, e.endTime)),
+        now: DateTime.now(),
+      );
+    }
+    return events;
   }
   debugPrint('listGoogleCalendarEvents error: ${response.statusCode} - ${response.body}');
   return [];
-}
-
-/// Fetch calendar events in [start, end] that have no recorded conversation.
-/// Returns capture-gap rows (never conversations) and whether the read
-/// answered, so a failed read is not read as "nothing to show".
-Future<({List<CalendarCaptureGap> items, bool ok})> getCalendarCaptureGaps({
-  required DateTime start,
-  required DateTime end,
-}) async {
-  final url =
-      '${Env.apiBaseUrl}v1/calendar/capture-gaps?start=${start.toUtc().toIso8601String()}&end=${end.toUtc().toIso8601String()}';
-  var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
-  if (response == null) return (items: const <CalendarCaptureGap>[], ok: false);
-  if (response.statusCode == 200) {
-    var body = utf8.decode(response.bodyBytes);
-    final gaps = (jsonDecode(body) as List<dynamic>)
-        .map(
-          (row) =>
-              CalendarCaptureGap.fromGenerated(wire.GeneratedCalendarCaptureGap.fromJson(row as Map<String, dynamic>)),
-        )
-        .toList();
-    return (items: gaps, ok: true);
-  }
-  debugPrint('getCalendarCaptureGaps: ${response.statusCode} - ${response.body}');
-  // 400 means no connected calendar — nothing was captured, so nothing to show.
-  return (items: const <CalendarCaptureGap>[], ok: response.statusCode == 400);
 }
 
 Future<({ServerConversation? item, bool ok})> getConversationByIdResult(String conversationId) async {
@@ -352,11 +347,18 @@ class ConversationApi {
     );
     return switch (sent) {
       ApiFailure(:final problem) => ApiFailure(problem),
-      ApiSuccess(:final data) => decodeApiRows<ServerConversation>(
+      ApiSuccess(:final data, :final truncated) => switch (decodeApiRows<ServerConversation>(
           data,
           ServerConversation.fromJson,
           fallback: recordFallback,
-        ),
+        )) {
+          ApiSuccess(:final data, :final rejectedRows) => ApiSuccess(
+              data,
+              rejectedRows: rejectedRows,
+              truncated: truncated,
+            ),
+          ApiFailure(:final problem) => ApiFailure(problem),
+        },
     };
   }
 
@@ -784,6 +786,10 @@ Future<UploadFilesResult> uploadLocalFilesV2(
   List<File> files, {
   UploadProgressCallback? onUploadProgress,
   String? conversationId,
+  String? captureEvidence,
+  String? recordingSessionId,
+  double? audioStartSeconds,
+  double? audioEndSeconds,
   bool claimLiveCapture = false,
   Geolocation? geolocation,
 }) async {
@@ -793,14 +799,21 @@ Future<UploadFilesResult> uploadLocalFilesV2(
     captureManifest = await _createSyncCaptureManifest(files, conversationId!);
   }
   var url = '${Env.apiBaseUrl}v2/sync-local-files';
-  if (conversationId != null) {
-    url += '?conversation_id=${Uri.encodeQueryComponent(conversationId)}';
+  final query = <String, String>{
+    if (conversationId != null && conversationId.isNotEmpty) 'conversation_id': conversationId,
+    if (recordingSessionId != null && recordingSessionId.isNotEmpty) 'recording_session_id': recordingSessionId,
+    if (audioStartSeconds != null) 'audio_start_seconds': audioStartSeconds.toString(),
+    if (audioEndSeconds != null) 'audio_end_seconds': audioEndSeconds.toString(),
+  };
+  if (query.isNotEmpty) {
+    url += '?${query.entries.map((entry) => '${entry.key}=${Uri.encodeQueryComponent(entry.value)}').join('&')}';
   }
   var response = await makeMultipartApiCall(
     url: url,
     files: files,
     headers: {
       if (captureManifest != null) 'X-Omi-Sync-Capture-Manifest': captureManifest,
+      if (captureEvidence != null) 'X-Omi-Capture-Evidence': captureEvidence,
       if (geolocation != null) 'X-Omi-Conversation-Geolocation': jsonEncode(geolocation.toJson()),
     },
     onUploadProgress: onUploadProgress,
@@ -963,6 +976,8 @@ Future<ConversationSearchResult> searchConversationsServerResult(
     url: '${Env.apiBaseUrl}v1/conversations/search',
     headers: {},
     method: 'POST',
+    timeout: const Duration(seconds: 15),
+    retries: 0,
     body: jsonEncode({
       'query': query,
       'page': page ?? 1,

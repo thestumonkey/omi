@@ -135,3 +135,6 @@ chat-first-e2e-fixture:
 
 run-canonical-maintenance:
 	$(PYTHON_RUNNER) scripts/dev-harness/run-canonical-maintenance.py "$(MAINTENANCE_USER)"
+
+# [fork] Self-hosted fork targets live in a fork-only file.
+-include Makefile.fork

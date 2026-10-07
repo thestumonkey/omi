@@ -18,10 +18,13 @@ import 'package:omi/pages/onboarding/permissions/permissions_checker.dart';
 import 'package:omi/pages/onboarding/permissions/permissions_widget.dart';
 import 'package:omi/pages/onboarding/primary_language/primary_language_widget.dart';
 import 'package:omi/pages/onboarding/complete_screen.dart';
+import 'package:omi/pages/onboarding/setup_page.dart';
 import 'package:omi/pages/onboarding/speech_profile_widget.dart';
+import 'package:omi/pages/onboarding/widgets/onboarding_step_layout.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/services/experiments/onboarding_setup_rating_prompt.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/product_telemetry.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -50,8 +53,9 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
   static const int kPermissionsPage = 5;
   static const int kSpeechProfilePage = 6; // Guided voice introduction
   static const int kKnowledgeGraphPage = 7; // Memory graph preview
-  static const int kCompletePage = 8; // "You're all set" completion screen
-  static const int kPageCount = 9;
+  static const int kSetupPage = 8; // "Setting up your Omi" + rating pre-prompt; flag-gated, else skipped
+  static const int kCompletePage = 9; // "You're all set" completion screen
+  static const int kPageCount = 10;
 
   /// The steps the progress dots count, in order. Auth, consent and the completion screen are not
   /// steps: they are shown without dots.
@@ -70,6 +74,7 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
   String _currentBackgroundImage = Assets.images.onboardingBg2.path;
   bool get hasSpeechProfile => SharedPreferencesUtil().hasSpeakerProfile;
   Future<void>? _knowledgeGraphPrebuildFuture;
+  Future<bool>? _setupPageEnabled;
   ProductAttempt? _onboardingAttempt;
 
   @override
@@ -81,7 +86,7 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
         surface: ProductSurface.onboarding,
       );
     }
-    // Auth, AiConsent, Name, Lang, FoundOmi, Permissions, SpeechProfile, KnowledgeGraph, Complete
+    // Auth, AiConsent, Name, Lang, FoundOmi, Permissions, SpeechProfile, KnowledgeGraph, Setup, Complete
     _controller = TabController(length: kPageCount, vsync: this);
     _controller!.addListener(() {
       if (!mounted) return;
@@ -93,6 +98,10 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       _precacheNextImage(_controller!.index);
       if (_controller!.index == kSpeechProfilePage && _knowledgeGraphPrebuildFuture == null) {
         _knowledgeGraphPrebuildFuture = _prebuildKnowledgeGraph().catchError((_) {});
+      }
+      // Read the flag two steps ahead so the decision is ready when the reader taps Continue.
+      if (_controller!.index == kSpeechProfilePage) {
+        _setupPageEnabled ??= OnboardingSetupRatingPromptGate.isEnabled();
       }
     });
 
@@ -170,6 +179,17 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
     }
   }
 
+  /// After the knowledge graph: the setup page when its flag is on, otherwise straight to the
+  /// completion screen exactly as before the page existed.
+  static int stepAfterKnowledgeGraph({required bool setupPageEnabled}) => setupPageEnabled ? kSetupPage : kCompletePage;
+
+  Future<void> _leaveKnowledgeGraph() async {
+    PlatformManager.instance.analytics.onboardingStepCompleted('Knowledge Graph');
+    final enabled = await (_setupPageEnabled ?? OnboardingSetupRatingPromptGate.isEnabled());
+    if (!mounted) return;
+    _controller!.animateTo(stepAfterKnowledgeGraph(setupPageEnabled: enabled));
+  }
+
   // ---- Resume and back ----------------------------------------------------------------------
 
   /// Per-account key so a different account signing in on this phone starts at the Name step.
@@ -227,7 +247,12 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       // Continue to rebuild below.
     }
 
-    await KnowledgeGraphApi.rebuildKnowledgeGraph();
+    final rebuildResult = await KnowledgeGraphApi.rebuildKnowledgeGraph();
+    final status = rebuildResult['status'];
+    // 'canonical_up_to_date' is the synthetic client status returned on HTTP 409.
+    if (status == 'canonical_up_to_date') {
+      return;
+    }
     await KnowledgeGraphApi.waitForGraphStability(
       timeout: const Duration(seconds: 25),
       interval: const Duration(seconds: 2),
@@ -276,6 +301,7 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       case kSpeechProfilePage:
         return Assets.images.onboardingBg3.path;
       case kKnowledgeGraphPage:
+      case kSetupPage:
       case kCompletePage:
         return Assets.images.onboardingBg6.path;
       default:
@@ -395,9 +421,11 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                 _controller!.animateTo(kKnowledgeGraphPage);
               },
             ),
-      OnboardingKnowledgeGraphStep(
-        onContinue: () {
-          PlatformManager.instance.analytics.onboardingStepCompleted('Knowledge Graph');
+      OnboardingKnowledgeGraphStep(onContinue: _leaveKnowledgeGraph),
+      OnboardingSetupPage(
+        pendingWork: _knowledgeGraphPrebuildFuture,
+        onFinished: () {
+          PlatformManager.instance.analytics.onboardingStepCompleted('Setup');
           _controller!.animateTo(kCompletePage);
         },
       ),
@@ -416,8 +444,8 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
     ];
 
     // The speech step draws the Omi device with a mic-level glow instead of a background image,
-    // matching the Settings redo page; the completion screen draws its own.
-    final showBackground = index != kCompletePage && index != kSpeechProfilePage;
+    // matching the Settings redo page; the setup and completion screens draw their own.
+    final showBackground = index != kCompletePage && index != kSetupPage && index != kSpeechProfilePage;
     final previous = _previousStep;
 
     return PopScope(
@@ -434,28 +462,14 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
           body: Stack(
             children: [
               if (index == kAuthPage || showBackground) _background(),
-              // Page component (no transition for content)
-              pages[index],
-              if (kProgressSteps.contains(index))
-                SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: OmiSpacing.md),
-                    child: OnboardingProgressDots(
-                      current: kProgressSteps.indexOf(index),
-                      total: kProgressSteps.length,
-                    ),
-                  ),
-                ),
-              if (previous != null)
-                SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: OmiSpacing.xs, top: OmiSpacing.xxs),
-                    child: Align(
-                      alignment: Alignment.topLeft,
-                      child: OmiBackButton.circled(key: const Key('onboarding_back'), onPressed: _goBack),
-                    ),
-                  ),
-                ),
+              OnboardingStepLayout(
+                reserveHeader: index == kSpeechProfilePage,
+                onBack: previous == null ? null : _goBack,
+                progress: kProgressSteps.contains(index)
+                    ? OnboardingProgressDots(current: kProgressSteps.indexOf(index), total: kProgressSteps.length)
+                    : null,
+                child: pages[index],
+              ),
             ],
           ),
         ),
@@ -468,6 +482,10 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
 @visibleForTesting
 abstract final class OnboardingProgressStepsForTest {
   static List<int> get steps => _OnboardingWrapperState.kProgressSteps;
+  static int get setupPage => _OnboardingWrapperState.kSetupPage;
+  static int get completePage => _OnboardingWrapperState.kCompletePage;
+  static int stepAfterKnowledgeGraph({required bool setupPageEnabled}) =>
+      _OnboardingWrapperState.stepAfterKnowledgeGraph(setupPageEnabled: setupPageEnabled);
 }
 
 /// The first-run progress: one dot per real step, the current one larger, with a spoken

@@ -15,6 +15,16 @@ DEFAULT_SPEC_PATH = ROOT_DIR / 'docs' / 'api-reference' / 'app-client-openapi.js
 DEFAULT_OUTPUT_DIR = ROOT_DIR / 'app' / 'lib' / 'backend' / 'schema' / 'gen'
 
 SCHEMA_GROUPS = {
+    'proactivity': {
+        'output': DEFAULT_OUTPUT_DIR / 'proactivity_wire.g.dart',
+        'schemas': (
+            'ProactivityTarget',
+            'ProactivityFeedItem',
+            'ProactivityFeedResponse',
+            'ProactivityOutcomeRequest',
+            'ProactivityOutcomeResponse',
+        ),
+    },
     'frame_requests': {
         'output': DEFAULT_OUTPUT_DIR / 'frame_requests_wire.g.dart',
         'schemas': (
@@ -35,6 +45,15 @@ SCHEMA_GROUPS = {
             'ScreenActivitySyncResponse',
         ),
     },
+    'screen_frames': {
+        'output': DEFAULT_OUTPUT_DIR / 'screen_frames_wire.g.dart',
+        'schemas': (
+            'NormalizedRect',
+            'ScreenFrameGround',
+            'ConversationScreenFrame',
+            'ConversationScreenFrameSet',
+        ),
+    },
     'conversation': {
         'output': DEFAULT_OUTPUT_DIR / 'conversation_wire.g.dart',
         'schemas': (
@@ -47,6 +66,8 @@ SCHEMA_GROUPS = {
             'Section',
             'Participant',
             'Insight',
+            'NoteEvidenceRef',
+            'NoteClaim',
             'Structured',
             'Geolocation',
             'ConversationPhoto',
@@ -55,7 +76,6 @@ SCHEMA_GROUPS = {
             'ConversationAudioSpan',
             'ConversationAudio',
             'CalendarEventLink',
-            'CalendarCaptureGap',
             'TranscriptMatchSnippet',
             'CaptureGroupMember',
             'CaptureGroup',
@@ -76,10 +96,15 @@ SCHEMA_GROUPS = {
             'SyncJobStartResponse',
             'SyncRecoveryWindowExceededResponse',
             'SyncJobStatusResponse',
+            'RejectSpeakerRequest',
             'SyncCaptureManifestFile',
             'SyncCaptureManifestRequest',
             'SyncCaptureManifestResponse',
         ),
+    },
+    'chat_sessions': {
+        'output': DEFAULT_OUTPUT_DIR / 'chat_sessions_wire.g.dart',
+        'schemas': ('ChatSessionResponse',),
     },
     'messages': {
         'output': DEFAULT_OUTPUT_DIR / 'messages_wire.g.dart',
@@ -208,11 +233,12 @@ SCHEMA_GROUPS = {
     },
     'people': {
         'output': DEFAULT_OUTPUT_DIR / 'people_wire.g.dart',
-        'schemas': ('Person',),
+        'schemas': ('Person', 'PersonConfidenceReason', 'VoiceMatch', 'VoiceMatchesResponse'),
     },
     'speaker_tag_prompts': {
         'output': DEFAULT_OUTPUT_DIR / 'speaker_tag_prompts_wire.g.dart',
         'schemas': (
+            'SpeakerTagCandidate',
             'SpeakerTagPrompt',
             'SpeakerTagPromptsResponse',
             'SpeakerTagPromptsShownRequest',
@@ -220,8 +246,23 @@ SCHEMA_GROUPS = {
             'SpeakerTagPromptAnswerRequest',
             'SpeakerTagPromptAnswerResponse',
             'SpeakerTagPromptClip',
+            'IgnoredVoice',
+            'IgnoredVoicesResponse',
             'VoiceProfileSettings',
             'VoiceProfileSettingsUpdate',
+        ),
+    },
+    'search': {
+        'output': DEFAULT_OUTPUT_DIR / 'search_wire.g.dart',
+        'schemas': (
+            'SearchOverviewFolder',
+            'SearchOverviewResponse',
+            'ProductMemorySearchItem',
+            'MemorySearchPolicyPayload',
+            'MemoryGlobalReadGateObservability',
+            'ReadRolloutCapabilities',
+            'ProductRolloutObservability',
+            'ProductMemorySearchResponse',
         ),
     },
     'imports_integrations': {
@@ -261,6 +302,9 @@ SCHEMA_GROUPS = {
             'RebuildResponse',
             'ErrorResponse',
             'StatusResponse',
+            'TtsVoice',
+            'TtsVoiceCatalog',
+            'AssistantVoicePreference',
         ),
     },
     'wrapped_task_integrations': {
