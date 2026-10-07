@@ -1,0 +1,76 @@
+{{- /*
+[fork-only] Upstream's memory-maintenance-job (a scheduled Cloud Run Job there)
+as a Kubernetes CronJob. It promotes Short-term memories to Long-term
+(consolidation, via the LLM) and extracts the knowledge graph on promotion;
+without it the memory graph stays empty. Same image and env as the backend.
+Enable with memoryMaintenance.enabled; extra env (e.g. the switches below)
+goes in memoryMaintenance.env.
+*/ -}}
+{{- $mm := .Values.memoryMaintenance | default dict }}
+{{- if $mm.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "backend-listen.fullname" . }}-memory-maintenance
+  labels:
+    {{- include "backend-listen.labels" . | nindent 4 }}
+spec:
+  schedule: {{ $mm.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ $mm.timeoutSeconds | default 3600 }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: memory-maintenance
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: memory-maintenance
+              image: "{{ .Values.image.repository }}:{{ $mm.imageTag | default .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "modal/memory_maintenance_job.py"]
+              {{- with .Values.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              env:
+                {{- range .Values.env }}
+                - name: {{ .name }}
+                  {{- if eq .name "GOOGLE_CLOUD_PROJECT" }}
+                  value: {{ required "runtimeGcpProjectId is required" $.Values.runtimeGcpProjectId | quote }}
+                  {{- else if hasKey . "value" }}
+                  value: {{ .value | quote }}
+                  {{- else if hasKey . "valueFrom" }}
+                  valueFrom:
+                    {{- toYaml .valueFrom | nindent 20 }}
+                  {{- end }}
+                {{- end }}
+                {{- range $mm.env }}
+                - name: {{ .name }}
+                  value: {{ .value | quote }}
+                {{- end }}
+              {{- with .Values.volumeMounts }}
+              volumeMounts:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          {{- with .Values.volumes }}
+          volumes:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

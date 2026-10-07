@@ -500,3 +500,17 @@ tolerations: []
 strategy:
   type: Recreate
 
+
+# [fork-only] Upstream's scheduled memory-maintenance-job as a CronJob
+# (templates/memory-maintenance-cronjob.yaml): Short-term → Long-term
+# promotion and knowledge-graph extraction. Expiry hiding is off for now.
+memoryMaintenance:
+  enabled: true
+  schedule: "17 * * * *"
+  timeoutSeconds: 3600
+  env:
+    - {name: MEMORY_CANONICAL_MAINTENANCE_ENABLED, value: "true"}
+    - {name: MEMORY_CANONICAL_MAINTENANCE_FLEX, value: "true"}
+    - {name: MEMORY_CANONICAL_GRAPH_BACKFILL_ENABLED, value: "false"}
+    - {name: FRAME_REQUEST_RETENTION_INDEPENDENT_HEALTHY, value: "true"}
+    - {name: SELF_HOSTED_MEMORY_EXPIRY, value: "off"}

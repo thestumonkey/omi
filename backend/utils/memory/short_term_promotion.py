@@ -451,3 +451,17 @@ __all__ = [
     "run_canonical_short_term_maintenance",
     "run_canonical_short_term_ttl_lifecycle",
 ]
+
+
+# ── [fork-only] self-hosted: expiry hiding can be switched off ───────────────
+# Upstream hides Short-term memories that consolidation did not promote within
+# their TTL (48h). SELF_HOSTED_MEMORY_EXPIRY=off skips that step, so nothing is
+# hidden while promotion and graph extraction still run; expired rows simply
+# stay Short-term. run_canonical_short_term_maintenance looks this name up at
+# call time, so rebinding it here is enough.
+import os as _os
+
+if _os.environ.get('SELF_HOSTED_MEMORY_EXPIRY', '').strip().lower() == 'off':
+
+    def run_canonical_short_term_ttl_lifecycle(uid: str, **_: Any) -> CanonicalShortTermLifecycleReport:  # noqa: F811
+        return CanonicalShortTermLifecycleReport(uid=uid, skipped_reason='self_hosted_expiry_off')
