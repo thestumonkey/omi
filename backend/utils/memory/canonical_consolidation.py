@@ -2410,7 +2410,21 @@ def invoke_consolidation_agent(  # noqa: F811
         return _upstream_invoke_consolidation_agent(context, llm_invoke=llm_invoke)
     seen: Dict[str, str] = {}
 
+    pending_ids = [item.memory_id for item in getattr(context, 'pending_items', [])]
+
     def _capture(messages: Any) -> str:
+        if pending_ids:
+            # Local models tend to decide on the context memories instead of the
+            # pending ones; name the ids to decide, once, at the end.
+            messages = list(messages) + [
+                HumanMessage(
+                    content=(
+                        'Return exactly one decision for each of these source_memory_id values and no others: '
+                        + ', '.join(pending_ids)
+                        + '. All other memories in the batch are context only.'
+                    )
+                )
+            ]
         if llm_invoke is not None:
             raw = llm_invoke(messages)
         else:
