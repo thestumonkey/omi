@@ -519,3 +519,5 @@ memoryMaintenance:
     - {name: MEMORY_CANONICAL_CONSOLIDATION_BATCH_CAP, value: "5"}
     # Background job: a 5-memory decision takes ~4 min on the local model.
     - {name: SELF_HOSTED_LLM_READ_TIMEOUT, value: "900"}
+    # ~4 min per call: 5 calls keep the shared LLM free for live work most of the hour.
+    - {name: MEMORY_CANONICAL_CONSOLIDATION_MAX_BATCHES_PER_PASS, value: "5"}
