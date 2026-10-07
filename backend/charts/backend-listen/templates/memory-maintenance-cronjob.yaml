@@ -40,12 +40,17 @@ spec:
             - name: memory-maintenance
               image: "{{ .Values.image.repository }}:{{ $mm.imageTag | default .Values.image.tag }}"
               imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # Run from /app with /app on the path: the script lives in modal/, and
+              # imports (incl. the firebase_admin shim) resolve from /app.
+              workingDir: /app
               command: ["python", "modal/memory_maintenance_job.py"]
               {{- with .Values.envFrom }}
               envFrom:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
               env:
+                - name: PYTHONPATH
+                  value: /app
                 {{- range .Values.env }}
                 - name: {{ .name }}
                   {{- if eq .name "GOOGLE_CLOUD_PROJECT" }}
