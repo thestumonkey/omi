@@ -20,7 +20,9 @@ RAW = json.dumps(
 def _context():
     from types import SimpleNamespace
 
-    return SimpleNamespace(uid="u1")
+    return SimpleNamespace(
+        uid="u1", pending_items=[SimpleNamespace(memory_id="mem_a"), SimpleNamespace(memory_id="mem_b")]
+    )
 
 
 def test_invalid_decision_becomes_review(monkeypatch):
@@ -44,3 +46,23 @@ def test_unusable_output_still_fails(monkeypatch):
     monkeypatch.setattr(cc, "build_consolidation_llm_messages", lambda context: [])
     batch = cc.invoke_consolidation_agent(_context(), llm_invoke=lambda messages: "not json at all")
     assert batch.reasoning.startswith("parse_failed:")
+
+
+def test_partition_is_fixed(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("SELF_HOSTED", "true")
+    monkeypatch.setattr(cc, "build_consolidation_llm_messages", lambda context: [])
+    context = SimpleNamespace(
+        uid="u1", pending_items=[SimpleNamespace(memory_id="mem_a"), SimpleNamespace(memory_id="mem_c")]
+    )
+    raw = json.dumps(
+        {
+            "decisions": [
+                {"source_memory_id": "mem_a", "route": "reject", "rationale": "x"},
+                {"source_memory_id": "invented", "route": "promote", "rationale": "x"},
+            ]
+        }
+    )
+    batch = cc.invoke_consolidation_agent(context, llm_invoke=lambda messages: raw)
+    assert [(d.source_memory_id, d.route) for d in batch.decisions] == [("mem_a", "reject"), ("mem_c", "review")]

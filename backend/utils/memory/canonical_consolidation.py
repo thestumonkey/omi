@@ -2422,5 +2422,36 @@ def invoke_consolidation_agent(  # noqa: F811
     if batch.reasoning.startswith('parse_failed:') and 'raw' in seen:
         salvaged = _salvage_consolidation_batch(seen['raw'])
         if salvaged is not None:
-            return salvaged
-    return batch
+            batch = salvaged
+    if _agent_batch_blocks_watermark(batch):
+        return batch
+    return _cover_pending_items(context, batch)
+
+
+def _cover_pending_items(context: ConsolidationContext, batch: ConsolidationAgentBatch) -> ConsolidationAgentBatch:
+    """Exactly one decision per pending item: drop unknown/duplicate ids, review the skipped ones."""
+    pending_ids = [item.memory_id for item in context.pending_items]
+    expected = set(pending_ids)
+    kept: Dict[str, ConsolidationAgentDecision] = {}
+    dropped = 0
+    for decision in batch.decisions:
+        if decision.source_memory_id in expected and decision.source_memory_id not in kept:
+            kept[decision.source_memory_id] = decision
+        else:
+            dropped += 1
+    missing = [memory_id for memory_id in pending_ids if memory_id not in kept]
+    if not dropped and not missing:
+        return batch
+    for memory_id in missing:
+        kept[memory_id] = ConsolidationAgentDecision(
+            source_memory_id=memory_id,
+            route='review',
+            rationale='self-hosted: the model gave no decision for this memory',
+        )
+    logger.warning(
+        'consolidation_selfhosted_partition_fix uid=%s dropped=%d reviewed_missing=%d',
+        context.uid,
+        dropped,
+        len(missing),
+    )
+    return batch.model_copy(update={'decisions': [kept[memory_id] for memory_id in pending_ids]})
