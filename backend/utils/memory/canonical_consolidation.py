@@ -2344,3 +2344,83 @@ def run_canonical_consolidation(
     else:
         report.last_consolidation_run_at = control.last_consolidation_run_at
     return report
+
+
+# ── [fork-only] self-hosted: keep the valid decisions of a partly bad batch ───
+# Upstream discards a whole consolidation batch when any one decision fails
+# validation (fail closed). Local models slip now and then (e.g. a
+# target_memory_id equal to the source), which would block every memory in the
+# batch, run after run. On self-hosted servers each decision is checked on its
+# own: valid ones are kept and an invalid one becomes route "review" (no
+# promotion, nothing hidden), so the batch still covers every pending id.
+def _salvage_consolidation_batch(raw: str) -> Optional[ConsolidationAgentBatch]:
+    import json as _json
+
+    text = raw.strip()
+    start, end = text.find('{'), text.rfind('}')
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = _json.loads(text[start : end + 1], strict=False)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get('decisions'), list):
+        return None
+    decisions: List[ConsolidationAgentDecision] = []
+    repaired = 0
+    for item in data['decisions']:
+        try:
+            decisions.append(ConsolidationAgentDecision.model_validate(item))
+        except Exception as exc:  # noqa: BLE001 - any invalid decision becomes review
+            source_id = item.get('source_memory_id') if isinstance(item, dict) else None
+            if not isinstance(source_id, str) or not source_id:
+                return None
+            decisions.append(
+                ConsolidationAgentDecision(
+                    source_memory_id=source_id,
+                    route='review',
+                    rationale=f'self-hosted: model decision failed validation ({type(exc).__name__})',
+                )
+            )
+            repaired += 1
+    signals: List[CanonicalRecurrenceSignal] = []
+    for item in data.get('recurrence_signals') or []:
+        try:
+            signals.append(CanonicalRecurrenceSignal.model_validate(item))
+        except Exception:  # noqa: BLE001 - optional signals are dropped, not fatal
+            pass
+    reasoning = data.get('reasoning') if isinstance(data.get('reasoning'), str) else ''
+    logger.warning('consolidation_selfhosted_salvage decisions=%d repaired=%d', len(decisions), repaired)
+    return ConsolidationAgentBatch(decisions=decisions, recurrence_signals=signals, reasoning=reasoning)
+
+
+def _selfhosted_salvage_enabled() -> bool:
+    return os.environ.get('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+_upstream_invoke_consolidation_agent = invoke_consolidation_agent
+
+
+def invoke_consolidation_agent(  # noqa: F811
+    context: ConsolidationContext,
+    *,
+    llm_invoke: Optional[Callable[[Any], str]] = None,
+) -> ConsolidationAgentBatch:
+    if not _selfhosted_salvage_enabled():
+        return _upstream_invoke_consolidation_agent(context, llm_invoke=llm_invoke)
+    seen: Dict[str, str] = {}
+
+    def _capture(messages: Any) -> str:
+        if llm_invoke is not None:
+            raw = llm_invoke(messages)
+        else:
+            raw = submit_with_context(llm_executor, _invoke_consolidation_llm, messages).result()
+        seen['raw'] = raw
+        return raw
+
+    batch = _upstream_invoke_consolidation_agent(context, llm_invoke=_capture)
+    if batch.reasoning.startswith('parse_failed:') and 'raw' in seen:
+        salvaged = _salvage_consolidation_batch(seen['raw'])
+        if salvaged is not None:
+            return salvaged
+    return batch
