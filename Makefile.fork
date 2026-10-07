@@ -9,5 +9,5 @@ mobile-ios:          ## build the .ipa
 mobile-ios-run:      ## install on a connected iPhone (ARGS="-d <device-id>" to pick one)
 	$(BASH) app/scripts/selfhosted-ios.sh run $(ARGS)
 
-mobile-ios-upload:   ## build and upload to TestFlight (bump BUILD_NUMBER first)
-	$(BASH) app/scripts/selfhosted-ios.sh upload
+mobile-ios-upload:   ## next build number, build, upload to TestFlight (fastlane, ASC API key)
+	cd app && fastlane ios beta
