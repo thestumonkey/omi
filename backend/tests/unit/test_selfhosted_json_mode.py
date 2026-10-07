@@ -94,6 +94,7 @@ def test_gateway_chat_gets_local_model_and_loses_gateway_fields(monkeypatch):
         "messages": [{"role": "user", "content": "hi"}],
         "stream": True,
         "tools": [{"type": "function"}],
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
 
@@ -143,3 +144,8 @@ def test_plain_chat_reply_is_never_repaired():
     llm._get_request_payload([HumanMessage("how was my day?")])
     reply = 'You said: 📝, then left.'
     assert llm._create_chat_result(_response(reply)).generations[0].message.content == reply
+
+
+def test_thinking_is_off_by_default():
+    payload = _llm()._get_request_payload([HumanMessage("hi")])
+    assert payload["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}

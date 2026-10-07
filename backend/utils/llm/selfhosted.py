@@ -13,6 +13,9 @@ Settings:
                                    (``current_model``) wins over it
   SELF_HOSTED_LLM_KEY              sent as the API key (default "sk-local")
   SELF_HOSTED_LLM_MAX_CONCURRENCY  max in-flight requests (default 1; 0 = no limit)
+  SELF_HOSTED_LLM_THINKING         "on" lets hybrid reasoning models (Qwen3, ...)
+                                   think before answering; default off, because
+                                   the backend's calls want short, direct JSON
 
 Embeddings are not affected.
 """
@@ -44,6 +47,12 @@ _SELF_HOSTED_LLM_MAX_CONCURRENCY = int(os.environ.get('SELF_HOSTED_LLM_MAX_CONCU
 # Text that PydanticOutputParser.get_format_instructions() puts in a prompt.
 _JSON_FORMAT_MARKERS = ('formatted as a JSON instance',)
 _FENCED_BLOCK = re.compile(r'^```[a-zA-Z]*\s*\n?(.*?)\n?\s*```$', re.DOTALL)
+# Hybrid reasoning models (Qwen3 and similar) think unless their chat template
+# is told not to; llama.cpp passes these kwargs to the template, and templates
+# without the variable ignore it.
+_THINKING = os.environ.get('SELF_HOSTED_LLM_THINKING', '').strip().lower() in ('1', 'true', 'yes', 'on')
+_TEMPLATE_KWARGS = {} if _THINKING else {'enable_thinking': False}
+
 # PydanticOutputParser embeds the JSON schema after this phrase.
 _OUTPUT_SCHEMA = re.compile(r'Here is the output schema:\s*```\s*(\{.*?\})\s*```', re.DOTALL)
 # An unquoted non-ASCII value, e.g. `"emoji": 📝,` — the commonest local-model slip.
@@ -127,6 +136,10 @@ class SelfHostedChatOpenAI(ChatOpenAI):
 
     def _get_request_payload(self, input_: Any, *, stop: Optional[list] = None, **kwargs: Any) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if _TEMPLATE_KWARGS:
+            extra = dict(payload.get('extra_body') or {})
+            extra.setdefault('chat_template_kwargs', dict(_TEMPLATE_KWARGS))
+            payload['extra_body'] = extra
         messages = payload.get('messages')
         if 'tools' not in payload and 'response_format' not in payload and _asks_for_json(messages):
             payload['response_format'] = {'type': 'json_object'}
@@ -336,6 +349,8 @@ def rewrite_gateway_request(path: str, body: Dict[str, Any]) -> tuple[str, Dict[
         return _join(_SELF_HOSTED_EMBED_URL or SELF_HOSTED_LLM_URL, 'embeddings'), payload
     payload = {k: v for k, v in body.items() if k in _OPENAI_CHAT_KEYS}
     payload['model'] = current_model()
+    if _TEMPLATE_KWARGS:
+        payload['chat_template_kwargs'] = dict(_TEMPLATE_KWARGS)
     return _join(SELF_HOSTED_LLM_URL, path.split('/v1', 1)[-1] or 'chat/completions'), payload
 
 
