@@ -84,15 +84,26 @@ def _clause_to_mongo(field: str, op: Any, value: Any) -> dict:
     return {field: _OP[op](value)}
 
 
-def _filter_to_mongo(f) -> dict:
+# Firestore's name for the document id in filters, order_by and cursors
+# (also what FieldPath.document_id() renders as). Stored here as the full path in _id.
+_DOC_ID = '__name__'
+
+
+def _mongo_field(field: str) -> str:
+    return '_id' if field == _DOC_ID else field
+
+
+def _filter_to_mongo(f, doc_key=lambda v: v) -> dict:
     """Translate a FieldFilter or BaseCompositeFilter into a Mongo expression."""
     if isinstance(f, BaseCompositeFilter):
         op = getattr(f, 'operator', 'AND')
         op = str(op).upper().replace('OPERATOR.', '')
-        sub = [_filter_to_mongo(x) for x in f.filters]
+        sub = [_filter_to_mongo(x, doc_key) for x in f.filters]
         return {'$or': sub} if 'OR' in op else {'$and': sub}
     # FieldFilter
-    return _clause_to_mongo(f.field_path, f.op_string, f.value)
+    field = str(f.field_path)
+    value = doc_key(f.value) if field == _DOC_ID else f.value
+    return _clause_to_mongo(_mongo_field(field), f.op_string, value)
 
 
 def _is_sentinel(val) -> bool:
@@ -386,18 +397,31 @@ class Query:
         q._cursor = self._cursor
         return q
 
+    def _doc_key(self, value: Any) -> Any:
+        """A document-id value (``__name__``) as the stored ``_id``: its full path."""
+        if isinstance(value, DocumentReference):
+            return value.path
+        if isinstance(value, (list, tuple)):
+            return [self._doc_key(v) for v in value]
+        if isinstance(value, str) and '/' not in value and not self._group:
+            return f'{self._coll_path}/{value}'
+        return value
+
     def where(self, field=None, op=None, value=None, *, filter=None) -> 'Query':
         q = self._clone()
         if filter is not None:
-            q._filters.append(_filter_to_mongo(filter))
+            q._filters.append(_filter_to_mongo(filter, q._doc_key))
         else:
-            q._filters.append(_clause_to_mongo(field, op, value))
+            field = str(field)
+            if field == _DOC_ID:
+                value = q._doc_key(value)
+            q._filters.append(_clause_to_mongo(_mongo_field(field), op, value))
         return q
 
     def order_by(self, field: str, direction: str = ASCENDING) -> 'Query':
         q = self._clone()
         desc = str(direction).upper().endswith('DESCENDING') or direction == DESCENDING
-        q._order.append((field, DESCENDING if desc else ASCENDING))
+        q._order.append((_mongo_field(str(field)), DESCENDING if desc else ASCENDING))
         return q
 
     def limit(self, n: int) -> 'Query':
@@ -425,7 +449,11 @@ class Query:
         return self._with_cursor(doc, inclusive=True)
 
     def _with_cursor(self, doc, inclusive: bool) -> 'Query':
-        snap = doc.to_dict() if hasattr(doc, 'to_dict') else doc
+        snap = (doc.to_dict() or {}) if hasattr(doc, 'to_dict') else dict(doc)
+        if hasattr(doc, 'reference'):  # a snapshot: its own path is the document id
+            snap['_id'] = doc.reference.path
+        elif _DOC_ID in snap:
+            snap['_id'] = self._doc_key(snap.pop(_DOC_ID))
         vals = [snap.get(f) for f, _ in self._order]
         q = self._clone()
         q._cursor = (vals, inclusive)

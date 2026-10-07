@@ -68,3 +68,18 @@ def test_merge_set_into_null_parent(ref):
     ref.set({"chat": None})
     ref.set({"chat": {"calls": firestore.Increment(1)}}, merge=True)
     assert ref.get().to_dict() == {"chat": {"calls": 1}}
+
+
+def test_order_and_page_by_document_id(ref):
+    from google.cloud import firestore as gf
+
+    items = ref._store.collection("users").document("u1").collection("memory_items")
+    for doc_id in ("a", "b", "c"):
+        items.document(doc_id).set({"updated_at": 1})
+    q = items.order_by("updated_at", direction=gf.Query.DESCENDING).order_by("__name__")
+    assert [s.id for s in q.stream()] == ["a", "b", "c"]
+    page2 = q.start_after({"updated_at": 1, "__name__": items.document("a")}).limit(1)
+    assert [s.id for s in page2.stream()] == ["b"]
+    first = next(iter(q.limit(1).stream()))
+    assert [s.id for s in q.start_after(first).stream()] == ["b", "c"]
+    assert [s.id for s in items.where("__name__", "==", items.document("c")).stream()] == ["c"]
