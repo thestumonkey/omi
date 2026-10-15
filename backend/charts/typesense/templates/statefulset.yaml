@@ -40,6 +40,23 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Typesense answers 503 on /health while it loads its index, so give
+          # startup up to 10 minutes before liveness takes over.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+          # Restart after 5 minutes unhealthy. A Longhorn I/O error leaves /data
+          # read-only and raft stuck in ERROR; only a new pod remounts the disk.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

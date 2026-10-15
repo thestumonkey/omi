@@ -1,0 +1,21 @@
+{{- if .Values.alerts.enabled }}
+# [fork-only] Typesense down blocks uploads and deletes (fail-closed vector cleanup).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-typesense
+  labels:
+    {{- toYaml .Values.alerts.ruleLabels | nindent 4 }}
+spec:
+  groups:
+    - name: typesense
+      rules:
+        - alert: TypesenseNotReady
+          expr: kube_statefulset_status_replicas_ready{namespace="{{ .Release.Namespace }}", statefulset="typesense"} < 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Typesense in {{ .Release.Namespace }} not ready for 10 minutes
+            description: Uploads (sync-local-files) and task deletes fail while Typesense is down.
+{{- end }}

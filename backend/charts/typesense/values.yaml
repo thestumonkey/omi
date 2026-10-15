@@ -25,3 +25,9 @@ nodeSelector: {}
 auth:
   existingSecret: dev-omi-backend-secrets
   apiKeyKey: TYPESENSE_API_KEY
+
+# PrometheusRule for kube-prometheus-stack; ruleLabels must match its ruleSelector.
+alerts:
+  enabled: true
+  ruleLabels:
+    release: kube-prom-stack
