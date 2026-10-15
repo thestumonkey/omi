@@ -14,6 +14,11 @@ service:
 nodeSelector:
   kubernetes.io/hostname: babel
 
+# babel runs near its memory limit, so a rolling update cannot fit a second
+# 2Gi pod beside the old one and the new pod stays Pending. Stop the old first.
+strategy:
+  type: Recreate
+
 env:
   - name: HUGGINGFACE_TOKEN
     valueFrom:
