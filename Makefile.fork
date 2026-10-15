@@ -1,9 +1,38 @@
 # [fork-only] Self-hosted fork targets, included from the end of Makefile.
+#
+# `make` with no target prints the list below (upstream's first target, setup,
+# would run otherwise). Targets with a `##` comment are listed with it.
 
-.PHONY: mobile-ios mobile-ios-run mobile-ios-upload
+.DEFAULT_GOAL := help
+.PHONY: help mobile-ios mobile-ios-run mobile-ios-upload deploy deploy-build deploy-status deploy-overlay deploy-diarizer
+
+help:                ## show this list
+	@echo "Self-hosted:"
+	@grep -E '^[a-zA-Z_-]+:.*## ' Makefile.fork \
+		| awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@echo
+	@echo "Upstream (see Makefile):"
+	@grep -oE '^[a-zA-Z][a-zA-Z0-9_-]*:' Makefile | tr -d ':' | sort -u | paste -sd' ' - \
+		| fold -s -w 76 | sed 's/^/  /'
+
+# Backend deploy to the cluster: backend/Makefile (`make -C backend help`).
+deploy:              ## build, push and deploy the backend at the current commit (all 3 servers)
+	$(MAKE) -C backend release
+
+deploy-build:        ## build and push the backend images only
+	$(MAKE) -C backend build
+
+deploy-status:       ## show which image each backend server runs
+	$(MAKE) -C backend status
+
+deploy-overlay:      ## ship only changed backend files: REF=<sha> [DRY_RUN=1] [ONLY=pusher]
+	$(MAKE) -C backend overlay REF=$(REF) DRY_RUN=$(DRY_RUN) ONLY="$(ONLY)"
+
+deploy-diarizer:     ## build and deploy the CPU diarizer
+	$(MAKE) -C backend diarizer
 
 # Self-hosted iOS app. Settings: app/.env.selfhosted (see app/scripts/selfhosted-ios.sh).
-mobile-ios:          ## build the .ipa
+mobile-ios:          ## build the iOS .ipa
 	$(BASH) app/scripts/selfhosted-ios.sh ipa
 
 mobile-ios-run:      ## install on a connected iPhone (ARGS="-d <device-id>" to pick one)
