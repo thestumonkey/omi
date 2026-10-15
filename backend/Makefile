@@ -4,6 +4,9 @@
 #   make -C backend build              # build + push images for the current commit
 #   make -C backend deploy             # deploy images already pushed for TAG
 #   make -C backend status             # what is running now
+#   make -C backend overlay REF=<sha>  # ship only the changed .py files of REF
+#                                      # onto the images running now (DRY_RUN=1
+#                                      # to preview, ONLY="pusher" to pick)
 #   make -C backend diarizer           # build + deploy the CPU diarizer
 #
 # Images are tagged with the commit (TAG, default: current HEAD), so what runs
@@ -23,7 +26,7 @@ DESKTOP_IMAGE := $(REGISTRY)/desktop-backend-py
 DIARIZER_TAG  ?= cpu-$(TAG)
 
 .DEFAULT_GOAL := help
-.PHONY: help check build deploy release status diarizer
+.PHONY: help check build deploy release status overlay diarizer
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -59,6 +62,10 @@ release: build deploy ## Build, push and deploy the current commit
 status: ## Show the image and state of each backend
 	@kubectl -n $(NAMESPACE) get deploy omi-backend pusher desktop-backend-py diarizer \
 		-o custom-columns='NAME:.metadata.name,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[0].image'
+
+overlay: ## Ship REF's changed backend files onto the running images (scripts/selfhosted-overlay.sh)
+	REGISTRY=$(REGISTRY) NAMESPACE=$(NAMESPACE) REF=$(REF) ONLY="$(ONLY)" DRY_RUN=$(DRY_RUN) \
+		scripts/selfhosted-overlay.sh
 
 diarizer: ## Build and deploy the CPU diarizer (charts/diarizer/deploy-local.sh)
 	cd "$(REPO)" && DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
