@@ -675,6 +675,11 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   Future<void> syncWals({WakeTrigger trigger = WakeTrigger.userRetry}) async {
     final generation = _sessionGeneration;
+    // [fork] A Sync tap also re-offers failed and server-refused recordings.
+    if (trigger == WakeTrigger.userRetry) {
+      await _walService.getSyncs().phone.rearmForUserSync();
+      if (!_isCurrent(generation)) return;
+    }
     if (_startBackgroundSync) {
       await _wakeTransfer(trigger);
       return;
