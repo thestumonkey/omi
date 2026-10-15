@@ -40,10 +40,12 @@ check: ## Refuse uncommitted work or commits that are not on main
 	@if [ -z "$(ALLOW_OFF_MAIN)" ] && ! git -C "$(REPO)" merge-base --is-ancestor "$(TAG)" main; then \
 		echo "ERROR: $(TAG) is not on main; merge it first (or ALLOW_OFF_MAIN=1)." >&2; exit 1; fi
 
+# The build context is `git archive TAG`, not the working tree: the image holds
+# exactly the tagged commit, never local files such as backend/.venv.
 build: check ## Build and push the backend and desktop-backend images for TAG
-	cd "$(REPO)" && $(DOCKER) -f backend/Dockerfile -t $(BACKEND_IMAGE):$(TAG) .
+	git -C "$(REPO)" archive --format=tar $(TAG) | $(DOCKER) -f backend/Dockerfile -t $(BACKEND_IMAGE):$(TAG) -
 	docker push $(BACKEND_IMAGE):$(TAG)
-	cd "$(REPO)" && $(DOCKER) -f backend/Dockerfile.desktop_backend -t $(DESKTOP_IMAGE):$(TAG) .
+	git -C "$(REPO)" archive --format=tar $(TAG) | $(DOCKER) -f backend/Dockerfile.desktop_backend -t $(DESKTOP_IMAGE):$(TAG) -
 	docker push $(DESKTOP_IMAGE):$(TAG)
 
 deploy: check ## Deploy TAG: MinIO chart, backend chart, pusher and desktop backend
