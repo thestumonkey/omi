@@ -9,6 +9,8 @@ Groups:
   voice  {"mode": "off" | "cloud"}       live voice + push-to-talk relay
                                          (tail blocks of routers/desktop_realtime.py
                                          and routers/omni_relay.py)
+  capture {"owner_only": bool}           process only conversations the owner
+                                         spoke in (utils/conversations/owner_memory_gate.py)
 """
 
 import logging
@@ -72,3 +74,9 @@ def voice_mode() -> str:
     if mode in VOICE_MODES:
         return mode
     return VOICE_OFF if is_self_hosted() else VOICE_CLOUD
+
+
+def owner_only_setting() -> Optional[bool]:
+    """The stored owner-only switch, or None when nobody has set it."""
+    value = read('capture').get('owner_only')
+    return value if isinstance(value, bool) else None

@@ -6,6 +6,9 @@
                              SELF_HOSTED_LLM_MODEL default
     GET  /v1/selfhosted/voice   live voice mode: "off" or "cloud" (OpenAI/Gemini)
     POST /v1/selfhosted/voice   {"mode": "off" | "cloud"}
+    GET  /v1/selfhosted/capture {"owner_only": bool}: process only conversations
+                                the owner spoke in (owner_memory_gate.py)
+    POST /v1/selfhosted/capture {"owner_only": bool}
 
 The choice is server-wide (one household server, one model), so it reaches the
 pusher and desktop backend too. The llm routes 404 when SELF_HOSTED_LLM_URL
@@ -95,3 +98,23 @@ def update_voice_settings(body: VoiceSettings, uid: str = Depends(auth.get_curre
     selfhosted_config.write('voice', {'mode': body.mode})
     logger.info('self-hosted voice: mode set to %s by %s', body.mode, uid)
     return VoiceSettings(mode=selfhosted_config.voice_mode())
+
+
+class CaptureSettings(BaseModel):
+    owner_only: bool
+
+
+@router.get('/capture', response_model=CaptureSettings)
+def get_capture_settings(uid: str = Depends(auth.get_current_user_uid)):
+    from utils.conversations import owner_memory_gate
+
+    return CaptureSettings(owner_only=owner_memory_gate.gate_enabled())
+
+
+@router.post('/capture', response_model=CaptureSettings)
+def update_capture_settings(body: CaptureSettings, uid: str = Depends(auth.get_current_user_uid)):
+    from utils.conversations import owner_memory_gate
+
+    selfhosted_config.write('capture', {'owner_only': body.owner_only})
+    logger.info('self-hosted capture: owner_only set to %s by %s', body.owner_only, uid)
+    return CaptureSettings(owner_only=owner_memory_gate.gate_enabled())

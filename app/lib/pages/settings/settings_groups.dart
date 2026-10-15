@@ -15,6 +15,7 @@ import 'package:omi/pages/settings/settings_search_index.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/appearance_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/selfhosted/owner_only_toggle.dart';
 import 'package:omi/ui/ui.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -203,6 +204,7 @@ class _RecordingGroupPageState extends State<RecordingGroupPage> with _GroupRows
           children: [
             row(SettingsDestination.voiceProfile, icon: FontAwesomeIcons.waveSquare, title: l10n.speechProfile),
             row(SettingsDestination.people, icon: FontAwesomeIcons.users, title: l10n.identifyingOthers),
+            const OwnerOnlyToggle(), // [fork-only] selfhosted/owner_only_toggle.dart
             OmiSettingsRow(
               key: const ValueKey('settings_row_voiceResponseMode'),
               leading: const FaIcon(FontAwesomeIcons.volumeHigh),

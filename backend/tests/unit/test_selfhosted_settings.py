@@ -118,3 +118,22 @@ def test_voice_cloud_uses_providers(monkeypatch, store):
     selfhosted_config.write("voice", {"mode": "cloud"})
     (url, headers), err = omni_relay._upstream("openai", None)
     assert err is None and "api.openai.com" in url
+
+
+# ── Only my conversations ────────────────────────────────────────────────────
+
+
+def test_api_sets_owner_only_switch(monkeypatch, api):
+    from utils.conversations import owner_memory_gate
+
+    monkeypatch.delenv("SELF_HOSTED_MEMORY_OWNER_GATE", raising=False)
+    monkeypatch.setenv("SELF_HOSTED", "true")
+    assert api.get("/v1/selfhosted/capture").json() == {"owner_only": True}
+    assert api.post("/v1/selfhosted/capture", json={"owner_only": False}).json() == {"owner_only": False}
+    assert owner_memory_gate.gate_enabled() is False
+    # The stored switch wins over the deploy default in both directions.
+    monkeypatch.setenv("SELF_HOSTED_MEMORY_OWNER_GATE", "on")
+    assert owner_memory_gate.gate_enabled() is False
+    assert api.post("/v1/selfhosted/capture", json={"owner_only": True}).json() == {"owner_only": True}
+    monkeypatch.setenv("SELF_HOSTED_MEMORY_OWNER_GATE", "off")
+    assert owner_memory_gate.gate_enabled() is True

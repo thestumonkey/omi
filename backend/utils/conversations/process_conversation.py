@@ -3575,3 +3575,68 @@ def retrieve_in_progress_conversation(uid: str) -> Optional[Dict[str, Any]]:
     if not existing:
         existing = conversations_db.get_in_progress_conversation(uid)
     return existing
+
+
+# ── [fork-only] self-hosted: no memories unless the owner spoke ─────────────
+# Television and other people's talk produced "third party" memories the owner
+# never took part in. utils/conversations/owner_memory_gate.py holds the rule;
+# extract_memories looks _extract_memories_inner up at call time, so rebinding
+# it here gates every eager memory pass.
+from utils.conversations import owner_memory_gate as _owner_memory_gate
+
+_upstream_extract_memories_inner = _extract_memories_inner
+
+
+def _extract_memories_inner(
+    uid: str, conversation: Conversation, **kwargs: Any
+) -> ConversationMemoryExtractionResult:  # noqa: F811
+    if _owner_memory_gate.gate_enabled():
+        presence = _owner_memory_gate.owner_presence(
+            conversation.transcript_segments or [], min_words=_owner_memory_gate.min_owner_words()
+        )
+        if not presence.admitted:
+            logger.info(
+                'memory extraction skipped: owner not proven uid=%s conv=%s reason=%s owner_words=%d',
+                uid,
+                conversation.id,
+                presence.reason,
+                presence.owner_words,
+            )
+            return ConversationMemoryExtractionResult(
+                count=0, source=source_for_conversation(conversation), path='owner_gate'
+            )
+    return _upstream_extract_memories_inner(uid, conversation, **kwargs)
+
+
+# ── [fork-only] self-hosted: discard conversations the owner did not speak in ──
+# Same rule as the memory gate above. Speakers are resolved before this runs,
+# so is_user is final. The discard is restorable ("Show discarded"); a kept
+# conversation (user_kept) and server recovery keep upstream's verdict.
+_upstream_get_structured = _get_structured
+
+
+def _get_structured(uid: str, language_code: str, conversation: Any, *args: Any, **kwargs: Any):  # noqa: F811
+    trigger = kwargs.get('trigger', ProcessingTrigger.CAPTURE_END)
+    segments = getattr(conversation, 'transcript_segments', None) or []
+    if (
+        _owner_memory_gate.gate_enabled()
+        and segments
+        and not kwargs.get('user_kept', False)
+        and trigger is not ProcessingTrigger.SERVER_RECOVERY
+        and not isinstance(conversation, ExternalIntegrationCreateConversation)
+        and not is_release_probe_uid(uid)
+    ):
+        presence = _owner_memory_gate.owner_presence(segments, min_words=_owner_memory_gate.min_owner_words())
+        if not presence.admitted:
+            logger.info(
+                'conversation discarded: owner not proven uid=%s conv=%s reason=%s owner_words=%d',
+                uid,
+                getattr(conversation, 'id', '?'),
+                presence.reason,
+                presence.owner_words,
+            )
+            observer = kwargs.get('relevance_observer')
+            if observer is not None:
+                observer(RelevanceDecision('discard', 'rule', presence.reason, trigger))
+            return Structured(emoji=random.choice(['🧠', '🎉'])), True
+    return _upstream_get_structured(uid, language_code, conversation, *args, **kwargs)

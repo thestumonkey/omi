@@ -4,8 +4,9 @@ import SwiftUI
 // Settings → AI & Automation → Self-hosted Server. [fork-only]
 //
 // Server addresses (applied at the next launch, see `SelfHostedSettings`), the
-// chat model and live voice mode the self-hosted server uses (server-wide,
-// applied at once), and the cloud speech-to-text switch.
+// chat model, live voice mode and "only my conversations" switch the
+// self-hosted server uses (server-wide, applied at once), and the cloud
+// speech-to-text switch.
 
 extension SettingsContentView {
   var selfHostedSubsection: some View {
@@ -37,6 +38,15 @@ private struct SelfHostedVoiceSettings: Codable {
   let mode: String
 }
 
+/// true = the server summarizes only conversations where your voice was heard.
+private struct SelfHostedCaptureSettings: Codable {
+  let ownerOnly: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case ownerOnly = "owner_only"
+  }
+}
+
 struct SelfHostedServerSettingsView: View {
   @State private var omiURL = SelfHostedSettings.savedURL(SelfHostedSettings.omiBackendURLKey) ?? ""
   @State private var desktopURL = SelfHostedSettings.savedURL(SelfHostedSettings.desktopBackendURLKey) ?? ""
@@ -52,6 +62,9 @@ struct SelfHostedServerSettingsView: View {
   @State private var voiceMode: String?
   @State private var voiceMessage: String?
 
+  @State private var ownerOnly: Bool?
+  @State private var ownerOnlyMessage: String?
+
   @AppStorage("forceCloudSTT") private var forceCloudSTT = false
 
   var body: some View {
@@ -61,6 +74,8 @@ struct SelfHostedServerSettingsView: View {
       modelPicker
       Divider()
       voicePicker
+      Divider()
+      ownerOnlyToggle
       Divider()
       Toggle(isOn: $forceCloudSTT) {
         VStack(alignment: .leading, spacing: 2) {
@@ -79,6 +94,61 @@ struct SelfHostedServerSettingsView: View {
     .task {
       await loadModels()
       await loadVoice()
+      await loadOwnerOnly()
+    }
+  }
+
+  // MARK: Only my conversations
+
+  private var ownerOnlyToggle: some View {
+    VStack(alignment: .leading, spacing: OmiSpacing.sm) {
+      HStack {
+        Text("Only my conversations")
+          .scaledFont(size: OmiType.subheading, weight: .semibold)
+          .foregroundColor(Ink.primary)
+        Spacer()
+        if let ownerOnly {
+          Toggle(
+            "",
+            isOn: Binding(
+              get: { ownerOnly },
+              set: { newValue in Task { await saveOwnerOnly(newValue) } })
+          )
+          .labelsHidden()
+          .toggleStyle(.switch)
+        } else {
+          ProgressView().scaleEffect(0.6)
+        }
+      }
+      Text(
+        ownerOnlyMessage
+          ?? (ownerOnly == false
+            ? "Every recording is summarized, including TV and other people's talk."
+            : "Recordings where your voice is not heard (TV, radio, other people) get no summary, tasks or memories. They are hidden under Show discarded. Needs your Voice Profile.")
+      )
+      .scaledFont(size: OmiType.caption)
+      .foregroundColor(Ink.secondary)
+    }
+  }
+
+  private func loadOwnerOnly() async {
+    do {
+      let settings: SelfHostedCaptureSettings = try await APIClient.shared.get("v1/selfhosted/capture")
+      ownerOnly = settings.ownerOnly
+    } catch {
+      ownerOnlyMessage = "Could not load this setting: \(error.localizedDescription)"
+    }
+  }
+
+  private func saveOwnerOnly(_ value: Bool) async {
+    guard value != ownerOnly else { return }
+    do {
+      let settings: SelfHostedCaptureSettings = try await APIClient.shared.post(
+        "v1/selfhosted/capture", body: SelfHostedCaptureSettings(ownerOnly: value))
+      ownerOnly = settings.ownerOnly
+      ownerOnlyMessage = nil
+    } catch {
+      ownerOnlyMessage = "Could not change this setting: \(error.localizedDescription)"
     }
   }
 
