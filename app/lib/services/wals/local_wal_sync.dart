@@ -1675,6 +1675,30 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
     return reset;
   }
 
+  /// [fork] The user's Sync tap: re-arm recordings whose retry budget is spent
+  /// and recordings the server refused, so one tap re-offers every recording a
+  /// later server fix can accept. Corrupted, too-old and unsupported audio stay
+  /// terminal: no upload can resolve them.
+  Future<int> rearmForUserSync() async {
+    final generation = _sessionGeneration;
+    var reset = 0;
+    for (final wal in _wals) {
+      if (wal.storage != WalStorage.disk) continue;
+      final exhausted = wal.status == WalStatus.miss && wal.retryCount >= walMaxAutoRetries;
+      if (!exhausted && wal.status != WalStatus.uploadRejected) continue;
+      wal.status = WalStatus.miss;
+      wal.retryCount = 0;
+      wal.lastRetryAt = 0;
+      reset++;
+    }
+    if (reset > 0) {
+      await _saveWalsToFile(generation);
+      _notifyUpdated(generation);
+      DebugLogManager.logInfo('Re-armed failed and rejected WALs for a user sync', {'count': reset});
+    }
+    return reset;
+  }
+
   /// Judges each stamped WAL of [conversationId] against the saved transcript: a covered WAL moves
   /// into synced retention (the `autoRemoveSyncedCopies` lifecycle) and is not uploaded — the saved
   /// text suppresses the repair upload, never deletes the copy; an uncovered WAL stays `miss`,
