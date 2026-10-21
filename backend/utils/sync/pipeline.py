@@ -3059,3 +3059,18 @@ def _download_staged_files(blob_paths: list) -> bool:
         if not download_syncing_temporal_file(p):
             return False
     return True
+
+
+# ── [fork-only] self-hosted: one inline sync pipeline at a time ───────────────
+# Self-hosted servers send backfill uploads through the fresh lane (see the tail
+# of routers/sync.py), so a phone backlog starts up to 16 pipelines at once.
+# Neighbouring chunks merge into the same conversation and fence each other,
+# the fenced jobs fail, and the phone uploads them again. Queued inline jobs
+# keep their run lease and are never stale, so waiting here is safe.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    _upstream_get_sync_pipeline_semaphore = _get_sync_pipeline_semaphore
+
+    def _get_sync_pipeline_semaphore(sync_lane: str = SyncLane.FRESH.value) -> asyncio.Semaphore:  # noqa: F811
+        if sync_lane == SyncLane.BACKFILL.value:
+            return _upstream_get_sync_pipeline_semaphore(sync_lane)
+        return _get_semaphore('sync_pipeline_fresh_selfhosted', int(os.getenv('SYNC_INLINE_FRESH_CONCURRENCY', '1')))

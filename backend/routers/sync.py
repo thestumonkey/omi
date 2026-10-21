@@ -2518,3 +2518,34 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         if decision.lane == SyncLane.BACKFILL and not _cloud_tasks_enabled():
             return _dataclasses.replace(decision, lane=SyncLane.FRESH)
         return decision
+
+
+# ── [fork-only] self-hosted: one bad file name must not refuse the whole batch ─
+# A pendant whose clock reset names its files with a timestamp before 2024 or in
+# the future. Upstream answers 400 for the whole batch, and the app then marks
+# every recording in it as permanently rejected. Here only those files are left
+# out; the batch still fails with 400 when no file has a valid timestamp.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    from utils.sync.files import get_timestamp_from_path as _get_timestamp_from_path
+
+    _upstream_retrieve_file_paths_v2 = _retrieve_file_paths_v2
+
+    def _has_valid_timestamp(filename) -> bool:
+        if not filename or not filename.endswith('.bin') or '_' not in filename:
+            return True  # Not a timestamp problem: upstream answers 400 for it.
+        try:
+            _get_timestamp_from_path(filename)
+        except ValueError:
+            return False
+        return True
+
+    def _retrieve_file_paths_v2(files, uid, job_id):  # noqa: F811
+        valid = [file for file in files if _has_valid_timestamp(file.filename)]
+        if valid and len(valid) < len(files):
+            logger.warning(
+                'event=sync_invalid_timestamp_files outcome=skipped skipped=%d kept=%d',
+                len(files) - len(valid),
+                len(valid),
+            )
+            return _upstream_retrieve_file_paths_v2(valid, uid, job_id)
+        return _upstream_retrieve_file_paths_v2(files, uid, job_id)
