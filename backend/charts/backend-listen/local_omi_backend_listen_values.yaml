@@ -307,6 +307,10 @@ env:
   # No Omi-side metering: paywall, chat quota and credit gates return unlimited.
   - name: SELF_HOSTED
     value: "true"
+  # Sync routes answer 503 for every upload without a known stage. "prod" keeps
+  # the unprefixed Redis keys and Mongo collections the existing sync data uses.
+  - name: OMI_ENV_STAGE
+    value: "prod"
   # Upstream's canonical memory intake; the pusher refuses to start without it.
   - name: MEMORY_ENABLED
     value: "on"
