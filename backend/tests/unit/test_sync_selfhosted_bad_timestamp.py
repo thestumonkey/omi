@@ -33,7 +33,12 @@ PROBE = (
 
 
 def _run(**env):
-    full = {**os.environ, "ENCRYPTION_SECRET": "omi_test_secret_for_selfhosted_bad_timestamp", **env}
+    full = {
+        **os.environ,
+        "PYTHONPATH": str(BACKEND),
+        "ENCRYPTION_SECRET": "omi_test_secret_for_selfhosted_bad_timestamp",
+        **env,
+    }
     out = subprocess.run(
         [sys.executable, "-c", PROBE], cwd=BACKEND, env=full, capture_output=True, text=True, check=True
     )
