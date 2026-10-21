@@ -307,10 +307,11 @@ env:
   # No Omi-side metering: paywall, chat quota and credit gates return unlimited.
   - name: SELF_HOSTED
     value: "true"
-  # Sync routes answer 503 for every upload without a known stage. "prod" keeps
-  # the unprefixed Redis keys and Mongo collections the existing sync data uses.
+  # Sync routes answer 503 for every upload without a known stage. Not "prod":
+  # prod refuses to start without Google Cloud Tasks for account deletion.
+  # "local" keeps sync state under local:-prefixed Redis keys and *_local collections.
   - name: OMI_ENV_STAGE
-    value: "prod"
+    value: "local"
   # Upstream's canonical memory intake; the pusher refuses to start without it.
   - name: MEMORY_ENABLED
     value: "on"
