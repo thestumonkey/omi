@@ -1,0 +1,16 @@
+# [fork-only] Disk for the diarizer's HuggingFace model cache (/root/.cache).
+# Without it every restart downloads the pyannote model again, and when
+# huggingface.co cannot be reached the pod crashes and loops. With it, the first
+# good download is kept and later starts use the saved copy. Applied by
+# deploy-local.sh. hostpath is fine: the diarizer is pinned to babel.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: diarizer-model-cache
+  namespace: omi
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: microk8s-hostpath
+  resources:
+    requests:
+      storage: 5Gi

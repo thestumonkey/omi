@@ -51,6 +51,16 @@ readinessProbe:
     port: 8080
   periodSeconds: 10
 
+# Model cache on disk (local_model_cache_pvc.yaml), so a restart does not
+# need huggingface.co.
+volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: diarizer-model-cache
+volumeMounts:
+  - name: model-cache
+    mountPath: /root/.cache
+
 autoscaling:
   enabled: false
 
