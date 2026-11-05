@@ -25,6 +25,8 @@ env-gated tail blocks at the end of a few upstream modules. Keep upstream files
 byte-identical; add behaviour in a fork-only file or a tail seam. Fork-only
 files are marked `[fork-only]`.
 
+To deploy the backend or build the Mac and iOS apps, see [`SELFHOSTED.md`](./SELFHOSTED.md).
+
 Before creating anything new, search for what already exists and extend it.
 Shared ushadow skills live in `.claude/skills/` (read the file directly):
 

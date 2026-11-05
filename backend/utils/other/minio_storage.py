@@ -45,6 +45,31 @@ def _s3_client(endpoint_url=None):
     )
 
 
+def read_own_presigned_url(url: str) -> bytes:
+    """Read one of our own presigned storage URLs, via the storage API.
+
+    Presigned URLs are signed for S3_PRESIGN_ENDPOINT_URL, a tailnet name pods
+    cannot resolve, so the server reads its own URLs with storage credentials
+    instead of fetching them. Only URLs on our storage endpoints are accepted,
+    so a caller-supplied URL can never make the server request an arbitrary
+    address.
+    """
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(url)
+    own_hosts = {
+        urlparse(endpoint).netloc
+        for endpoint in (os.getenv('S3_PRESIGN_ENDPOINT_URL'), os.getenv('S3_ENDPOINT_URL'))
+        if endpoint
+    }
+    if parsed.scheme not in ('http', 'https') or parsed.netloc not in own_hosts:
+        raise ValueError('URL is not on this server\'s storage')
+    bucket, _, key = unquote(parsed.path).lstrip('/').partition('/')
+    if not bucket or not key:
+        raise ValueError('storage URL has no bucket or key')
+    return _s3_client().get_object(Bucket=bucket, Key=key)['Body'].read()
+
+
 def _is_404(err: ClientError) -> bool:
     code = err.response.get('Error', {}).get('Code', '')
     return code in ('404', 'NoSuchKey', 'NotFound', 'NoSuchBucket')
