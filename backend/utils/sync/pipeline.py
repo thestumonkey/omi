@@ -3074,3 +3074,25 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         if sync_lane == SyncLane.BACKFILL.value:
             return _upstream_get_sync_pipeline_semaphore(sync_lane)
         return _get_semaphore('sync_pipeline_fresh_selfhosted', int(os.getenv('SYNC_INLINE_FRESH_CONCURRENCY', '1')))
+
+
+# ── [fork-only] self-hosted: read sync audio from storage, not over the network ──
+# Signed URLs carry MinIO's tailnet name (S3_PRESIGN_ENDPOINT_URL) so phones can
+# reach them, but pods cannot resolve that name. The download failed, so synced
+# recordings got no speaker match (and were discarded as "owner not proven") and
+# no private-cloud audio (playback was silent). Read our own URLs with storage
+# credentials; any other URL keeps upstream's download.
+if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    _upstream_download_audio_bytes = _download_audio_bytes
+
+    @sync_phase('gcs')
+    def _download_audio_bytes(url: str) -> Optional[bytes]:  # noqa: F811
+        from utils.other.minio_storage import read_own_presigned_url
+
+        try:
+            return read_own_presigned_url(url)
+        except ValueError:
+            return _upstream_download_audio_bytes(url)
+        except Exception as e:
+            logger.warning('Speaker ID: failed to read audio from storage: %s', type(e).__name__)
+            return None

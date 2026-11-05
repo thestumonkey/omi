@@ -1275,32 +1275,14 @@ def postprocess_words(
 # SELF_HOSTED and DEEPGRAM_API_KEY set, uploads use Deepgram too. Deepgram's
 # cloud cannot fetch our private storage URLs, so the bytes are sent instead.
 if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') and os.getenv('DEEPGRAM_API_KEY'):
-    from urllib.parse import unquote as _unquote
-    from urllib.parse import urlparse as _urlparse
 
     _SELFHOSTED_DEEPGRAM_MODEL = 'nova-3'
 
     def _selfhosted_audio_bytes(audio_url: str) -> bytes:
-        """Read one of our own presigned storage URLs, via the storage API.
+        """Read one of our own presigned storage URLs, via the storage API."""
+        from utils.other.minio_storage import read_own_presigned_url
 
-        Only URLs on our storage endpoints are accepted, and they are read
-        with storage credentials rather than fetched, so a caller-supplied
-        URL can never make the server request an arbitrary address.
-        """
-        parsed = _urlparse(audio_url)
-        own_hosts = {
-            _urlparse(endpoint).netloc
-            for endpoint in (os.getenv('S3_PRESIGN_ENDPOINT_URL'), os.getenv('S3_ENDPOINT_URL'))
-            if endpoint
-        }
-        if parsed.scheme not in ('http', 'https') or parsed.netloc not in own_hosts:
-            raise ValueError('self-hosted transcription only reads audio from this server\'s storage')
-        from utils.other.minio_storage import _s3_client
-
-        bucket, _, key = _unquote(parsed.path).lstrip('/').partition('/')
-        if not bucket or not key:
-            raise ValueError('storage URL has no bucket or key')
-        return _s3_client().get_object(Bucket=bucket, Key=key)['Body'].read()
+        return read_own_presigned_url(audio_url)
 
     class _SelfHostedDeepgramProvider(PrerecordedSTTProvider):
         def transcribe_url(
