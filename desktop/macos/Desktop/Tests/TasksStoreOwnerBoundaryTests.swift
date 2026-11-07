@@ -381,8 +381,6 @@ final class TasksStoreOwnerBoundaryTests: XCTestCase {
   }
 
   func testStaticGuardTasksStoreHasNoUnrestrictedSQLiteMutationCallSites() throws {
-    let lines = try productionSource("Stores/TasksStore.swift")
-      .components(separatedBy: .newlines)
     let mutationNames = [
       "syncTaskActionItems(",
       "insertLocalActionItem(",
@@ -400,15 +398,18 @@ final class TasksStoreOwnerBoundaryTests: XCTestCase {
       "updateSortOrders(",
     ]
 
-    for (index, line) in lines.enumerated() {
-      guard mutationNames.contains(where: line.contains) else { continue }
-      let windowEnd = min(lines.endIndex, index + 16)
-      let callWindow = lines[index..<windowEnd].joined(separator: "\n")
-      XCTAssertTrue(
-        callWindow.contains("authorization:"),
-        "TasksStore SQLite mutation at line \(index + 1) must carry LocalMutationAuthorization")
+    for sourcePath in ["Stores/TasksStore.swift", "Stores/UnsyncedTaskSyncOperations.swift"] {
+      let lines = try productionSource(sourcePath).components(separatedBy: .newlines)
+      for (index, line) in lines.enumerated() {
+        guard mutationNames.contains(where: line.contains) else { continue }
+        let windowEnd = min(lines.endIndex, index + 16)
+        let callWindow = lines[index..<windowEnd].joined(separator: "\n")
+        XCTAssertTrue(
+          callWindow.contains("authorization:"),
+          "\(sourcePath) SQLite mutation at line \(index + 1) must carry LocalMutationAuthorization")
+      }
+      XCTAssertFalse(lines.joined(separator: "\n").contains("updateChatSessionId"))
     }
-    XCTAssertFalse(lines.joined(separator: "\n").contains("updateChatSessionId"))
     let storageSource = try productionSource("Rewind/Core/ActionItemStorage.swift")
     XCTAssertFalse(storageSource.contains("func updateChatSessionId"))
     XCTAssertNil(
@@ -494,7 +495,10 @@ final class TasksStoreOwnerBoundaryTests: XCTestCase {
     await gate.waitUntilStarted()
     illegallyMutateOwnerDefaults(to: "owner-b", defaults: defaults)
     await gate.release()
-    await operation.value
+    // toggleTask now reports whether the mutation took effect; a revoked lease
+    // must surface as false rather than an unused result.
+    let toggled = await operation.value
+    XCTAssertFalse(toggled)
 
     XCTAssertEqual(store.incompleteTasks.map(\.id), [task.id])
     XCTAssertTrue(store.completedTasks.isEmpty)
@@ -579,7 +583,10 @@ final class TasksStoreOwnerBoundaryTests: XCTestCase {
     await transitionEffectiveOwner(to: nil)
     await transitionEffectiveOwner(to: "owner-a")
     await gate.release()
-    await operation.value
+    // toggleTask now reports whether the mutation took effect; the lease must
+    // not survive the generation change, so the toggle reports false.
+    let revokedByGeneration = await operation.value
+    XCTAssertFalse(revokedByGeneration)
 
     XCTAssertEqual(probe.localWrites, 0)
     XCTAssertEqual(probe.dashboardRefreshes, 0)
@@ -639,7 +646,11 @@ final class TasksStoreOwnerBoundaryTests: XCTestCase {
     store.overdueTasks = [ownerBDashboard]
     store.error = nil
     await gate.release()
-    await operation.value
+    // The backend call returned after the owner swap made the captured lease
+    // stale; the toggle bails before syncing or touching arrays, so it reports
+    // that it did not take effect (callers must not mirror the summary).
+    let tookEffect = await operation.value
+    XCTAssertFalse(tookEffect)
 
     XCTAssertEqual(probe.localWrites, 1)
     XCTAssertEqual(probe.remoteRequests, 1)

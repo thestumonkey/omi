@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/utils/batch_recording.dart';
 import 'package:omi/utils/enums.dart';
+import 'package:omi/utils/logger.dart';
 
 part 'capture_silence_policy.dart';
 
@@ -872,9 +873,17 @@ class WalSessionRoll extends CaptureEffect {
 /// Mint the recording id for a fresh session. The port returns the id, which
 /// the dispatcher folds into the committed active session.
 class MintRecording extends CaptureEffect {
-  const MintRecording({required this.sessionKey, required this.telemetrySource});
+  const MintRecording({
+    required this.sessionKey,
+    required this.telemetrySource,
+    this.requestOrigin = 'unknown',
+  });
   final String sessionKey;
   final String telemetrySource;
+
+  /// `explicit_user`, `automatic_roll`, or `unknown`. See
+  /// [RecordingLifecycleTelemetry].
+  final String requestOrigin;
 }
 
 /// Run a migrated composite transition body on the controller (the staged
@@ -1164,7 +1173,8 @@ class CaptureEffectPorts {
 
   /// Completes any open telemetry recording, then
   /// `_recordingTelemetry.prepare(source:)` and returns the fresh id.
-  final String Function(String sessionKey, String telemetrySource) mintRecordingId;
+  /// [requestOrigin] is `explicit_user`, `automatic_roll`, or `unknown`.
+  final String Function(String sessionKey, String telemetrySource, String requestOrigin) mintRecordingId;
 
   /// Phone-start preflight — requests the OS mic permission once; `false`
   /// abandons the start without touching state or hardware.
@@ -1504,8 +1514,10 @@ class CaptureCoordinator {
             if (value.superseded) {
               if (i == 0) {
                 final requested = (transition.effects[i] as PolicyWrite).muted;
-                final pausedBatch =
-                    _state.phase == CapturePhase.phoneBatchPaused || _state.phase == CapturePhase.pendantBatchPaused;
+                final pausedBatch = _state.phase == CapturePhase.phoneBatchPaused ||
+                    _state.phase == CapturePhase.pendantBatchPaused ||
+                    working.phase == CapturePhase.phoneBatchPaused ||
+                    working.phase == CapturePhase.pendantBatchPaused;
                 bool? effectiveMuted;
                 Object? readError;
                 StackTrace? readStack;
@@ -1637,6 +1649,12 @@ class CaptureCoordinator {
     List<CaptureStage> cleanupStages = const [],
     CaptureCoordinatorState? safeState,
   }) async {
+    Logger.debug(
+      '[Capture] fail closed: failure_class=${error is String ? error : error.runtimeType} '
+      'reason=$error phase=${working.phase.name} '
+      'source=${working.active?.source.name} call_active=${working.callActive} '
+      'device_connected=${working.connectedDevice != null} absorbed=$absorbed',
+    );
     for (final deny in [
       () => _ports.setNativeWriterGate(CaptureSource.pendant, false),
       () => _ports.setNativeWriterGate(CaptureSource.phone, false),
@@ -1707,7 +1725,10 @@ class CaptureCoordinator {
         WalFinalize() => _ports.finalizeWal(),
         WalSessionRoll() => _ports.rollSession(effect.identity),
         MintRecording() => Future<_MintedRecordingId>.value(
-            _MintedRecordingId(effect.sessionKey, _ports.mintRecordingId(effect.sessionKey, effect.telemetrySource)),
+            _MintedRecordingId(
+              effect.sessionKey,
+              _ports.mintRecordingId(effect.sessionKey, effect.telemetrySource, effect.requestOrigin),
+            ),
           ),
         RunStage() => _ports.runStage(effect.stage),
       };
@@ -1745,7 +1766,7 @@ CaptureTransition transitionCapture(CaptureCoordinatorState state, CaptureEvent 
       BatchModeSetRequested() => _reduceBatchMode(state, event, env),
       TranscriptionSettingsChanged() => CaptureTransition(state, const [RunStage(TranscriptionSettingsStage())]),
       RecordProfileChanged() => CaptureTransition(state, const [RunStage(RecordProfileStage())]),
-      OnboardingBatchChanged() => _reduceOnboardingBatch(state, event),
+      OnboardingBatchChanged() => _reduceOnboardingBatch(state, event, env),
       LaunchRecovery() => _reduceLaunchRecovery(state, event, env),
     };
 
@@ -1839,6 +1860,7 @@ CaptureTransition _reducePhoneStart(CaptureCoordinatorState state, PhoneStartReq
           CaptureTransport.batch => env.batchModeEnabled ? 'phone_mic_batch' : 'phone_mic_batch_auto',
           CaptureTransport.live => 'phone_mic_live',
         },
+        requestOrigin: 'explicit_user',
       ),
     )
     ..add(RunStage(StartPhoneSessionStage(mode: mode)));
@@ -2247,6 +2269,7 @@ CaptureTransition _reducePause(CaptureCoordinatorState state, CaptureEnvironment
       ]),
     CapturePhase.pendantBatchLive => CaptureTransition(state.copyWith(phase: CapturePhase.pendantBatchPaused), const [
         PolicyWrite(true),
+        RunStage(RecordingMarkStage(RecordingState.pause)),
         RunStage(PauseDeviceTailStage()),
       ]),
     // A suspended pendant only records wasPaused — pausing must never write
@@ -2844,6 +2867,7 @@ CaptureTransition _reduceBatchMode(CaptureCoordinatorState state, BatchModeSetRe
           telemetrySource: rolledTo == CaptureTransport.batch
               ? (event.enabled ? 'phone_mic_batch' : 'phone_mic_batch_auto')
               : 'phone_mic_live',
+          requestOrigin: 'automatic_roll',
         ),
       )
       ..add(RunStage(StartPhoneSessionStage(mode: rolledTo)));
@@ -2851,8 +2875,19 @@ CaptureTransition _reduceBatchMode(CaptureCoordinatorState state, BatchModeSetRe
   return CaptureTransition(state.copyWith(phase: phase, active: () => active, sessionSeq: seq), effects);
 }
 
-CaptureTransition _reduceOnboardingBatch(CaptureCoordinatorState state, OnboardingBatchChanged event) {
-  // Suspending flips batchMode off (pendant -> live), restoring flips it on.
+CaptureTransition _reduceOnboardingBatch(
+  CaptureCoordinatorState state,
+  OnboardingBatchChanged event,
+  CaptureEnvironment env,
+) {
+  // Suspending flips batchMode off (pendant -> live), restoring flips it back on only if
+  // something was actually suspended — batch mode may already have been off, in which case
+  // restoring must leave the phase alone instead of turning batch mode on.
+  if (!event.suspended && !env.batchModeSuspendedForOnboarding) {
+    return CaptureTransition(state, [
+      RunStage(OnboardingBatchStage(suspended: event.suspended)),
+    ]);
+  }
   var phase = state.phase;
   var active = state.active;
   final toBatch = !event.suspended;
@@ -2910,7 +2945,11 @@ CaptureTransition _reducePhoneBatchStart(CaptureCoordinatorState state, PhoneBat
     ),
     [
       const CheckPhonePermission(),
-      MintRecording(sessionKey: key, telemetrySource: event.auto ? 'phone_mic_batch_auto' : 'phone_mic_batch'),
+      MintRecording(
+        sessionKey: key,
+        telemetrySource: event.auto ? 'phone_mic_batch_auto' : 'phone_mic_batch',
+        requestOrigin: event.auto ? 'unknown' : 'explicit_user',
+      ),
       RunStage(StartPhoneBatchStage(auto: event.auto)),
     ],
   );

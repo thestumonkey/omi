@@ -43,7 +43,7 @@ extension SettingsContentView {
                 Text("Task Agent")
                   .scaledFont(size: OmiType.body)
                   .foregroundColor(Ink.secondary)
-                Text("Investigate button and sidebar chat for tasks")
+                Text("Adds an Investigate button and a chat panel to tasks so Omi can work on them with you")
                   .scaledFont(size: OmiType.caption)
                   .foregroundColor(Ink.secondary)
               }
@@ -707,7 +707,7 @@ extension SettingsContentView {
               .scaledFont(size: OmiType.subheading, weight: .semibold)
               .foregroundColor(Ink.primary)
 
-            Text("Send app logs and report a problem")
+            Text("Save a redacted report on this Mac to share manually")
               .scaledFont(size: OmiType.body)
               .foregroundColor(Ink.secondary)
           }

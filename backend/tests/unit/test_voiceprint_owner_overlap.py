@@ -104,6 +104,10 @@ def world(monkeypatch):
     monkeypatch.setattr(speaker_learning_jobs, 'get_firestore_client', lambda: store)
     monkeypatch.setattr(conversations, 'get_conversation', lambda *a: decoded(store))
     monkeypatch.setattr(voice_profiles, 'record_tag_prompt_answered', lambda *a: None)
+    # The shared marker retirement must stay inert here: the card "me" answers
+    # below drive the real assignment transaction, and the marker clear must
+    # not build a real Firestore client.
+    monkeypatch.setattr(voice_profiles, 'clear_ignored_voices', lambda *a, **k: 0)
     monkeypatch.setattr(service, 'emit_product_event', lambda **kw: None)
     reads = []
 
@@ -154,16 +158,18 @@ def test_segment_tag_with_already_consented_overlap_should_teach(world):
     assert store.rows[USER]['owner_voice_confirmations'][0]['segment_ids'] == ['s', 'other']
 
 
-def test_card_whole_speaker_grant_with_selected_run_should_teach(world):
+def test_naming_card_owner_grant_with_selected_run_should_teach(world):
     store, reads = world
     assign(segment_ids=['other'])
     raw = decoded(store)
     _, decided = selection._manually_decided(raw)
     runs = selection._runs(selection._normalized_segments(raw), decided)
     assert runs[0].segment_ids == ('s',)
+    # Paid naming/tag cards retain their existing explicit owner-learning action;
+    # the free owner_check path is label-only and covered by test_owner_confirmation_scope.
     request = SpeakerTagPromptAnswerRequest(
         prompt_id='pid',
-        kind='owner_check',
+        kind='identify',
         origin='unnamed',
         conversation_id='c',
         speaker_id=1,

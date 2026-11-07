@@ -60,6 +60,27 @@ def load_real_module(name: str, path: Path):
     return module
 
 
+_REASONS_MODULE = None
+
+
+def _real_reasons_module():
+    """Load utils/observability/reasons.py once per process: it registers omi_reason_total, and
+    cleanup() drops harness-loaded modules, so a re-exec would duplicate the Prometheus series."""
+    global _REASONS_MODULE
+    loaded = sys.modules.get('utils.observability.reasons')
+    if loaded is not None and hasattr(loaded, 'LiveSttReason'):
+        _REASONS_MODULE = loaded
+    if _REASONS_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            'utils.observability.reasons', BACKEND_DIR / 'utils' / 'observability' / 'reasons.py'
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['utils.observability.reasons'] = module
+        spec.loader.exec_module(module)
+        _REASONS_MODULE = module
+    return _REASONS_MODULE
+
+
 def cleanup(saved):
     for name in [k for k in sys.modules if k not in saved]:
         del sys.modules[name]
@@ -83,7 +104,12 @@ def wire_common_stubs(install) -> SimpleNamespace:
     to ``ModuleType`` because both suites installed them that way. Returns the
     handles a suite layers extra attributes onto.
     """
+    sys.modules.pop('utils.chat_turn', None)
+    install('utils.messaging.app_awareness', ModuleType('utils.messaging.app_awareness'))
     load_real_module('models.chat', BACKEND_DIR / 'models' / 'chat.py')
+
+    deletion_marker = install('database.account_deletion_marker')
+    deletion_marker.account_deletion_blocks_user_work = MagicMock(return_value=False)
 
     notification_db = install('database.notifications')
     notification_db.get_user_time_zone = MagicMock(return_value=None)
@@ -170,6 +196,12 @@ def wire_common_stubs(install) -> SimpleNamespace:
     fallback_observability = install('utils.observability.fallback', ModuleType('utils.observability.fallback'))
     fallback_observability.record_fallback = MagicMock()
     observability.record_fallback = fallback_observability.record_fallback
+    # routers.chat -> utils.stt.provider_resilience -> utils.stt.live_reason imports the pure reason
+    # enums from utils.observability.reasons; serve the real module (reused if already loaded,
+    # since it registers a Prometheus counter) under the stub package.
+    reasons = _real_reasons_module()
+    sys.modules['utils.observability.reasons'] = reasons
+    observability.reasons = reasons
 
     journey_observability = install('utils.observability.journeys', ModuleType('utils.observability.journeys'))
 
@@ -252,7 +284,6 @@ def wire_common_stubs(install) -> SimpleNamespace:
     rate_limit.RATE_LIMIT_SHADOW = False
     subscription = install('utils.subscription', ModuleType('utils.subscription'))
     subscription.enforce_chat_quota = MagicMock()
-    subscription.is_trial_paywalled = MagicMock(return_value=False)
 
     auth = install('utils.other.endpoints', ModuleType('utils.other.endpoints'))
 
@@ -274,7 +305,7 @@ def wire_common_stubs(install) -> SimpleNamespace:
     chat_file.FileChatTool = MagicMock()
     # routers.chat imports this name; these suites never exercise the file branch (their
     # file_ids are empty), so a stub that returns nothing keeps the module importable.
-    chat_file._safe_file_chats = MagicMock(return_value=[])
+    chat_file.safe_file_chats = MagicMock(return_value=[])
     # routers.chat imports this name; the stub must carry it or the module fails to load. A local
     # subclass keeps the real module (PIL, openai, database) out of these suites' import graph.
     chat_file.UnsupportedChatFileError = type('UnsupportedChatFileError', (Exception,), {})

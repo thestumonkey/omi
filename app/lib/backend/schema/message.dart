@@ -78,7 +78,16 @@ class MessageFile {
   String mimeType;
   DateTime createdAt;
 
-  MessageFile(this.openaiFileId, this.thumbnail, this.name, this.mimeType, this.id, this.createdAt, this.thumbnailName);
+  /// Set for a video attachment (the server stores it as sampled stills).
+  double? videoDurationSeconds;
+
+  /// A poster frame on this device, shown until the server thumbnail is used.
+  String? localPreviewPath;
+
+  MessageFile(this.openaiFileId, this.thumbnail, this.name, this.mimeType, this.id, this.createdAt, this.thumbnailName,
+      {this.videoDurationSeconds, this.localPreviewPath});
+
+  bool get isVideo => videoDurationSeconds != null;
 
   static MessageFile fromJson(Map<String, dynamic> json) {
     return MessageFile.fromGenerated(wire.GeneratedFileChat.fromJson(json));
@@ -93,6 +102,7 @@ class MessageFile {
       generated.id,
       generated.createdAt,
       generated.thumbName,
+      videoDurationSeconds: generated.video?.durationSeconds,
     );
   }
 
@@ -105,13 +115,16 @@ class MessageFile {
       openaiFileId: openaiFileId,
       thumbName: thumbnailName,
       thumbnail: thumbnail,
+      video: videoDurationSeconds == null ? null : wire.GeneratedChatFileVideo(durationSeconds: videoDurationSeconds!),
     );
   }
 
   Map<String, dynamic> toJson() => toGenerated().toJson();
 
   String mimeTypeToFileType() {
-    if (mimeType.contains('image')) {
+    if (isVideo) {
+      return 'video';
+    } else if (mimeType.contains('image')) {
       return 'image';
     } else {
       return 'file';
@@ -587,6 +600,10 @@ class ServerMessage {
       case 'memoryLink':
       case 'memory_link':
         return labelled('Memory', [value('summary')]);
+      case 'editReceipt':
+      case 'edit_receipt':
+        // The summary already reads as a sentence ("Renamed the task to …").
+        return value('summary').isEmpty ? 'Change' : value('summary');
       case 'citation':
         return labelled('Source', [value('title'), value('preview')]);
       case 'evidence':

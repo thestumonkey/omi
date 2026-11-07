@@ -14,6 +14,7 @@ from utils.conversations.mcp_transcript_search import (
     resolve_mcp_conversation_search_ids,
     search_chat_transcript_chunks,
 )
+from utils.model_text import DisplayClock
 
 
 def test_chat_chunk_search_shares_embedding_and_bounds_candidates():
@@ -72,6 +73,27 @@ def test_chat_excerpt_is_rebuilt_from_accessible_conversation_only():
     assert list(excerpts) == ['visible']
     assert '47 dollars' in excerpts['visible']
     assert 'secret' not in str(excerpts) and 'erased' not in str(excerpts)
+
+
+def test_chat_excerpt_header_uses_requested_clock():
+    started = datetime(2026, 9, 26, 7, 18, tzinfo=timezone.utc)
+    excerpts = chat_transcript_excerpts(
+        [{'id': 'visible', 'started_at': started, 'transcript_segments': [{'text': 'Morning update'}]}],
+        ChatTranscriptSearch([{'conversation_id': 'visible', 'chunk_index': 0}], True),
+        clock=DisplayClock.from_name('Asia/Ho_Chi_Minh'),
+    )
+    assert 'Sat 26 Sep 2026, 14:18 Asia/Ho_Chi_Minh (UTC+07:00)' in excerpts['visible']
+
+
+def test_chat_excerpt_marks_character_truncation():
+    started = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    excerpt = chat_transcript_excerpts(
+        [{'id': 'visible', 'started_at': started, 'transcript_segments': [{'text': 'x' * 200}]}],
+        ChatTranscriptSearch([{'conversation_id': 'visible', 'chunk_index': 0}], True),
+        max_chars=60,
+    )['visible']
+    assert 'omitted, not absent' in excerpt
+    assert 'max_transcript_segments' in excerpt
 
 
 def test_chat_chunk_search_failure_does_not_claim_transcript_coverage():
@@ -180,6 +202,18 @@ def test_merge_typesense_page_prefers_transcript_on_page_one():
     ) == ["tr1", "ts1", "ts2"]
 
 
+def test_merge_typesense_page_keeps_every_page_one_typesense_hit():
+    from utils.conversations.mcp_transcript_search import merge_typesense_page_with_transcript_hits
+
+    # Spoken-word hits alone would fill the cap. Page 2 starts after s2, so s1 and s2 must stay.
+    assert merge_typesense_page_with_transcript_hits(
+        ["s1", "s2"],
+        ["t1", "t2", "s2", "t3", "t4"],
+        page=1,
+        per_page=4,
+    ) == ["t1", "t2", "s2", "s1"]
+
+
 def test_merge_typesense_page_keeps_typesense_order_after_page_one():
     from utils.conversations.mcp_transcript_search import merge_typesense_page_with_transcript_hits
 
@@ -195,22 +229,18 @@ def test_merge_prefers_transcript_ids_then_summary():
     assert merge_summary_and_transcript_ids(["t1", "t2"], ["s1", "t1", "s2"], limit=3) == ["t1", "t2", "s1"]
 
 
-def test_resolve_merges_chunk_hits_ahead_of_summary_vectors():
+def test_resolve_uses_summary_vectors_without_chunk_index():
     ids = resolve_mcp_conversation_search_ids(
         "uid",
         "budget",
         limit=5,
         query_vectors=lambda *a, **k: ["summary-only", "shared"],
-        search_transcript_chunks=lambda *a, **k: [
-            {"conversation_id": "transcript-hit", "chunk_index": 0, "score": 0.9},
-            {"conversation_id": "shared", "chunk_index": 1, "score": 0.8},
-        ],
     )
-    assert ids == ["transcript-hit", "shared", "summary-only"]
+    assert ids == ["summary-only", "shared"]
 
 
-def test_resolve_shares_one_query_vector_across_searches():
-    captured = {"embed_calls": 0, "summary_vector": None, "chunk_vector": None}
+def test_resolve_embeds_once_for_summary_vector_search():
+    captured = {"embed_calls": 0, "summary_vector": None}
     shared = [0.11, 0.22]
 
     def _embed(q):
@@ -222,47 +252,12 @@ def test_resolve_shares_one_query_vector_across_searches():
         captured["summary_vector"] = query_vector
         return ["s1"]
 
-    def _chunks(uid, query, limit=None, starts_at=None, ends_at=None, query_vector=None):
-        captured["chunk_vector"] = query_vector
-        return []
-
     ids = resolve_mcp_conversation_search_ids(
-        "uid",
-        "budget",
-        limit=5,
-        query_vectors=_query_vectors,
-        search_transcript_chunks=_chunks,
-        embed_query=_embed,
+        "uid", "budget", limit=5, query_vectors=_query_vectors, embed_query=_embed
     )
     assert ids == ["s1"]
     assert captured["embed_calls"] == 1
     assert captured["summary_vector"] is shared
-    assert captured["chunk_vector"] is shared
-
-
-def test_resolve_fail_open_when_chunk_search_raises():
-    def _boom(*a, **k):
-        raise RuntimeError("pinecone down")
-
-    ids = resolve_mcp_conversation_search_ids(
-        "uid",
-        "budget",
-        limit=5,
-        query_vectors=lambda *a, **k: ["only-summary"],
-        search_transcript_chunks=_boom,
-    )
-    assert ids == ["only-summary"]
-
-
-def test_resolve_ignores_non_list_chunk_results():
-    ids = resolve_mcp_conversation_search_ids(
-        "uid",
-        "budget",
-        limit=5,
-        query_vectors=lambda *a, **k: ["v1"],
-        search_transcript_chunks=lambda *a, **k: "not-a-list",  # type: ignore[arg-type,return-value]
-    )
-    assert ids == ["v1"]
 
 
 def test_attach_snippets_to_conversations():

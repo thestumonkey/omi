@@ -7,6 +7,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/pages/phone_calls/phone_calls_feature.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/settings/data_export.dart';
@@ -100,7 +101,7 @@ mixin _GroupRows<T extends StatefulWidget> on State<T> {
 // -----------------------------------------------------------------------------------------------
 // Device
 
-/// Device: the connected device's settings (only while connected), Offline Sync and Phone Calls.
+/// Device: the device's settings, Offline Sync and Phone Calls.
 class DeviceGroupPage extends StatefulWidget {
   const DeviceGroupPage({super.key});
 
@@ -113,16 +114,22 @@ class _DeviceGroupPageState extends State<DeviceGroupPage> with _GroupRows {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final deviceConnected = context.select<DeviceProvider, bool>((p) => p.isConnected);
+    // The Device Settings page also serves remembered-but-disconnected devices (its Diagnostics
+    // row reads per-device native history that survives a drop, and the persisted pairing exists
+    // before the provider hydrates it on the connect path), so keep the destination while the
+    // app remembers any device instead of only while the link is up.
+    final rememberedDevice = context.select<DeviceProvider, bool>((p) => p.hasRememberedDevice);
     return _GroupPage(
       pageKey: 'settings_page_device',
       title: l10n.device,
       children: [
         OmiSettingsGroup(
           children: [
-            if (deviceConnected)
+            if (deviceConnected || rememberedDevice)
               row(SettingsDestination.device, icon: FontAwesomeIcons.bluetooth, title: l10n.deviceSettings),
             row(SettingsDestination.offlineSync, icon: FontAwesomeIcons.solidCloud, title: l10n.offlineSync),
-            row(SettingsDestination.phoneCalls, icon: FontAwesomeIcons.phone, title: l10n.phoneCalls),
+            if (PhoneCallsFeature.visible)
+              row(SettingsDestination.phoneCalls, icon: FontAwesomeIcons.phone, title: l10n.phoneCalls),
             // Most-opened Settings item: people come here to fix microphone, Bluetooth and notifications.
             row(SettingsDestination.permissions, icon: FontAwesomeIcons.shieldHalved, title: l10n.permissions),
           ],

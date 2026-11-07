@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:omi/utils/logger.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
@@ -13,6 +15,19 @@ import '../../support/capture/capture_replay_world.dart';
 import '../../support/capture/scripted_device_connection.dart';
 
 final pendant = BtDevice(id: 'pendant-1', name: 'Omi', type: DeviceType.omi, rssi: -40);
+
+class _OneShotAudioSetupFailure extends ScriptedDeviceConnection {
+  bool failNextAudio = false;
+
+  @override
+  Future<StreamSubscription?> getBleAudioBytesListener({required void Function(List<int>) onAudioBytesReceived}) async {
+    if (failNextAudio) {
+      failNextAudio = false;
+      throw StateError('synthetic audio capture start failure');
+    }
+    return super.getBleAudioBytesListener(onAudioBytesReceived: onAudioBytesReceived);
+  }
+}
 
 CaptureEnvironment environment(
   CaptureCoordinatorState state, {
@@ -68,6 +83,7 @@ class HarnessPorts {
   int opens = 0;
   int nextId = 0;
   String? recordingId;
+  final requestOrigins = <String>[];
   Completer<void>? hold;
   bool failNextOpen = false;
   bool failNextSnapshot = false;
@@ -138,8 +154,9 @@ class HarnessPorts {
         setNativeWriterGate: (source, admitted) => _record('gate:${source.name}:$admitted'),
         finalizeWal: () => _record('wal:finalize'),
         rollSession: (identity) => _record('wal:roll'),
-        mintRecordingId: (key, source) {
+        mintRecordingId: (key, source, origin) {
           final minted = recordingId = '${source}_${++nextId}';
+          requestOrigins.add(origin);
           log.add('mint:$key:$minted');
           return minted;
         },
@@ -834,6 +851,11 @@ void main() {
       steps: [16, 26, 4],
       phase: CapturePhase.phoneBatchPaused,
     ),
+    (
+      name: 'closing onboarding over a live pendant with batch mode off does not turn batch on',
+      steps: [0, 20, 21],
+      phase: CapturePhase.pendantLive,
+    ),
   ]) {
     test(episode.name, () async {
       final model = SequenceModel();
@@ -912,6 +934,19 @@ void main() {
     expect(model.state.suspended, hasLength(1));
     model.step(const ScriptStep(2));
     expect(model.state.suspended, hasLength(1));
+  });
+
+  test('phone start is an explicit user request and a mode change is an automatic roll', () async {
+    final fake = HarnessPorts();
+    late CaptureCoordinator coordinator;
+    coordinator = CaptureCoordinator(
+      ports: fake.ports,
+      readEnvironment: () => environment(coordinator.state, muted: fake.muted, batch: fake.batch),
+    );
+    await coordinator.dispatch(const PhoneStartRequested());
+    expect(fake.requestOrigins, ['explicit_user']);
+    await coordinator.dispatch(const BatchModeSetRequested(enabled: true));
+    expect(fake.requestOrigins, ['explicit_user', 'automatic_roll']);
   });
 
   test('call end cannot consume the speech-profile pendant hold', () async {
@@ -1813,6 +1848,44 @@ void main() {
       await world.dispose();
       if (directory.existsSync()) directory.deleteSync(recursive: true);
     }
+  }
+
+  for (final duringResume in [false, true]) {
+    test('audio setup failure during ${duringResume ? 'resume' : 'start'} fails closed and permits a fresh start',
+        () async {
+      await withReviewWorld((world) async {
+        final connection = _OneShotAudioSetupFailure();
+        world.deviceConnection = connection;
+        if (duringResume) {
+          await world.controller.streamDeviceRecording(device: pendant);
+          await world.controller.pauseDeviceRecording();
+          await world.settle();
+        }
+        connection.failNextAudio = true;
+        Logger.instance.talker.cleanHistory();
+        await expectLater(
+          duringResume
+              ? world.controller.resumeDeviceRecording()
+              : world.controller.streamDeviceRecording(device: pendant),
+          throwsA(isA<StateError>()),
+        );
+        await world.settle();
+        expect(world.controller.liveCaptureSource, isNull);
+        expect(
+            Logger.instance.talker.history.map((entry) => entry.message),
+            contains(allOf(
+              contains(
+                  '[Capture] fail closed: failure_class=StateError reason=Bad state: synthetic audio capture start failure'),
+              contains('phase=pendantLive source=pendant call_active=false device_connected=true'),
+            )));
+        expect(world.controller.bleBytesStream, isNull);
+        expect(connection.openAudioSubscriptions, 0);
+        await world.controller.streamDeviceRecording(device: pendant);
+        await world.settle();
+        expect(world.controller.liveCaptureSource, 'omi');
+        expect(connection.openAudioSubscriptions, 1);
+      });
+    });
   }
 
   test('real controller rejects denied phone permission before touching the pendant', () async {

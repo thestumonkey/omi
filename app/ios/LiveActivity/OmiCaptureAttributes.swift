@@ -16,8 +16,18 @@ struct OmiCaptureAttributes: ActivityAttributes {
         var canFinish: Bool
         var busy: Bool
         var actionFailed: Bool = false
+        // Set by LiveActivityManager, never by Flutter, so they are optional to decode.
+        /// What needs the user's attention (CaptureNotice); nil is the recording card.
+        var notice: String?
+        /// When the current status began, in Unix seconds.
+        var noticeSince: Double?
+        /// The pendant's battery percentage, when one is known.
+        var pendantBattery: Int?
     }
 }
+
+/// The notice taxonomy and when each wins live in OmiCapturePresentationPolicy.swift,
+/// free of ActivityKit so the host-compiled policy tests run the real decision.
 
 /// Lives in both targets, but the handler is installed only in Runner. The
 /// extension renders attributes; it never accesses Flutter or opens a recorder.

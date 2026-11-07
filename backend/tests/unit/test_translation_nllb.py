@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-import json
 import pytest
 
 from config.translation import TranslationProvider, resolve_translation_profile
@@ -20,74 +19,77 @@ from utils.translation import TranslationService, TranslationStatus
 from utils.translation_core.cache import TranslationCache
 from utils.translation_core.metrics import NoopTranslationMetrics
 from utils.translation_core.providers import (
-    GeminiTranslationBatch,
-    GeminiTranslationProvider,
+    LunaTranslationBatch,
+    LunaTranslationProvider,
     NllbTranslationProvider,
     TranslationProviderChain,
     TranslationProviderError,
 )
-from llm_gateway.gateway.vertex_wire import _json_schema_to_vertex_response_schema
+from llm_gateway.gateway.vertex_wire import _vertex_request
 
 
 def test_config_preserves_exact_ordered_provider_policy():
     nllb_only = resolve_translation_profile(
         {'TRANSLATION_SERVICE_MODELS': 'nllb', 'HOSTED_TRANSLATION_API_URL': 'http://nllb'}
     )
-    nllb_google = resolve_translation_profile(
-        {'TRANSLATION_SERVICE_MODELS': 'nllb,google', 'HOSTED_TRANSLATION_API_URL': 'http://nllb'}
+    nllb_luna = resolve_translation_profile(
+        {'TRANSLATION_SERVICE_MODELS': 'nllb,luna', 'HOSTED_TRANSLATION_API_URL': 'http://nllb'}
     )
-    google_nllb = resolve_translation_profile(
-        {'TRANSLATION_SERVICE_MODELS': 'google,nllb', 'HOSTED_TRANSLATION_API_URL': 'http://nllb'}
+    luna_nllb = resolve_translation_profile(
+        {'TRANSLATION_SERVICE_MODELS': 'luna,nllb', 'HOSTED_TRANSLATION_API_URL': 'http://nllb'}
     )
 
     assert nllb_only.providers == (TranslationProvider.nllb,)
-    assert nllb_google.providers == (TranslationProvider.nllb, TranslationProvider.google)
-    assert google_nllb.providers == (TranslationProvider.google, TranslationProvider.nllb)
+    assert nllb_luna.providers == (TranslationProvider.nllb, TranslationProvider.luna)
+    assert luna_nllb.providers == (TranslationProvider.luna, TranslationProvider.nllb)
+    assert nllb_luna.deprecated_tokens == ()
 
 
 def test_config_filters_unavailable_and_records_unsupported_tokens():
     resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'unknown,nllb'})
 
-    assert resolved.providers == (TranslationProvider.nllb,)
+    assert resolved.providers == (TranslationProvider.luna,)
     assert resolved.configured_providers == (TranslationProvider.nllb,)
     assert resolved.unsupported_tokens == ('unknown',)
     assert resolved.unavailable_tokens == ('nllb',)
 
 
-def test_empty_config_defaults_to_nllb():
-    assert resolve_translation_profile({}).providers == (TranslationProvider.nllb,)
-    assert resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': ''}).providers == (TranslationProvider.nllb,)
+def test_empty_or_unusable_config_defaults_to_luna():
+    # A blank or broken chain must never route back to the retired NLLB GPU.
+    assert resolve_translation_profile({}).providers == (TranslationProvider.luna,)
+    assert resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': ''}).providers == (TranslationProvider.luna,)
     assert resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'unknown'}).providers == (
-        TranslationProvider.nllb,
+        TranslationProvider.luna,
     )
+    assert resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb'}).providers == (TranslationProvider.luna,)
 
 
-def test_filtered_configured_primary_records_recovered_fallback_after_google_succeeds():
+def test_filtered_configured_primary_records_recovered_fallback_after_luna_succeeds():
     recorder = FallbackRecorder()
-    resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb,google'})
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb,luna'})
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.google: google},
+        {TranslationProvider.luna: luna},
         selected_profile=resolved,
         recorder=recorder,
     )
 
     assert service.translate_text('es', 'Hello') == ('Hola', 'en')
     assert recorder.events[0].fields['from_mode'] == 'nllb'
-    assert recorder.events[0].fields['to_mode'] == 'gemini'
+    assert recorder.events[0].fields['to_mode'] == 'luna'
     assert recorder.events[0].fields['reason'] == 'config_incomplete'
     assert recorder.events[0].fields['outcome'] == 'recovered'
 
 
-def test_filtered_configured_primary_records_exhausted_when_google_fails():
+def test_filtered_configured_primary_records_exhausted_when_luna_fails():
     recorder = FallbackRecorder()
-    resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb,google'})
-    google = FakeProvider(
-        TranslationProvider.google,
-        responses=[provider_error(TranslationProvider.google)],
+    resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb,luna'})
+    luna = FakeProvider(
+        TranslationProvider.luna,
+        responses=[provider_error(TranslationProvider.luna)],
     )
     service, _cache = build_service(
-        {TranslationProvider.google: google},
+        {TranslationProvider.luna: luna},
         selected_profile=resolved,
         recorder=recorder,
     )
@@ -99,18 +101,63 @@ def test_filtered_configured_primary_records_exhausted_when_google_fails():
     assert recorder.events[0].fields['outcome'] == 'exhausted'
 
 
-@pytest.mark.parametrize('gemini_token', ('gemini', 'google'))
-def test_config_normalizes_gemini_and_legacy_google_to_canonical_gemini(gemini_token):
+@pytest.mark.parametrize('deprecated_token', ('gemini', 'google'))
+def test_config_parses_deprecated_luna_spellings_as_luna(deprecated_token):
     resolved = resolve_translation_profile(
         {
-            'TRANSLATION_SERVICE_MODELS': f' NLLB, {gemini_token}, nllb, {gemini_token.upper()} ',
+            'TRANSLATION_SERVICE_MODELS': f' NLLB, {deprecated_token}, nllb, {deprecated_token.upper()}, luna ',
             'HOSTED_TRANSLATION_API_URL': ' http://nllb ',
         }
     )
 
-    assert resolved.providers == (TranslationProvider.nllb, TranslationProvider.gemini)
-    assert resolved.configured_providers == (TranslationProvider.nllb, TranslationProvider.gemini)
+    assert resolved.providers == (TranslationProvider.nllb, TranslationProvider.luna)
+    assert resolved.configured_providers == (TranslationProvider.nllb, TranslationProvider.luna)
+    assert resolved.deprecated_tokens == (deprecated_token,)
+    assert resolved.unsupported_tokens == ()
     assert resolved.nllb_url == 'http://nllb'
+
+
+def test_deprecated_luna_spelling_still_translates_and_is_counted(monkeypatch, caplog):
+    counted: list[str] = []
+
+    class SpyMetrics(NoopTranslationMetrics):
+        def deprecated_provider(self, token: str) -> None:
+            counted.append(token)
+
+    monkeypatch.setattr('utils.translation_core.engine.get_translation_metrics', lambda: SpyMetrics())
+    resolved = resolve_translation_profile({'TRANSLATION_SERVICE_MODELS': 'nllb,gemini'})
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
+    service, _cache = build_service({TranslationProvider.luna: luna}, selected_profile=resolved)
+
+    with caplog.at_level('WARNING'):
+        assert service.translate_text('es', 'Hello') == ('Hola', 'en')
+
+    assert counted == ['gemini']
+    assert 'Deprecated translation provider names resolve to luna: gemini' in caplog.text
+
+
+def test_deprecated_provider_metric_label_is_bounded():
+    from prometheus_client import REGISTRY
+
+    from utils.translation_core.metrics import PrometheusTranslationMetrics
+
+    metrics = PrometheusTranslationMetrics()
+    before = REGISTRY.get_sample_value('omi_translation_deprecated_provider_tokens_total', {'token': 'other'}) or 0.0
+    metrics.deprecated_provider('gemini')
+    metrics.deprecated_provider('something-unbounded')
+
+    assert REGISTRY.get_sample_value('omi_translation_deprecated_provider_tokens_total', {'token': 'gemini'}) >= 1.0
+    assert (
+        REGISTRY.get_sample_value('omi_translation_deprecated_provider_tokens_total', {'token': 'other'})
+        == before + 1.0
+    )
+
+
+def test_retired_enum_aliases_are_gone():
+    # Callers name the provider luna; gemini/google survive only as env spellings.
+    assert {member.name for member in TranslationProvider} == {'luna', 'nllb'}
+    assert not hasattr(TranslationProvider, 'gemini')
+    assert not hasattr(TranslationProvider, 'google')
 
 
 @pytest.mark.parametrize(
@@ -127,28 +174,28 @@ def test_invalid_numeric_config_fails_at_the_call_boundary(name, value, message)
         resolve_translation_profile({name: value})
 
 
-def test_nllb_success_never_calls_gemini():
+def test_nllb_success_never_calls_luna():
     nllb = FakeProvider(TranslationProvider.nllb, responses=[translations(('Hola', 'en'))])
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('should not run', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('should not run', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
     )
 
     assert service.translate_text('es', 'Hello') == ('Hola', 'en')
-    assert google.calls == []
+    assert luna.calls == []
 
 
-def test_nllb_timeout_recovers_through_google_with_shared_fallback_event():
+def test_nllb_timeout_recovers_through_luna_with_shared_fallback_event():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'timeout')],
     )
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
@@ -156,12 +203,12 @@ def test_nllb_timeout_recovers_through_google_with_shared_fallback_event():
 
     assert outcomes[0].text == 'Hola'
     assert recorder.events[0].fields['from_mode'] == 'nllb'
-    assert recorder.events[0].fields['to_mode'] == 'gemini'
+    assert recorder.events[0].fields['to_mode'] == 'luna'
     assert recorder.events[0].fields['reason'] == 'timeout'
     assert recorder.events[0].fields['outcome'] == 'recovered'
 
 
-def test_nllb_only_failure_does_not_invent_google_fallback():
+def test_nllb_only_failure_does_not_invent_luna_fallback():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
@@ -186,13 +233,13 @@ def test_exhausted_provider_chain_records_truthful_outcome():
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'provider_5xx')],
     )
-    google = FakeProvider(
-        TranslationProvider.google,
-        responses=[provider_error(TranslationProvider.google)],
+    luna = FakeProvider(
+        TranslationProvider.luna,
+        responses=[provider_error(TranslationProvider.luna)],
     )
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         store=store,
         recorder=recorder,
     )
@@ -204,37 +251,37 @@ def test_exhausted_provider_chain_records_truthful_outcome():
     assert store.puts == []
     assert recorder.events[0].fields['outcome'] == 'exhausted'
     assert recorder.events[0].fields['from_mode'] == 'nllb'
-    assert recorder.events[0].fields['to_mode'] == 'gemini'
+    assert recorder.events[0].fields['to_mode'] == 'luna'
 
 
-def test_google_first_can_recover_through_nllb_when_configured():
+def test_luna_first_can_recover_through_nllb_when_configured():
     recorder = FallbackRecorder()
-    google = FakeProvider(
-        TranslationProvider.google,
-        responses=[provider_error(TranslationProvider.google)],
+    luna = FakeProvider(
+        TranslationProvider.luna,
+        responses=[provider_error(TranslationProvider.luna)],
     )
     nllb = FakeProvider(TranslationProvider.nllb, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.google: google, TranslationProvider.nllb: nllb},
-        selected_profile=profile((TranslationProvider.google, TranslationProvider.nllb)),
+        {TranslationProvider.luna: luna, TranslationProvider.nllb: nllb},
+        selected_profile=profile((TranslationProvider.luna, TranslationProvider.nllb)),
         recorder=recorder,
     )
 
     assert service.translate_text('es', 'Hello') == ('Hola', 'en')
-    assert recorder.events[0].fields['from_mode'] == 'gemini'
+    assert recorder.events[0].fields['from_mode'] == 'luna'
     assert recorder.events[0].fields['to_mode'] == 'nllb'
 
 
-def test_nllb_transport_failure_recovers_through_gemini():
+def test_nllb_transport_failure_recovers_through_luna():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'other')],
     )
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
@@ -243,16 +290,16 @@ def test_nllb_transport_failure_recovers_through_gemini():
     assert recorder.events[0].fields['outcome'] == 'recovered'
 
 
-def test_nllb_5xx_recovers_through_gemini():
+def test_nllb_5xx_recovers_through_luna():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'provider_5xx')],
     )
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
@@ -260,67 +307,67 @@ def test_nllb_5xx_recovers_through_gemini():
     assert recorder.events[0].fields['reason'] == 'provider_5xx'
 
 
-def test_nllb_429_recovers_through_gemini():
+def test_nllb_429_recovers_through_luna():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'provider_429')],
     )
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
     assert service.translate_text('es', 'Hello') == ('Hola', 'en')
     assert recorder.events[0].fields['reason'] == 'provider_429'
-    assert len(google.calls) == 1
+    assert len(luna.calls) == 1
 
 
-def test_invalid_primary_response_does_not_fall_through_to_gemini():
+def test_invalid_primary_response_does_not_fall_through_to_luna():
     recorder = FallbackRecorder()
     nllb = FakeProvider(TranslationProvider.nllb, responses=[[]])
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
     outcomes = service.translate_outcomes('es', [('segment', 'Hello')])
 
     assert outcomes[0].status == TranslationStatus.failed
-    assert google.calls == []
+    assert luna.calls == []
     assert recorder.events == []
 
 
-def test_nllb_unsupported_language_does_not_fall_through_to_gemini():
+def test_nllb_unsupported_language_does_not_fall_through_to_luna():
     recorder = FallbackRecorder()
     nllb = FakeProvider(
         TranslationProvider.nllb,
         responses=[provider_error(TranslationProvider.nllb, 'provider_4xx')],
     )
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.nllb: nllb, TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.nllb: nllb, TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
     outcomes = service.translate_outcomes('es', [('segment', 'Hello')])
 
     assert outcomes[0].status == TranslationStatus.failed
-    assert google.calls == []
+    assert luna.calls == []
     assert recorder.events == []
 
 
 def test_missing_primary_adapter_recovers_without_changing_config_order():
     recorder = FallbackRecorder()
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Hola', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Hola', 'en'))])
     service, _cache = build_service(
-        {TranslationProvider.google: google},
-        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.google)),
+        {TranslationProvider.luna: luna},
+        selected_profile=profile((TranslationProvider.nllb, TranslationProvider.luna)),
         recorder=recorder,
     )
 
@@ -331,10 +378,10 @@ def test_missing_primary_adapter_recovers_without_changing_config_order():
 
 def test_profile_is_resolved_at_each_call_boundary(monkeypatch):
     metrics = NoopTranslationMetrics()
-    google = FakeProvider(TranslationProvider.google, responses=[translations(('Google result', 'en'))])
+    luna = FakeProvider(TranslationProvider.luna, responses=[translations(('Luna result', 'en'))])
     nllb = FakeProvider(TranslationProvider.nllb, responses=[translations(('NLLB result', 'en'))])
     chain = TranslationProviderChain(
-        providers={TranslationProvider.google: google, TranslationProvider.nllb: nllb},
+        providers={TranslationProvider.luna: luna, TranslationProvider.nllb: nllb},
         metrics=metrics,
         fallback_recorder=FallbackRecorder(),
     )
@@ -348,10 +395,10 @@ def test_profile_is_resolved_at_each_call_boundary(monkeypatch):
     monkeypatch.setenv('HOSTED_TRANSLATION_API_URL', 'http://nllb')
     assert service.translate_text('es', 'First') == ('NLLB result', 'en')
 
-    monkeypatch.setenv('TRANSLATION_SERVICE_MODELS', 'google')
-    assert service.translate_text('es', 'Second') == ('Google result', 'en')
+    monkeypatch.setenv('TRANSLATION_SERVICE_MODELS', 'luna')
+    assert service.translate_text('es', 'Second') == ('Luna result', 'en')
     assert len(nllb.calls) == 1
-    assert len(google.calls) == 1
+    assert len(luna.calls) == 1
 
 
 class FakeResponse:
@@ -487,7 +534,7 @@ def test_nllb_adapter_detects_supported_source_only_when_not_supplied(monkeypatc
     assert client.calls[0][1]['source_language_code'] == 'fr'
 
 
-class FakeGeminiClient:
+class FakeLunaClient:
     def __init__(self, response: object = None, error: Exception | None = None) -> None:
         self.response = response
         self.error = error
@@ -504,10 +551,10 @@ class FakeGeminiClient:
         return self.response
 
 
-def test_gemini_adapter_maps_request_and_response_without_network():
-    response = GeminiTranslationBatch(translations=[{'text': 'Hola', 'detected_language': 'en'}])
-    client = FakeGeminiClient(response)
-    provider = GeminiTranslationProvider(client_factory=lambda: client)
+def test_luna_adapter_maps_request_and_response_without_network():
+    response = LunaTranslationBatch(translations=[{'text': 'Hola', 'detected_language': 'en'}])
+    client = FakeLunaClient(response)
+    provider = LunaTranslationProvider(client_factory=lambda: client)
 
     result = provider.translate(['Hello'], 'es', 'en', profile())
 
@@ -519,7 +566,7 @@ def test_gemini_adapter_maps_request_and_response_without_network():
     ]
 
 
-def test_gemini_adapter_uses_translation_feature_client(monkeypatch):
+def test_luna_adapter_uses_translation_feature_client(monkeypatch):
     calls: list[str] = []
     client = object()
     monkeypatch.setattr(
@@ -527,24 +574,34 @@ def test_gemini_adapter_uses_translation_feature_client(monkeypatch):
         lambda feature: calls.append(feature) or client,
     )
 
-    assert GeminiTranslationProvider()._get_client() is client
+    assert LunaTranslationProvider()._get_client() is client
     assert calls == ['translation']
 
 
-def test_gemini_adapter_wraps_sdk_failures_as_typed_provider_errors():
-    provider = GeminiTranslationProvider(client_factory=lambda: FakeGeminiClient(error=RuntimeError('boom')))
+def test_luna_adapter_wraps_provider_failures_as_typed_errors():
+    provider = LunaTranslationProvider(client_factory=lambda: FakeLunaClient(error=RuntimeError('boom')))
 
     with pytest.raises(TranslationProviderError) as raised:
         provider.translate(['Hello'], 'es', 'en', profile())
 
-    assert raised.value.provider == TranslationProvider.google
+    assert raised.value.provider == TranslationProvider.luna
     assert raised.value.reason == 'other'
 
 
-def test_gemini_translation_batch_schema_is_inlined_for_vertex():
-    schema = GeminiTranslationBatch.model_json_schema()
-    converted = _json_schema_to_vertex_response_schema(schema)
-    dumped = json.dumps(converted)
-    assert '$ref' not in dumped
-    assert '$defs' not in dumped
-    assert converted['properties']['translations']['items']['type'] == 'object'
+def test_luna_translation_batch_schema_uses_vertex_json_schema():
+    schema = LunaTranslationBatch.model_json_schema()
+    payload = _vertex_request(
+        {
+            'messages': [{'role': 'user', 'content': 'synthetic translation'}],
+            'response_format': {'type': 'json_schema', 'json_schema': {'schema': schema}},
+        }
+    )
+    config = payload['generationConfig']
+    assert config['responseMimeType'] == 'application/json'
+    assert 'responseSchema' not in config
+    converted = config['responseJsonSchema']
+    items = converted['properties']['translations']['items']
+    assert items == {'$ref': '#/$defs/LunaTranslationItem'}
+    assert converted['$defs']['LunaTranslationItem']['type'] == 'object'
+    assert converted['$defs']['LunaTranslationItem']['required'] == ['text', 'detected_language']
+    assert schema == LunaTranslationBatch.model_json_schema()

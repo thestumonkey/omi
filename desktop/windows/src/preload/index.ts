@@ -33,6 +33,7 @@ import type {
   WhatsNewPayload,
   AutomationPlan,
   StepResult,
+  TranslationResult,
   CodingAgentCommandOverrides,
   CodingAgentEvent,
   CodingAgentId,
@@ -79,7 +80,6 @@ const omi: OmiBridgeApi = {
   getLocalConversation: (id: string) => ipcRenderer.invoke('db:getLocalConversation', id),
   listLocalConversations: () => ipcRenderer.invoke('db:listLocalConversations'),
   deleteLocalConversation: (id: string) => ipcRenderer.invoke('db:deleteLocalConversation', id),
-  deleteJitConversationKeyframe: (id: string) => ipcRenderer.invoke('jit:conversationDeleted', id),
   updateLocalConversationTitle: (id: string, title: string) =>
     ipcRenderer.invoke('db:updateLocalConversationTitle', id, title),
   updateLocalConversationSync: (id: string, patch: ConversationSyncPatch) =>
@@ -313,17 +313,10 @@ const omi: OmiBridgeApi = {
     ipcRenderer.invoke('rewind:framesSampled', from, to),
   rewindDayBounds: () => ipcRenderer.invoke('rewind:dayBounds'),
   rewindFrameCount: () => ipcRenderer.invoke('rewind:frameCount'),
-  rewindFrameById: (id: number) => ipcRenderer.invoke('rewind:frameById', id),
-  rewindFocusFrame: (id: number) => ipcRenderer.invoke('rewind:focusFrame', id),
   onRewindCaptured: (cb: () => void) => {
     const listener = (): void => cb()
     ipcRenderer.on('rewind:captured', listener)
     return () => ipcRenderer.removeListener('rewind:captured', listener)
-  },
-  onRewindFocusFrame: (cb: (frameId: number) => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, frameId: number): void => cb(frameId)
-    ipcRenderer.on('rewind:focus-frame', listener)
-    return () => ipcRenderer.removeListener('rewind:focus-frame', listener)
   },
   rewindSearch: (query: string) => ipcRenderer.invoke('rewind:search', query),
   // --- Track 4 (Rewind semantic search) --- Phase 2 of a search: the same results
@@ -371,8 +364,6 @@ const omi: OmiBridgeApi = {
   chatGetEngine: () => ipcRenderer.invoke('chat:getEngine'),
   mainChatSend: (args: MainChatSendArgs) => ipcRenderer.invoke('mainChat:send', args),
   mainChatCancel: (runId: string) => ipcRenderer.invoke('mainChat:cancel', runId),
-  setJitRendererConversationKey: (key: string | null) =>
-    ipcRenderer.invoke('jit:rendererSelectionChanged', key),
   onMainChatEvent: (cb: (event: MainChatEvent) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, event: MainChatEvent): void => cb(event)
     ipcRenderer.on('mainChat:event', listener)
@@ -495,20 +486,6 @@ const omi: OmiBridgeApi = {
   insightGetSettings: () => ipcRenderer.invoke('insight:getSettings'),
   insightSetSettings: (patch) => ipcRenderer.invoke('insight:setSettings', patch),
   insightDismiss: () => ipcRenderer.send('insight:dismiss'),
-  proactivityNotificationRendered: (id) => ipcRenderer.send('insight:proactivity-rendered', id),
-  proactivityNotificationFeedback: (id, action) =>
-    ipcRenderer.send('insight:proactivity-feedback', id, action),
-  proactivityNotificationPending: () => ipcRenderer.invoke('insight:proactivity-pending'),
-  onProactivityNavigate: (callback) => {
-    const listener = (
-      _event: Electron.IpcRendererEvent,
-      target: { kind: string; id: string }
-    ): void => callback(target)
-    ipcRenderer.on('proactivity:navigate', listener)
-    return () => ipcRenderer.removeListener('proactivity:navigate', listener)
-  },
-  proactivityTargetRendered: (target) => ipcRenderer.send('proactivity:target-rendered', target),
-  proactivityNotificationOpen: (itemID) => ipcRenderer.send('insight:proactivity-open', itemID),
   insightHoverStart: () => ipcRenderer.send('insight:hoverStart'),
   insightHoverEnd: () => ipcRenderer.send('insight:hoverEnd'),
   insightTest: () => ipcRenderer.send('insight:test'),
@@ -579,6 +556,20 @@ const omi: OmiBridgeApi = {
     const listener = (): void => cb()
     ipcRenderer.on('conversations:changed', listener)
     return () => ipcRenderer.removeListener('conversations:changed', listener)
+  },
+  onDeepgramSignUpdate: (cb: (result: TranslationResult) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, result: TranslationResult): void => cb(result)
+    ipcRenderer.on('omi-sign-update', listener)
+    return () => ipcRenderer.removeListener('omi-sign-update', listener)
+  },
+  signLanguageSetEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('integrations:signLanguage:setEnabled', enabled),
+  signLanguageGetEnabled: (): Promise<boolean> =>
+    ipcRenderer.invoke('integrations:signLanguage:getEnabled'),
+  onSignLanguageEnabledChanged: (cb: (enabled: boolean) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, enabled: boolean): void => cb(enabled)
+    ipcRenderer.on('integrations:signLanguage:changed', listener)
+    return () => ipcRenderer.removeListener('integrations:signLanguage:changed', listener)
   },
   // --- Bar chat bridge (main-window side) ---
   onBarChatSend: (cb: (payload: { text: string; fromVoice: boolean }) => void) => {

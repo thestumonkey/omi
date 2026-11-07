@@ -53,12 +53,15 @@ import routers.listen.receiver as receiver_module
 import utils.stt.replay_delivery as replay_delivery_module
 import utils.stt.vad_gate as vad_gate_module
 from database import conversations as conversations_db
+from database import speaker_auto_enroll
+from database import live_owner_continuity as continuity_cache
 from routers.listen.contracts import ListenLimits, ListenSessionState
 from routers.listen.receiver import ListenReceiver
 from routers.listen.speakers import SpeakerMatcher
 from routers.listen.transcripts import TranscriptProcessor
 from tests.unit.fixtures.strict_firestore_transaction import StrictFirestore
 from utils.audio import AudioRingBuffer
+from utils.speakers import auto_enroll
 from utils.product_telemetry import set_product_telemetry_client_for_tests
 from utils.stt.socket import STTSocket
 from utils.stt.streaming import STTService
@@ -148,10 +151,14 @@ def _fake_extract_embedding(wav_bytes: bytes, name: str):
     with wave.open(io.BytesIO(wav_bytes), 'rb') as handle:
         pcm = handle.readframes(handle.getnframes())
     samples = np.frombuffer(pcm, dtype='<i2').astype(np.float64)
-    index = np.arange(len(samples))
-    mags = np.abs(
-        np.asarray([np.dot(samples, np.exp(-2j * np.pi * freq * index / RATE)) for freq in _FAKE_FREQS])
-    ).astype(np.float32)
+    if not len(samples):
+        return np.zeros((1, len(_FAKE_FREQS)), dtype=np.float32)
+    # These fixture tones occupy exact FFT bins at the captured durations.
+    # A single transform keeps the deterministic spectral match without four
+    # large complex exponentials in every recognition attempt.
+    spectrum = np.fft.rfft(samples)
+    bins = np.rint(np.asarray(_FAKE_FREQS) * len(samples) / RATE).astype(int)
+    mags = np.abs(spectrum[bins]).astype(np.float32)
     norm = float(np.linalg.norm(mags))
     vector = mags / norm if norm else mags
     return vector.reshape(1, -1)
@@ -283,6 +290,11 @@ def _provider_segment(segment_id, start, end, text):
 # ---------------------------------------------------------------------------
 class FailoverStack:
     def __init__(self, monkeypatch, *, v2: bool, create_speakers: bool = False, owner_name: str = 'Alice'):
+        # Historical-clock transport replay exercises the live persistence rollback.
+        monkeypatch.setenv('LATE_AUDIO_SYNC_INTAKE_ENABLED', 'false')
+        # The legacy connector remains live for BYOK sessions; these tests
+        # pin its capture and speaker behavior across provider failover.
+        monkeypatch.setattr('utils.byok.get_byok_keys', lambda: {'deepgram': 'test-key'})
         self.clock = {'wall': T0, 'mono': 0.0}
         monkeypatch.setenv('AUDIO_TIMELINE_V2', 'true' if v2 else 'false')
         self.v2 = v2
@@ -360,6 +372,8 @@ class FailoverStack:
                 return conversations_db.prepare_conversation_for_read(raw, UID)
             if fn is conversations_db.get_manual_speaker_receipt:
                 return {}
+            if fn is continuity_cache.authority_snapshot:
+                return fn(*args, **kwargs, firestore_client=self.store)
             if fn is conversations_db.update_conversation_finished_at:
                 _uid, conversation_id, finished_at = args
                 self.store.rows[('users', UID, 'conversations', conversation_id)]['finished_at'] = finished_at
@@ -545,8 +559,15 @@ async def _run_failover_scenario(monkeypatch, caplog, *, v2: bool):
 
         # ---- Phase 1: one minute of silence ages the ring buffer, then the
         # owner speaks once (provider time 60-63) and the provider dies.
-        pre_audio = _silence(60.0) + _owner(3.0) + _silence(7.0)
-        websocket1 = await stack.run_receive(_frames_for(pre_audio))
+        # The minute of silence ages the real capture ring, but batching only
+        # that silent stretch avoids repeated per-packet work in this test.
+        # Keep the owner's speech on the original one-second frame cadence.
+        pre_frames = (
+            _frames_for(_silence(60.0), seconds_per_frame=10.0)
+            + _frames_for(_owner(3.0))
+            + _frames_for(_silence(7.0), seconds_per_frame=7.0)
+        )
+        websocket1 = await stack.run_receive(pre_frames)
         stack.provider(0)['callback']([_provider_segment('seg-pre', 60.0, 63.0, 'owner line before the failover')])
         # The owner's first clip accumulates evidence but cannot decide alone.
         await _wait_for(
@@ -792,6 +813,16 @@ async def test_introduction_recognition_runs_with_capture_windows_present(monkey
 @pytest.mark.parametrize('v2', [False, True])
 async def test_diarization_completed_emitted_for_both_persistence_modes(monkeypatch, telemetry, v2):
     """P2-13 regression: the v2 batch path records Diarization Completed too."""
+    import routers.listen.transcripts as transcripts_module
+
+    source_events = []
+    emit_product_event = transcripts_module.emit_product_event
+
+    def capture_source_event(**event):
+        source_events.append(event)
+        return emit_product_event(**event)
+
+    monkeypatch.setattr(transcripts_module, 'emit_product_event', capture_source_event)
     stack = FailoverStack(monkeypatch, v2=v2)
     loop_task = asyncio.create_task(stack.processor.process_loop())
     stack.tasks.append(loop_task)
@@ -813,8 +844,81 @@ async def test_diarization_completed_emitted_for_both_persistence_modes(monkeypa
 
     events = [e for e in telemetry.events if e.get('event') == 'Diarization Completed']
     assert events, 'Diarization Completed must be emitted from the v2 batch path as from the legacy loop'
-    assert events[-1]['properties']['conversation_id'] == CONV
+    source_events = [e for e in source_events if e.get('event') == 'Diarization Completed']
+    assert source_events[-1]['properties']['conversation_id'] == CONV
+    assert not {'recording_id', 'conversation_id'} & events[-1]['properties'].keys()
     assert events[-1]['properties']['speaker_count'] >= 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('v2', [False, True])
+@pytest.mark.parametrize('revocation', ['optout', 'source'])
+async def test_live_revocation_removes_a_cached_derived_mapping_before_the_next_batch(
+    monkeypatch, telemetry, v2, revocation
+):
+    stack = FailoverStack(monkeypatch, v2=v2)
+    original_call = stack.host.persistence.call
+    owner = [1.0, *([0.0] * 255)]
+    voice = [0.0, 1.0, *([0.0] * 254)]
+    token = 'a' * 64
+    context = {
+        'private_cloud_sync_enabled': True,
+        'save_other_voice_profiles': True,
+        speaker_auto_enroll.PRIVACY_VERSION: 0,
+        'speaker_embedding': owner,
+        auto_enroll.AUTHORITY_FIELD: {'derived-person': token},
+    }
+
+    async def current_authority(fn, *args, **kwargs):
+        if fn is speaker_auto_enroll.context:
+            return dict(context)
+        if fn is user_db.get_user_speaker_embedding:
+            return owner
+        return await original_call(fn, *args, **kwargs)
+
+    stack.host.persistence.call = current_authority
+    loop_task = asyncio.create_task(stack.processor.process_loop())
+    stack.tasks.append(loop_task)
+    try:
+        await stack.host.speakers.refresh_for_conversation(CONV)
+        matcher = stack.host.speakers
+        matcher.person_embeddings['derived-person'] = {
+            'embedding': voice,
+            'name': 'Synthetic',
+            'auto_enrolled': True,
+            'enrollment_privacy_version': 0,
+            'enrollment_token': token,
+            'enrollment_expires_at': time.time() + 3600,
+        }
+        assert auto_enroll.cached_authorized('derived-person', matcher.person_embeddings['derived-person'], context)
+        matcher.speaker_to_person[0] = ('derived-person', 'Synthetic')
+        matcher._mapping_origin[0] = 'automatic'
+        if revocation == 'optout':
+            context['save_other_voice_profiles'] = False
+            context[speaker_auto_enroll.PRIVACY_VERSION] = 1
+        else:
+            context[auto_enroll.AUTHORITY_FIELD] = {}
+        assert await stack.receiver.initialize_stt()
+        websocket = await stack.run_receive(_frames_for(_tone(OTHER_FREQUENCY_HZ, 6.0)))
+        stack.provider(0)['callback']([_provider_segment('after-optout', 0, 6, 'Later speech after opting out.')])
+        await _wait_for(lambda: bool(stack.decode_segments()), message='post-optout persisted speech', stack=stack)
+        await _wait_for(
+            lambda: bool(_delivered_items(websocket.sent_json, 'Later speech')), message='post-optout delivery'
+        )
+        assert 0 not in matcher.speaker_to_person
+        assert all(s.get('person_id') != 'derived-person' for s in stack.decode_segments())
+        assert all(
+            s.get('person_id') != 'derived-person' for s in _delivered_items(websocket.sent_json, 'Later speech')
+        )
+    finally:
+        stack.state.active = False
+        stack.state.shutdown_event.set()
+        await stack.finish()
+        await asyncio.wait_for(loop_task, timeout=30)
+        for task in stack.tasks:
+            task.cancel()
+        await asyncio.gather(*stack.tasks, return_exceptions=True)
+        stack.restore()
 
 
 @pytest.mark.anyio

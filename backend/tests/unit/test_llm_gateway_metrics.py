@@ -83,7 +83,8 @@ def test_stream_terminal_metric_exposes_bounded_surface_phase_and_byok_source(mo
     assert labels['finish_reason'] == 'length'
     assert labels['provider_rejection'] == 'none'
     assert 'request_id' not in labels
-    assert latency.observations[0][0] == labels
+    assert labels['upstream_http_status'] == 'none'
+    assert latency.observations[0][0] == {key: value for key, value in labels.items() if key != 'upstream_http_status'}
     assert ttfb.observations == [
         (
             {
@@ -140,7 +141,8 @@ def test_terminal_errors_are_warning_logs_with_only_bounded_failure_fields(monke
         'provider=none model=none credential_source=service_forwarded_byok outcome=error '
         'error_class=credential_failure route_serving_class=active failure_class=byok_auth '
         'fallback_used=false fallback_from=none fallback_to=none provider_rejection=none '
-        'budget_source=none output_budget=none completion_size=unknown finish_reason=unknown ttfb_seconds=none rejection_reason=none'
+        'budget_source=none output_budget=none completion_size=unknown finish_reason=unknown ttfb_seconds=none rejection_reason=none '
+        'upstream_http_status=none'
     ]
 
 
@@ -290,3 +292,43 @@ def test_terminal_defensively_rejects_unrecognized_reason(caplog):
         rejection_reason='PRIVATE_SECRET\n' * 1000,
     )
     assert 'rejection_reason=unknown' in caplog.text and 'PRIVATE' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    'status,expected',
+    [
+        (400, '400'),
+        (429, '429'),
+        (503, '503'),
+        (418, '4xx'),
+        (None, 'none'),
+        (True, 'none'),
+        (999, 'none'),
+        ('private', 'none'),
+    ],
+)
+def test_request_status_label_is_bounded_and_payload_free(status, expected):
+    assert metrics._http_status_label(status) == expected
+
+
+def test_provider_status_reaches_request_counter_without_histogram_cardinality(monkeypatch):
+    requests, latency = _Metric(), _Metric()
+    monkeypatch.setattr(metrics, 'REQUESTS_TOTAL', requests)
+    monkeypatch.setattr(metrics, 'REQUEST_LATENCY_SECONDS', latency)
+    error = GatewayProviderRequestRejectedError('provider request failed').with_provider_context(
+        provider='gemini',
+        model='gemini-2.5-pro',
+        provider_rejection=ProviderRejection.OTHER_4XX,
+        upstream_http_status=400,
+    )
+    metrics.observe_error(
+        metrics.time_request(),
+        lane_id='omi:auto:desktop-vertex-pro',
+        route_artifact_id='synthetic',
+        error=error,
+        credential_source='omi_managed',
+        request_id='synthetic',
+    )
+    assert requests.increments[0]['upstream_http_status'] == '400'
+    assert requests.increments[0]['outcome'] == 'error'
+    assert 'upstream_http_status' not in latency.observations[0][0]

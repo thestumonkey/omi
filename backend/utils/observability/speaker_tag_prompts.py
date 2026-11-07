@@ -18,7 +18,7 @@ SPEAKER_TAG_PROMPT_REQUESTS = Counter(
 SPEAKER_TAG_PROMPTS_SERVED = Counter(
     'omi_speaker_tag_prompts_served_total',
     'Tag prompts returned to a client, by kind.',
-    ['kind'],
+    ['kind', 'origin'],
 )
 SPEAKER_TAG_PROMPTS_SKIPPED = Counter(
     'omi_speaker_tag_prompts_skipped_total',
@@ -33,7 +33,7 @@ SPEAKER_TAG_PROMPT_SETS = Counter(
 SPEAKER_TAG_PROMPT_ANSWERS = Counter(
     'omi_speaker_tag_prompt_answers_total',
     'Tag-prompt answers by prompt kind and answer.',
-    ['kind', 'answer'],
+    ['kind', 'answer', 'origin'],
 )
 SPEAKER_TAG_PROMPT_QUALITY = Counter(
     'omi_speaker_tag_prompt_quality_total',
@@ -49,4 +49,10 @@ VOICE_PROFILE_SETTING_CHANGES = Counter(
     'omi_voice_profile_setting_changes_total',
     'Voice-profile preference changes by setting, new value and surface.',
     ['setting', 'enabled', 'source'],
+)
+
+OWNER_CONFIRMATION_EVENTS = Counter(
+    'omi_owner_confirmation_events_total',
+    'Excerpt-bound owner questions: shown, yes, no, skip, stale_rejected. Counts only.',
+    ['event'],
 )

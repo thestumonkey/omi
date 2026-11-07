@@ -33,6 +33,12 @@ def base_stage():
         capture_output=True,
         text=True,
     ).stdout
+    # Historical comparison source predates DEC-PRD-004. Pin its consumer ON
+    # locally so the baseline stays comparable without restoring a runtime flag.
+    source = source.replace(
+        'from config.audio_timeline import live_speaker_span_resolution_enabled',
+        'def live_speaker_span_resolution_enabled(): return True',
+    )
     module = types.ModuleType('capture_resolution_pre_r2')
     exec(compile(source, 'speaker_resolution_pre_r2.py', 'exec'), module.__dict__)
     return module
@@ -62,7 +68,7 @@ def _input(scope, duration):
 def test_continuous_sync_v2_edges_no_worse_than_base(
     env, verified_audio, base_stage, monkeypatch, scope, duration, extents
 ):
-    monkeypatch.setenv('LIVE_SPEAKER_SPAN_RESOLUTION', 'true')
+
     conversation = _input(scope, duration)
     session = verified_audio(conversation, extents)
     # Placement and manifest prove the requested window. The actual listed/
@@ -95,8 +101,15 @@ def test_continuous_sync_v2_edges_no_worse_than_base(
     assert len(clips) >= len(base_clips)
     if base_clips:
         assert conversation.speaker_resolution.status == base_conversation.speaker_resolution.status == 'resolved'
-        assert env[0]['c1'] == base_store['c1']
+        # The existing optional v1 duration header now serves identity policy.
+        # Preserve exact vector bytes, keys, transcript durations and version.
+        assert stage.encode_cache(stage.decode_cache(env[0]['c1'])) == base_stage.encode_cache(
+            base_stage.decode_cache(base_store['c1'])
+        )
         assert clips == base_clips
+        seconds = {}
+        stage.decode_cache(env[0]['c1'], seconds)
+        assert seconds['s0'] == pytest.approx(len(clips[0]) / (SR * 2), abs=0.00051)
     if clips:
         expected = base_clips[0] if base_clips else b''.join(session.cache[c['path']][0] for c in session.chunks)
         assert clips == [expected]
@@ -108,7 +121,7 @@ def test_continuous_sync_v2_edges_no_worse_than_base(
 @pytest.mark.parametrize('scope', ['sync', 'v2'])
 @pytest.mark.parametrize('gap', [0.0005, 0.01])
 def test_sync_v2_internal_gaps_refuse_even_with_tolerated_edges(env, verified_audio, monkeypatch, scope, gap):
-    monkeypatch.setenv('LIVE_SPEAKER_SPAN_RESOLUTION', 'true')
+
     conversation = _input(scope, 2.4)
     verified_audio(conversation, [(0, 1.2), (1.2 + gap, 2.3995)])
     stage.resolve_speakers_for_processing('offline', conversation)

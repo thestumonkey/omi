@@ -45,6 +45,7 @@ _STUBBED = [
     'av',
     'database._client',
     'database.firestore_read_metrics',
+    'database.review_store',
     'database.cache',
     'database.redis_db',
     'database.conversations',
@@ -159,7 +160,7 @@ def _scrap_conversation():
         transcript_segments=[
             TranscriptSegment(
                 id='seg-1',
-                text='Two people are discussing the scaling plan.',
+                text='Two people are discussing the scaling plan and the firmware testing schedule together.',
                 speaker='SPEAKER_00',
                 speaker_id=0,
                 is_user=True,
@@ -202,12 +203,10 @@ def _run_discard(conversation, *, meetings, google_result=None, google_error=Non
         patch.object(pc, 'get_overlapping_calendar_event', google_mock),
         patch.object(
             pc,
-            'get_transcript_structure',
+            'get_conversation_notes',
             MagicMock(return_value=Structured(title='Kept by calendar overlap')),
         ),
-        patch.object(pc, 'extract_action_items', MagicMock(return_value=[])),
-        patch.object(pc, '_fetch_dedup_candidates', MagicMock(return_value=[])),
-        patch.object(pc, '_primary_user_name', MagicMock(return_value=None)),
+        patch.object(pc, '_fetch_dedup_candidates_for_query', MagicMock(return_value=[])),
     ):
         structured, discarded = pc._get_structured('uid-scrap', 'en', conversation)
 
@@ -292,7 +291,7 @@ class TestEverythingElseStillDiscards:
                 MagicMock(side_effect=RuntimeError('firestore unavailable')),
             ),
             patch.object(pc, 'get_overlapping_calendar_event', google_mock),
-            patch.object(pc, 'get_transcript_structure', MagicMock(return_value=Structured(title='x'))),
+            patch.object(pc, 'get_conversation_notes', MagicMock(return_value=Structured(title='x'))),
         ):
             structured, discarded = pc._get_structured('uid-scrap', 'en', _scrap_conversation())
 
@@ -309,10 +308,8 @@ class TestEverythingElseStillDiscards:
             patch.object(pc, 'should_discard_conversation', MagicMock(return_value=True)),
             patch.object(pc.calendar_db, 'get_meetings_in_time_range', MagicMock(return_value=[_meeting_record()])),
             patch.object(pc, 'get_overlapping_calendar_event', AsyncMock(return_value=None)),
-            patch.object(pc, 'get_transcript_structure', structure),
-            patch.object(pc, 'extract_action_items', MagicMock(return_value=[])),
-            patch.object(pc, '_fetch_dedup_candidates', MagicMock(return_value=[])),
-            patch.object(pc, '_primary_user_name', MagicMock(return_value=None)),
+            patch.object(pc, 'get_conversation_notes', structure),
+            patch.object(pc, '_fetch_dedup_candidates_for_query', MagicMock(return_value=[])),
         ):
             from models.structured import Structured
 
@@ -321,3 +318,51 @@ class TestEverythingElseStillDiscards:
 
         assert discarded is False
         assert structure.call_count == 1
+
+
+@pytest.fixture(autouse=True)
+def _isolated_relevance_policy(monkeypatch):
+    # This legacy model/input fixture has no episode or neighbor database.
+    monkeypatch.setenv('CONVERSATION_OCCASION_RELEVANCE_ENABLED', 'false')
+
+
+class TestEnrichmentEarlyAbortCheckpoint:
+    """synceff 2026-11-05: the revision checkpoint runs before the notes agent and its fence is not converted."""
+
+    def _run(self, checkpoint):
+        from models.structured import Structured
+
+        notes = MagicMock(return_value=Structured(title='Kept by calendar overlap'))
+        with (
+            patch.object(pc.notification_db, 'get_user_time_zone', MagicMock(return_value=None)),
+            patch.object(pc.users_db, 'get_user_language_preference', MagicMock(return_value=None)),
+            patch.object(pc, 'track_usage', lambda *args, **kwargs: nullcontext()),
+            patch.object(pc, 'should_discard_conversation', MagicMock(return_value=True)),
+            patch.object(pc.calendar_db, 'get_meetings_in_time_range', MagicMock(return_value=[_meeting_record()])),
+            patch.object(pc, 'get_overlapping_calendar_event', AsyncMock(return_value=None)),
+            patch.object(pc, 'get_conversation_notes', notes),
+            patch.object(pc, '_fetch_dedup_candidates_for_query', MagicMock(return_value=[])),
+        ):
+            result = pc._get_structured('uid-scrap', 'en', _scrap_conversation(), revision_checkpoint=checkpoint)
+        return result, notes
+
+    def test_moved_revision_stops_before_the_notes_agent_and_keeps_the_fence(self):
+        stages = []
+
+        def moved(stage):
+            stages.append(stage)
+            raise pc.SyncConversationPersistenceFenced('synthetic move')
+
+        with pytest.raises(pc.SyncConversationPersistenceFenced):
+            self._run(moved)
+        assert stages == ['pre_notes']
+
+    def test_unchanged_revision_runs_the_notes_agent_once(self):
+        stages = []
+        (structured, discarded), notes = self._run(stages.append)
+        assert stages == ['pre_notes'] and discarded is False
+        assert notes.call_count == 1 and structured.title == 'Kept by calendar overlap'
+
+    def test_no_checkpoint_keeps_todays_path(self):
+        (_, discarded), notes = self._run(None)
+        assert discarded is False and notes.call_count == 1

@@ -25,8 +25,9 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
+from config.batch_conversation_speakers import BATCH_CONVERSATION_SCOPE
 from database.audio_timeline import COVERAGE_TOLERANCE_SECONDS, chunk_span_bounds
 from utils.audio_timeline import is_audio_timeline_v2
 from utils.text_utils import compute_text_containment
@@ -44,6 +45,8 @@ _CANDIDATE_DEDUP_SECONDS = 0.001
 class AudioPlacement:
     window: Optional[Tuple[float, float]]
     reason: str
+    # Set when the window is proven on one store only; readers must not cut from another.
+    store: Optional[str] = None
 
 
 def _seconds(value: Any) -> Optional[float]:
@@ -207,6 +210,46 @@ class PreparedAudioCoverage:
         return index < len(self.ambiguity) and self.ambiguity[index][0] < end
 
 
+def manifest_inventory(audio_files: Any) -> Optional[List[Tuple[float, Optional[Tuple[float, float]]]]]:
+    """Expected ``(timestamp, span bounds)`` pairs, or None when malformed.
+
+    A file without ``chunk_timestamps`` contributes nothing; a file whose
+    ``chunk_spans`` is present must pair one well-formed span per timestamp.
+    """
+    expected: List[Tuple[float, Optional[Tuple[float, float]]]] = []
+    if not isinstance(audio_files, Sequence) or isinstance(audio_files, (str, bytes)):
+        return expected
+    for audio_file in audio_files:
+        if not isinstance(audio_file, Mapping):
+            return None
+        timestamps: Any = audio_file.get('chunk_timestamps')
+        file_spans: Any = audio_file.get('chunk_spans')
+        if not isinstance(timestamps, Sequence) or isinstance(timestamps, (str, bytes)):
+            continue
+        if file_spans is None:
+            file_spans = []
+        elif (
+            not isinstance(file_spans, Sequence)
+            or isinstance(file_spans, (str, bytes))
+            or len(file_spans) != len(timestamps)
+        ):
+            return None
+        for index, timestamp in enumerate(timestamps):
+            try:
+                ts = float(timestamp)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(ts):
+                return None
+            bounds = None
+            if file_spans:
+                bounds = chunk_span_bounds(file_spans[index])
+                if bounds is None:
+                    return None
+            expected.append((ts, bounds))
+    return expected
+
+
 def prepare_audio_coverage(
     audio_files: Any,
     *,
@@ -318,6 +361,16 @@ def saved_sync_window(segment: Mapping[str, Any], origin: float) -> bool:
     )
 
 
+def text_window_refusal(start: float, end: float) -> Optional[str]:
+    """A bounded reason for malformed raw text endpoints, independent of audio clocks."""
+    start_f, end_f = _numeric(start), _numeric(end)
+    if start_f is None or end_f is None or start_f < 0 or end_f < start_f:
+        return 'invalid_text_window'
+    if end_f == start_f:
+        return 'zero_text_window'
+    return None
+
+
 def locate(
     conversation: Mapping[str, Any],
     start: float,
@@ -348,7 +401,7 @@ def locate(
     """
     start_f = _numeric(start)
     end_f = _numeric(end)
-    if start_f is None or end_f is None or start_f < 0 or end_f <= start_f:
+    if start_f is None or end_f is None or text_window_refusal(start, end) is not None:
         return AudioPlacement(None, 'invalid_window')
 
     contributors = list(segments) if segments is not None else _overlapping_segments(conversation, start_f, end_f)
@@ -380,7 +433,13 @@ def locate(
     all_sync = True
     for segment in contributors:
         scope = segment.get('speaker_id_scope')
-        is_sync_scope = isinstance(scope, str) and scope.startswith('sync:') and len(scope) > len('sync:')
+        # Both paths time ASR against the uploaded file, unlike live streams.
+        is_sync_scope = (
+            isinstance(scope, str)
+            and scope.startswith(('sync:', 'final:batch:'))
+            and not scope.startswith(BATCH_CONVERSATION_SCOPE)
+            and scope not in ('sync:', 'final:batch:')
+        )
         if not is_sync_scope and not saved_sync_window(segment, origin):
             all_sync = False
             break

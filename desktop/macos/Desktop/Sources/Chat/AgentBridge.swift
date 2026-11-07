@@ -679,6 +679,10 @@ actor AgentBridge {
     return supplied
   }
 
+  func requestProviderAuth() async {
+    await runtime.requestProviderAuth()
+  }
+
   func setGlobalAuthHandlers(
     onAuthRequired: AuthRequiredHandler?,
     onAuthSuccess: AuthSuccessHandler?
@@ -1120,9 +1124,10 @@ actor AgentBridge {
     expectedProfileGeneration: Int,
     adapterId: String,
     modelProfile: String?,
-    workingDirectory: String
+    workingDirectory: String,
+    authorizationSnapshot: RuntimeOwnerAuthorizationSnapshot? = nil
   ) async throws -> AgentSessionProfileMigration {
-    let authorization = try captureAuthorization()
+    let authorization = try resolveAuthorization(authorizationSnapshot)
     try await start(authorizationSnapshot: authorization)
     guard RuntimeOwnerIdentity.isAuthorizationCurrent(authorization) else {
       throw BridgeError.authMissing
@@ -1508,7 +1513,6 @@ actor AgentBridge {
     producingTurnId: String? = nil,
     expectedContext: AgentContextFreshness? = nil,
     reasoningEffort: String? = nil,
-    jitCostEvidenceProjection: RuntimeJSONPayloadBox? = nil,
     authorizationSnapshot: RuntimeOwnerAuthorizationSnapshot? = nil,
     onTextDelta: @escaping TextDeltaHandler,
     onToolActivity: @escaping ToolActivityHandler,
@@ -1542,7 +1546,6 @@ actor AgentBridge {
       producingTurnId: producingTurnId,
       expectedContext: expectedContext,
       reasoningEffort: reasoningEffort,
-      jitCostEvidenceProjection: jitCostEvidenceProjection,
       authorizationSnapshot: authorization,
       onTextDelta: onTextDelta,
       onToolActivity: onToolActivity,
@@ -1564,7 +1567,6 @@ actor AgentBridge {
     producingTurnId: String? = nil,
     expectedContext: AgentContextFreshness? = nil,
     reasoningEffort: String? = nil,
-    jitCostEvidenceProjection: RuntimeJSONPayloadBox? = nil,
     authorizationSnapshot: RuntimeOwnerAuthorizationSnapshot? = nil,
     onTextDelta: @escaping TextDeltaHandler,
     onToolActivity: @escaping ToolActivityHandler,
@@ -1683,7 +1685,6 @@ actor AgentBridge {
         producingTurnId: producingTurnId,
         expectedContext: expectedContext,
         reasoningEffort: reasoningEffort,
-        jitCostEvidenceProjection: jitCostEvidenceProjection,
         authorizationSnapshot: authorization,
         onTextDelta: trackedTextDelta,
         onToolActivity: trackedToolActivity,
@@ -1729,7 +1730,6 @@ actor AgentBridge {
         producingTurnId: producingTurnId,
         expectedContext: expectedContext,
         reasoningEffort: reasoningEffort,
-        jitCostEvidenceProjection: jitCostEvidenceProjection,
         authorizationSnapshot: authorization,
         onTextDelta: trackedTextDelta,
         onToolActivity: trackedToolActivity,

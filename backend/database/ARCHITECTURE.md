@@ -12,6 +12,10 @@ Do not make a hard-delete primitive call back into conversation orchestration.
 - `conversations.py` owns conversation documents, lifecycle persistence/revision
   checks and transcript codecs. Its hard-delete primitive purges subcollections
   and the document; user/source deletion orchestrators own external artifacts.
+- `transcript_search.py` pages saved transcript reads through those same codecs,
+  visibility and correction projections. Query-bound signed bookmarks and fixed
+  document/deadline budgets (including correction projection in scan and exact reads) provide recall over unindexed old and new recordings
+  without any new persistence or external index writes.
 - `recording_sessions.py` stores realtime recording bindings. `sync_jobs.py` and
   `sync_ledger.py` own job/run leases and durable upload completion. `sync_bridges.py`
   stores revision-checked cleanup receipts on retained donor tombstones; it performs
@@ -30,3 +34,5 @@ Do not make a hard-delete primitive call back into conversation orchestration.
 
 Transaction tests use the strict Firestore fixture. It checks read-before-write
 ordering; it does not simulate production contention or external-service retries.
+
+- `ports/` contains storage-neutral typed protocols and entities. `space_store.py` supplies the Firestore per-space unit of work; folders/people repositories implement the ports while retaining typed module-function entry points. Transaction bodies are restartable and must finish all reads before the first write.

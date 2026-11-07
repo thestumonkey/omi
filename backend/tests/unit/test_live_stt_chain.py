@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.unit.fixtures.live_stt_registry import enabled_live_targets
 from config.stt_provider_policy import STTServingSurface, model_is_enabled, provider_for_service
+from utils.observability import demand_cohort as telemetry, fallback
 from utils.stt import (
     connect_backoff as connect_backoff_module,
     live_failure,
@@ -32,6 +34,7 @@ def _stt_failover_recovery_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def configured(monkeypatch):
+    enabled_live_targets(monkeypatch)
     monkeypatch.setattr(live_chain, '_recent_connect_failures', deque(maxlen=1000))
     monkeypatch.setenv('STT_SHED_CONNECT_FAILURES', '3')
     monkeypatch.setenv('STT_CONNECT_ORDER_FROM_CONFIG', 'true')
@@ -94,8 +97,6 @@ def test_allocation_is_stable_bounded_and_default_dark(monkeypatch):
     assert first == [window_allocation(str(i)) for i in range(1000)]
     assert 200 < sum(first) < 300
     assert not window_allocation(None)
-    monkeypatch.setenv('STT_CONNECT_ORDER_FROM_CONFIG', 'false')
-    assert not window_allocation('user')
 
 
 def test_one_percent_canary_leads_without_reordering_vendor_control(monkeypatch):
@@ -518,14 +519,14 @@ def test_parallel_half_open_and_late_success_cannot_erase_a_failure():
 
 
 @pytest.mark.asyncio
-async def test_default_darkness_preserves_fixed_order_and_ignores_fallback_breaker(monkeypatch):
-    monkeypatch.delenv('STT_CONNECT_ORDER_FROM_CONFIG')
+async def test_explicit_custom_session_keeps_fixed_order_and_ignores_fallback_breaker(monkeypatch):
     monkeypatch.setattr(st, 'stt_service_models', ['modulate-velma-2', 'soniox', 'dg-nova-3', 'parakeet'])
     assert st.get_stt_service_for_language('en', window_uid='user') == (st.STTService.modulate, 'multi', 'velma-2')
     st._deepgram_circuit.record_serve_failure()
     soniox = AsyncMock(return_value=socket())
     dg = AsyncMock(return_value=socket())
     _, actual = await st.connect_stt_socket_with_fallback(
+        use_config=False,
         primary_service=st.STTService.modulate,
         connect_primary=AsyncMock(side_effect=RuntimeError()),
         connect_soniox=soniox,
@@ -538,7 +539,9 @@ async def test_default_darkness_preserves_fixed_order_and_ignores_fallback_break
     st._modulate_circuit.record_serve_failure()
     primary = AsyncMock(return_value=socket())
     with pytest.raises(RuntimeError):
-        await st.connect_stt_socket_with_fallback(primary_service=st.STTService.modulate, connect_primary=primary)
+        await st.connect_stt_socket_with_fallback(
+            use_config=False, primary_service=st.STTService.modulate, connect_primary=primary
+        )
     primary.assert_not_called()
 
 
@@ -561,8 +564,6 @@ def test_preflight_does_not_strand_a_start_with_an_open_primary(monkeypatch):
     monkeypatch.setattr(st, 'stt_service_models', ['modulate-velma-2', 'soniox'])
     st._modulate_circuit.record_serve_failure()
     assert st.is_stt_available()
-    monkeypatch.delenv('STT_CONNECT_ORDER_FROM_CONFIG')
-    assert not st.is_stt_available()
 
 
 @pytest.mark.asyncio
@@ -623,18 +624,11 @@ def test_mid_session_metrics_retain_their_bounded_vocabulary():
     assert bucket_reason('connection_lost') == 'connection_lost'
 
 
-def test_soniox_circuit_owns_its_env_only_after_enablement(monkeypatch):
+def test_soniox_circuit_uses_its_configured_threshold(monkeypatch):
     monkeypatch.setenv('SONIOX_CIRCUIT_FAILURE_THRESHOLD', '1')
-    monkeypatch.setenv('MODULATE_CIRCUIT_FAILURE_THRESHOLD', '2')
     enabled = resilience.soniox_circuit_from_env()
     enabled.record_failure()
     assert enabled.state == 'open'
-    monkeypatch.delenv('STT_CONNECT_ORDER_FROM_CONFIG')
-    legacy = resilience.soniox_circuit_from_env()
-    legacy.record_failure()
-    assert legacy.state == 'closed'
-    legacy.record_failure()
-    assert legacy.state == 'open'
 
 
 def test_late_probe_callbacks_cannot_consume_a_new_generation_probe():
@@ -672,10 +666,8 @@ def test_shared_typed_account_death_uses_long_cooldown_and_one_probe(monkeypatch
 
 
 @pytest.mark.parametrize('code', [401, 403])
-def test_soniox_auth_uses_shared_type_only_when_enabled(monkeypatch, code):
+def test_soniox_auth_uses_shared_type(code):
     assert soniox_death_reason(code, 'unknown') == PROVIDER_AUTH_REJECTED
-    monkeypatch.delenv('STT_CONNECT_ORDER_FROM_CONFIG')
-    assert soniox_death_reason(code, 'unknown') == 'connection_lost'
     # The upstream budget fix is unconditional, including project budgets.
     assert soniox_death_reason(402, 'project_monthly_budget_exhausted') == PROVIDER_BUDGET_EXHAUSTED
 
@@ -697,6 +689,49 @@ def _soniox_then_modulate(**overrides):
         failed=overrides.get('failed', set()),
         models=['soniox', 'modulate-velma-2'],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['labels', 'mutation'])
+@pytest.mark.parametrize('exhausted', [False, True])
+async def test_metric_failure_cannot_abort_selection_or_replace_typed_exhaustion(monkeypatch, failure, exhausted):
+    class RaisingMetric:
+        attempts = 0
+
+        def labels(self, **_labels):
+            if failure == 'labels':
+                self.attempts += 1
+                raise ValueError('synthetic label failure')
+            return self
+
+        def inc(self, *_args):
+            self.attempts += 1
+            raise ValueError('synthetic counter failure')
+
+    broken = RaisingMetric()
+    monkeypatch.setattr(fallback, 'FAILURE_DETAIL', broken)
+    monkeypatch.setattr(live_chain, 'CHAIN_EXHAUSTED', broken)
+    cohort = telemetry.DemandTelemetry('admitted')
+    token = telemetry.current_demand.set(cohort)
+    st._soniox_circuit.record_account_failure(600)
+    primary = AsyncMock(return_value=socket())
+    tail = AsyncMock(return_value=socket())
+    if exhausted:
+        tail.side_effect = RuntimeError('synthetic vendor dial failure')
+    try:
+        kwargs = _soniox_then_modulate(soniox=primary, modulate=tail)
+        if exhausted:
+            with pytest.raises(live_chain.LiveChainExhausted):
+                await live_chain.connect_configured_chain(**kwargs)
+        else:
+            _, selected = await live_chain.connect_configured_chain(**kwargs)
+            assert selected == st.STTService.modulate
+        primary.assert_not_awaited()
+        tail.assert_awaited_once()
+        assert broken.attempts > 0
+        assert cohort.exhausted == exhausted
+    finally:
+        telemetry.current_demand.reset(token)
 
 
 @pytest.mark.asyncio
@@ -991,3 +1026,39 @@ async def test_rescue_probe_auth_records_on_the_probed_circuit(connect_backoff, 
     assert st._modulate_circuit._account_cooldown == 1800
     assert st._soniox_circuit._account_cooldown == soniox_bench
     assert st._soniox_circuit._opened_at == soniox_opened
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cheap_fails', [False, True])
+async def test_batch_preview_preference_keeps_managed_vendor_failover(monkeypatch, cheap_fails):
+    """The retirement preference still dials through policy and the ordinary chain."""
+    monkeypatch.setenv('STT_ROUTING_MODE', 'off')
+    monkeypatch.setattr(st, 'stt_service_models', ['soniox', 'parakeet-window'])
+    monkeypatch.setattr(live_chain.health, 'cached_snapshot', lambda *args: {})
+    primary, language, model = st.get_stt_service_for_language(
+        'en', multi_lang_enabled=False, prefer_window=True, window_uid='synthetic-batch-preview'
+    )
+    assert primary == st.STTService.parakeet and model == 'parakeet-window'
+    calls = []
+
+    async def cheap():
+        calls.append('parakeet')
+        if cheap_fails:
+            raise st.ParakeetConnectionError('capacity_full')
+        return socket()
+
+    async def vendor():
+        calls.append('soniox')
+        return socket()
+
+    _, actual = await st.connect_stt_socket_with_fallback(
+        primary_service=primary,
+        connect_primary=cheap,
+        connect_parakeet=cheap,
+        connect_soniox=vendor,
+        routing_uid='synthetic-batch-preview',
+        routing_language=language,
+        routing_models={'parakeet': model, 'soniox': 'soniox'},
+    )
+    assert actual.value == ('soniox' if cheap_fails else 'parakeet')
+    assert calls == (['parakeet', 'soniox'] if cheap_fails else ['parakeet'])

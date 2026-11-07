@@ -16,13 +16,6 @@ enum GeneratedSwiftTool: String, CaseIterable {
   case getMemories = "get_memories"
   case searchMemories = "search_memories"
   case createMemory = "create_memory"
-  case searchKnowledge = "search_knowledge"
-  case readPlaybook = "read_playbook"
-  case searchHistoricalFacts = "search_historical_facts"
-  case getEntityTimelineTool = "get_entity_timeline_tool"
-  case savePlaybook = "save_playbook"
-  case createStandingTrigger = "create_standing_trigger"
-  case closeFact = "close_fact"
   case getActionItems = "get_action_items"
   case createActionItem = "create_action_item"
   case createContextReminder = "create_context_reminder"
@@ -30,6 +23,7 @@ enum GeneratedSwiftTool: String, CaseIterable {
   case captureScreen = "capture_screen"
   case checkPermissionStatus = "check_permission_status"
   case requestPermission = "request_permission"
+  case getProductKb = "get_product_kb"
   case scanFiles = "scan_files"
   case setUserPreferences = "set_user_preferences"
   case askFollowup = "ask_followup"
@@ -61,8 +55,8 @@ enum GeneratedSwiftToolExecutor: String {
 
 enum GeneratedToolExecutors {
   static let manifestVersion = 1
-  static let manifestDigest = "sha256:05c2be0a329bbdf779e8f5eb8f7db30150acabe3c3a5a90d40ae64bd4b6c0704"
-  static let chatFirstManifestDigest = "sha256:5d3b84c6e49cb6a1d367e89b780e97d7ed24b433907a4037bb413e4c311ec431"
+  static let manifestDigest = "sha256:2485219c4f7346983e817847193494a8e8a1520ec1272925521e8bc7370ee23e"
+  static let chatFirstManifestDigest = "sha256:ce20a45ebe23f393a8c6898b1efde8b49b6367b53e0d494d6d958c4a6a334b58"
 
   static let aliasToCanonical: [String: GeneratedSwiftTool] = [
     "search_screen_history": .semanticSearch,
@@ -85,13 +79,6 @@ enum GeneratedToolExecutors {
     .getMemories: .chatToolExecutor,
     .searchMemories: .chatToolExecutor,
     .createMemory: .chatToolExecutor,
-    .searchKnowledge: .chatToolExecutor,
-    .readPlaybook: .chatToolExecutor,
-    .searchHistoricalFacts: .chatToolExecutor,
-    .getEntityTimelineTool: .chatToolExecutor,
-    .savePlaybook: .chatToolExecutor,
-    .createStandingTrigger: .chatToolExecutor,
-    .closeFact: .chatToolExecutor,
     .getActionItems: .chatToolExecutor,
     .createActionItem: .chatToolExecutor,
     .createContextReminder: .chatToolExecutor,
@@ -99,6 +86,7 @@ enum GeneratedToolExecutors {
     .captureScreen: .chatToolExecutor,
     .checkPermissionStatus: .chatToolExecutor,
     .requestPermission: .chatToolExecutor,
+    .getProductKb: .chatToolExecutor,
     .scanFiles: .chatToolExecutor,
     .setUserPreferences: .chatToolExecutor,
     .askFollowup: .chatToolExecutor,
@@ -166,13 +154,6 @@ enum GeneratedToolExecutors {
     case getMemories
     case searchMemories
     case createMemory
-    case searchKnowledge
-    case readPlaybook
-    case searchHistoricalFacts
-    case getEntityTimelineTool
-    case savePlaybook
-    case createStandingTrigger
-    case closeFact
     case getActionItems
     case createActionItem
     case createContextReminder
@@ -180,6 +161,7 @@ enum GeneratedToolExecutors {
     case captureScreen
     case checkPermissionStatus
     case requestPermission
+    case getProductKb
     case scanFiles
     case setUserPreferences
     case askFollowup
@@ -218,13 +200,6 @@ enum GeneratedToolExecutors {
     case .getMemories: return .getMemories
     case .searchMemories: return .searchMemories
     case .createMemory: return .createMemory
-    case .searchKnowledge: return .searchKnowledge
-    case .readPlaybook: return .readPlaybook
-    case .searchHistoricalFacts: return .searchHistoricalFacts
-    case .getEntityTimelineTool: return .getEntityTimelineTool
-    case .savePlaybook: return .savePlaybook
-    case .createStandingTrigger: return .createStandingTrigger
-    case .closeFact: return .closeFact
     case .getActionItems: return .getActionItems
     case .createActionItem: return .createActionItem
     case .createContextReminder: return .createContextReminder
@@ -232,6 +207,7 @@ enum GeneratedToolExecutors {
     case .captureScreen: return .captureScreen
     case .checkPermissionStatus: return .checkPermissionStatus
     case .requestPermission: return .requestPermission
+    case .getProductKb: return .getProductKb
     case .scanFiles: return .scanFiles
     case .setUserPreferences: return .setUserPreferences
     case .askFollowup: return .askFollowup

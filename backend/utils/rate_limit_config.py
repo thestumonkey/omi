@@ -74,10 +74,12 @@ ACTION_ITEMS_LIST_HOT_CLIENT_MAX: int = _hot_client_max()
 # exempt too — they are the shared hourly ceilings the dedicated policies
 # compose with; exempting only the dedicated budgets would leave the aggregate
 # hourly caps boosted into no-ops.
+# Transcript uploads keep their storage budget even on boosted environments.
 _BOOST_EXEMPT_DEFAULT = (
-    "action_items:list,action_items:list_hot_client,static_map:get,"
+    "storefront:plans,import:upload,action_items:list,action_items:list_hot_client,static_map:get,"
     "dev:memories,dev:memories_write_burst,dev:conversations,dev:conversations_from_segments,"
-    "mcp:oauth_url_client,mcp:oauth_url_client_global,screen_task:gate,screen_task:gate_daily"
+    "mcp:oauth_url_client,mcp:oauth_url_client_global,screen_task:gate,screen_task:gate_daily,users:budget_choice,"
+    "conversations:task-presence"
 )
 _RATE_LIMIT_BOOST_EXEMPT_RAW: str = os.getenv("RATE_LIMIT_BOOST_EXEMPT", _BOOST_EXEMPT_DEFAULT)
 
@@ -90,11 +92,24 @@ _RATE_LIMIT_BOOST_EXEMPT_RAW: str = os.getenv("RATE_LIMIT_BOOST_EXEMPT", _BOOST_
 # ---------------------------------------------------------------------------
 
 RATE_POLICIES: dict[str, tuple[int, int]] = {
+    "users:surface_state": (60, 60),  # Multiple devices plus foreground transitions; metadata only.
+    "users:budget_choice": (6, 60),  # Shared GET/PUT ceiling before monthly usage reads.
+    # A plans sheet opens on user intent; bound accidental polling before provider reads.
+    "storefront:plans": (12, 60),
+    # Each attempt looks up a promotion code; a low ceiling stops code guessing.
+    "payments:redeem_code": (10, 3600),
     "proactivity:api": (120, 60),
     # Conversations — each triggers ~22 OpenAI calls
     "conversations:create": (10, 3600),
-    "conversations:reprocess": (3, 3600),
+    # Reprocess is how users try summary templates and retry a missing Omi
+    # summary: 3/hour blocked comparing a few templates on one conversation.
+    # One run is notes + app result + action items + memories (a handful of
+    # LLM calls, well under :create's STT + ~22 calls), so 10/hour/user keeps
+    # the worst case below the :create ceiling while allowing real exploration.
+    "conversations:reprocess": (10, 3600),
     "conversations:merge": (5, 3600),
+    # Episodes: "Wrap up now" and Undo on a captured item; no model call.
+    "episodes:write": (60, 3600),
     # From-segments: on-device-STT upload path (segments already transcribed, so
     # cheaper than :create — no Deepgram, just LLM structuring). Used per finished
     # conversation by Parakeet/local-STT users, so a bit more headroom than :create.
@@ -114,16 +129,21 @@ RATE_POLICIES: dict[str, tuple[int, int]] = {
     "voice:transcribe_stream": (60, 3600),
     "voice:message": (60, 3600),
     "file:upload": (40, 3600),
+    # Imports have their own bucket, separate from chat file uploads.
+    # The picker sends one request per loose file; 30 covers a month of meetings unzipped.
+    "import:upload": (30, 3600),
     # STT proxy — parakeet GPU batch transcription behind the Omi auth guard
     "stt:transcribe": (60, 3600),
     # Speaker tag prompts: each clip merges stored audio chunks; each answer may
     # queue voice-sample extraction. A daily set holds at most a handful.
+    "review:read": (120, 3600),
+    "review:write": (30, 3600),
     "speaker_tag_prompts:list": (20, 3600),
     "speaker_tag_prompts:clip": (60, 3600),
     "speaker_tag_prompts:answer": (60, 3600),
     # Agent/MCP — bursty tool calls
     "agent:execute_tool": (120, 3600),
-    # JIT frame metadata is cheap, but uploads carry bounded pixel bytes.
+    # Frame request metadata is cheap, but uploads carry bounded pixel bytes.
     "frame_requests:read": (120, 3600),
     "frame_requests:write": (120, 3600),
     "frame_requests:upload": (30, 3600),
@@ -194,6 +214,9 @@ RATE_POLICIES: dict[str, tuple[int, int]] = {
     "goals:extract": (30, 3600),
     # Search
     "conversations:search": (60, 3600),
+    # Batches only mounted rows (at most 100 IDs); canonical membership is
+    # short-lived/version-cached and contains no task content.
+    "conversations:task-presence": (120, 3600),
     # Expensive background ops
     "knowledge_graph:rebuild": (2, 3600),
     # Return-only SSOT extract for desktop onboarding / local graph writers

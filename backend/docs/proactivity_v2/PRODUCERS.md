@@ -1,5 +1,11 @@
 # Mentor and commitment producers
 
+> **Retired (2026-10-26):** both producers this document specifies
+> (`conversation_mentor_v2` and `commitment_followup`) were deleted together
+> with their callers; the registry rows are gone. The text below is the
+> historical specification. See `CONTRACT.md` for the compat-window state of
+> the feed/outcome routes.
+
 `MENTOR_PIPELINE=cohort` is the only valid mode: the legacy mentor pipeline was
 deleted once v2 reached 100% of eligible users. `cohort` selects per user
 through the same server-side `proactivity_v2` resolver and cached PostHog client
@@ -94,6 +100,18 @@ the first reply within the spine's 24h delivery window.
 
 Follow-ups use the existing action-item reminder send/reconcile functions. A named,
 one-shot Cloud Task wakes the backend at the due revision; there is no new cron.
+Both creation-data and update/reconcile reminder transports share canonical
+lifecycle admission in `config/action_item_reminder_policy.py`: completed,
+cancelled, superseded, deleted, explicitly unknown-state and undated tasks never
+arm client reminders or enqueue new follow-ups. Missing status retains the
+released legacy completion/due-date behavior. Producers pass the saved post-write
+row; MCP response cleaning occurs after this decision. Cancellation reuses the
+existing `action_item_delete` envelope, which cancels the local notification by
+ID without deleting a task. This admission policy does not order previously
+queued FCM messages or cancel an offline device's already-scheduled notification.
+An unavailable derived post-commit state read skips only unresolved reminder
+effects, emits bounded degraded telemetry and preserves the task mutation
+receipt/processing continuation; it does not add a durable reconciliation retry.
 Tasks more than 30 days ahead use deterministic 28-day hops with no model work.
 Changed due dates or closed/retired/deleted/manual tasks are ignored on execution.
 A repeated callback is the same ledger identity (task + UTC due revision + `due`).

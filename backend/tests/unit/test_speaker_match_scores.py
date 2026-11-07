@@ -342,7 +342,6 @@ def test_live_score_only_update_does_not_advance_content_revision(monkeypatch):
     planned = SimpleNamespace(segments=[scored], absorbed_into={}, with_segments=lambda accepted: accepted)
     monkeypatch.setattr(db, 'get_firestore_client', lambda: store)
     monkeypatch.setattr(db, 'merge_live_segments', lambda *args, **kwargs: planned)
-    monkeypatch.setattr(db, 'sync_lineage_resolve_active_for', lambda uid: True)
     result = db.update_conversation_segments('u', 'c', [scored], live_segments=[scored])
     assert store.rows[path]['sync_content_revision'] == 7
     assert scores.FIELD not in result[0]
@@ -705,17 +704,22 @@ def test_malformed_cache_evidence_keeps_embeddings():
     np.testing.assert_array_equal(decoded['s'][1], cache['s'][1])
 
 
-def test_bad_embedding_seconds_does_not_change_resolved_voice():
+@pytest.mark.parametrize('bad_seconds', ['invalid', None, -1.0, float('nan'), float('inf')])
+def test_bad_embedding_seconds_preserves_grouping_but_cannot_authorize_owner(bad_seconds):
     import tests.unit.test_conversation_speakers as fixture
     import utils.stt.conversation_speakers as resolver
 
     segments, embeddings, voices = fixture._fragmented([0] * 4)
     before = resolver.resolve_conversation_speakers(segments, embeddings, voiceprints={'user': voices[0]})
     after = resolver.resolve_conversation_speakers(
-        segments, embeddings, voiceprints={'user': voices[0]}, embedding_seconds={s['id']: 'invalid' for s in segments}
+        segments,
+        embeddings,
+        voiceprints={'user': voices[0]},
+        embedding_seconds={s['id']: bad_seconds for s in segments},
     )
     assert after.speaker_ids == before.speaker_ids
-    assert after.voice_identities == before.voice_identities
+    assert before.voice_identities
+    assert not after.voice_identities
 
 
 @pytest.mark.parametrize('level', ['standard', 'enhanced'])
@@ -783,6 +787,9 @@ def test_manual_merge_retains_bounded_donor_scores(monkeypatch, score_merge_modu
     from datetime import timedelta
 
     merge, notifications = score_merge_modules
+    from database import review_overlay_merge
+
+    monkeypatch.setattr(review_overlay_merge, 'transfer', lambda *args, **kwargs: True)
     now = datetime(2026, 10, 5, tzinfo=timezone.utc)
     sources = {
         cid: dict(
@@ -802,14 +809,13 @@ def test_manual_merge_retains_bounded_donor_scores(monkeypatch, score_merge_modu
     failures = []
     monkeypatch.setattr(merge.conversations_db, 'get_conversation', lambda uid, cid: sources[cid])
     monkeypatch.setattr(merge, '_collect_all_photos', lambda *a: [])
-    monkeypatch.setattr(merge, '_copy_audio_chunks_for_merge', lambda *a: [])
+    monkeypatch.setattr(merge, '_copy_audio_chunks_for_merge', lambda *a, **_kw: [])
     monkeypatch.setattr(
         merge.lifecycle_service, 'create_processing_conversation', lambda uid, data: captured.append(data)
     )
     monkeypatch.setattr(merge.lifecycle_service, 'complete', lambda *a: None)
     monkeypatch.setattr(merge, '_delete_conversation_and_related_data', lambda *a, **k: None)
     monkeypatch.setattr(merge, 'canonical_intake_is_fenced', lambda: False)
-    monkeypatch.setattr(merge, 'record_capture_outcome', lambda *a: None)
     monkeypatch.setattr(merge, '_handle_merge_failure', lambda *a, **k: failures.append(a))
     monkeypatch.setattr(notifications, 'send_merge_completed_message', lambda *a: None)
     merge.perform_merge_async('u', ['a', 'b'], reprocess=False)
@@ -924,6 +930,7 @@ def manual_score_routes(monkeypatch):
     from fastapi.testclient import TestClient
     import database.conversations as db
     import database.speaker_learning_jobs as learning_jobs
+    import database.voice_profiles as voice_profiles_db
     import routers.conversations as assignment_router
     import routers.speaker_labels as rejection_router
     import utils.other.endpoints as auth
@@ -932,6 +939,9 @@ def manual_score_routes(monkeypatch):
     store = StrictFirestore()
     monkeypatch.setattr(db, 'get_firestore_client', lambda: store)
     monkeypatch.setattr(db, 'db', store)
+    # Positive assignments retire ignored-voice markers through voice_profiles;
+    # keep that write on the hermetic store like test_speaker_rejections does.
+    monkeypatch.setattr(voice_profiles_db, 'get_firestore_client', lambda: store)
     monkeypatch.setattr(db, 'invalidate_people_stats_cache', lambda *a: None)
     monkeypatch.setattr(db, 'record_speaker_review', lambda *a: None)
     monkeypatch.setattr(learning_jobs, 'record_speaker_learning_job_events', lambda *a: None)
@@ -953,6 +963,7 @@ def test_manual_speaker_routes_with_stored_scores(manual_score_routes, monkeypat
     path = ('users', 'u', 'conversations', 'c')
     segment = dict(id='s', text='synthetic', speaker_id=1, is_user=operation == 'rejection', start=0, end=6)
     data = conversation([segment], data_protection_level=level).model_dump()
+    data['user_corrections'] = [{'note': 'Owner confirmed the film was The Substance'}]
     data[scores.FIELD] = [row()]
     store.rows[path] = db.encode_conversation_for_write('u', data, level)
     if corrupt:
@@ -976,6 +987,7 @@ def test_manual_speaker_routes_with_stored_scores(manual_score_routes, monkeypat
         response = client.post('/v1/conversations/c/speakers/1/reject', json={'kind': 'not_me', 'segment_ids': ['s']})
     assert response.status_code == 200, response.text
     assert response.json()['transcript_segments'][0]['is_user'] == (operation == 'assignment')
+    assert response.json()['user_corrections'] == data['user_corrections']
     assert scores.FIELD not in response.json()
     assert store.rows[path][scores.FIELD] == blob
     assert returned[0].get(scores.FIELD) == (None if corrupt else [row()])
@@ -985,7 +997,7 @@ def test_manual_speaker_routes_with_stored_scores(manual_score_routes, monkeypat
 
 @pytest.mark.parametrize('level', ['standard', 'enhanced'])
 @pytest.mark.parametrize('operation', ['text', 'assignment', 'translation'])
-def test_partial_transcript_writes_reclaim_stored_scores(manual_score_routes, level, operation):
+def test_partial_transcript_writes_reclaim_stored_scores(manual_score_routes, monkeypatch, level, operation):
     import database.conversations as db
 
     _, store = manual_score_routes
@@ -997,6 +1009,10 @@ def test_partial_transcript_writes_reclaim_stored_scores(manual_score_routes, le
     assert scores.FIELD in store.rows[path]
     store.rows[path]['other_metadata'] = 'x' * (900 * 1024)
     if operation == 'text':
+        from tests.support.transcript_correction_store import install_store
+
+        decoded = db.prepare_conversation_for_read(store.rows[path], 'u')
+        store = install_store(monkeypatch, 'u', 'c', decoded)
         assert db.update_conversation_segment_text('u', 'c', 's', 'edited') == 'ok'
     elif operation == 'assignment':
         updated, *_ = db.assign_conversation_speaker(
@@ -1005,7 +1021,10 @@ def test_partial_transcript_writes_reclaim_stored_scores(manual_score_routes, le
         assert scores.FIELD not in updated
     else:
         assert db.materialize_translation('u', 'c', 's', 'synthetic', 'en', 'translated', firestore_client=store)
-    assert store.rows[path][scores.FIELD] is db.firestore.DELETE_FIELD
+    if operation == 'text':
+        assert scores.FIELD not in store.rows[path]
+    else:
+        assert store.rows[path][scores.FIELD] is db.firestore.DELETE_FIELD
     readable = db.prepare_conversation_for_read(store.rows[path], 'u')
     assert scores.FIELD not in readable
     stored_segment = readable['transcript_segments'][0]

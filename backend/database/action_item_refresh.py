@@ -1,4 +1,4 @@
-"""Transactional preservation of automatic-refresh tasks; never updates user fields.
+"""Preserve automatic-refresh tasks and atomically carry exact donor completion.
 
 Bounded IDs-only query plus full document reads includes soft deletions, unlike
 list APIs. The conversation receipt serializes refreshes and retains identities
@@ -18,6 +18,21 @@ from database.action_items import typed_doc
 from database.action_items import _prepare_action_item_for_write  # pyright: ignore[reportPrivateUsage]
 from database.action_items_cache import bump_action_items_list_version
 from database.action_item_refresh_policy import LIMIT, RECEIPT, plan
+
+
+class RefreshRevisionChanged(ValueError):
+    """The conversation's sync content revision moved after the caller's snapshot; no task writes ran."""
+
+    def __init__(self) -> None:
+        super().__init__('refresh conversation revision changed')
+
+
+class RefreshConversationUnavailable(ValueError):
+    """The transaction rejected a stale target before any task writes."""
+
+    def __init__(self, successor_id: str | None = None) -> None:
+        self.successor_id = successor_id
+        super().__init__('refresh conversation unavailable')
 
 
 def task_refs(user: Any, conversation_id: str, transaction: Any) -> list[Any]:
@@ -46,9 +61,10 @@ def reconcile(
     def write(transaction):
         conversation = typed_doc(conversation_ref.get(transaction=transaction))
         if not conversation or conversation.get('deleted'):
-            raise ValueError('refresh conversation unavailable')
+            successor = conversation.get('sync_merged_into') if conversation else None
+            raise RefreshConversationUnavailable(successor if isinstance(successor, str) and successor else None)
         if donor_id is None and conversation.get('sync_content_revision') != expected_revision:
-            raise ValueError('refresh conversation revision changed')
+            raise RefreshRevisionChanged()
         control = typed_doc(user.collection('task_intelligence_control').document('state').get(transaction=transaction))
         generation = int(control.get('account_generation', 0))
         if conversation.get(RECEIPT) and conversation[RECEIPT].get('generation') != generation:
