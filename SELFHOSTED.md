@@ -1,6 +1,7 @@
 # Self-hosted Omi [fork-only]
 
-How to deploy the backend, build the Mac app and ship the iOS app.
+How to deploy the backend, build the Mac app, ship the iOS app and sync with
+upstream.
 
 This fork runs upstream Omi on Casdoor (sign-in), MongoDB (data), MinIO (files)
 and a local LLM. The design is in the `[fork]` section of `CLAUDE.md`.
@@ -217,3 +218,136 @@ If the upload or the build fails:
 - If `pod install` shows "HTTP2 framing" errors, run the command again.
 - The backend must have its plain http sign-in address (`omi-auth`). The iOS
   sign-in does not work without it.
+
+## Sync with upstream
+
+Upstream (`BasedHardware/omi`) adds about 250 commits each day. A sync each
+week or two keeps the conflicts small. A month gives about 10 conflicts.
+
+### Remotes
+
+| Remote | Repository | Use |
+|---|---|---|
+| `origin` | `BasedHardware/omi` | Upstream. Fetch only. Never push. |
+| `stufork` | `thestumonkey/omi` | The fork. Local `main` tracks `stufork/main`. |
+| `ushomi` | `Ushadow-io/omi` | The Ushadow copy. |
+
+The repo push hook runs upstream's PR checks against `origin`. These checks
+fail on fork code. The local hook `.git/hooks/pre-push` skips them for pushes to
+`stufork`. `make setup` can overwrite that hook. If a push to `stufork` runs the
+checks again, add this line after `if [ "$HOOK_NAME" = "pre-push" ]; then`:
+
+```bash
+  if [ "${1:-}" = "stufork" ]; then echo "pre-push: push to stufork, upstream checks skipped" >&2; exit 0; fi
+```
+
+### Steps
+
+**1. Merge in a separate worktree.** Then `main` does not change until the sync
+works.
+
+```bash
+git fetch origin main
+UP=$(git rev-parse --short origin/main)     # keep this commit as the target
+git worktree add -b sync/upstream-$(date +%F) .claude/worktrees/upstream-sync main
+cd .claude/worktrees/upstream-sync
+git merge --no-ff --no-commit $UP
+```
+
+Use `$UP`, not `origin/main`, for the rest of the sync. A later fetch from any
+worktree moves `origin/main`.
+
+**2. Fix each conflict with these rules:**
+
+- Fork code lives in fork-only files, or in a block at the end of an upstream
+  file. Such a block replaces an upstream function by name, under an
+  environment check such as `SELF_HOSTED`.
+- When upstream adds code at the end of a file, put upstream's code first and
+  the fork block after it.
+- When upstream removes or renames a function that a fork block replaces, find
+  the new name and change the fork block. Do not bring the old upstream code
+  back.
+- When upstream moves code to a new file, move the fork change to the end of
+  that new file. Keep the old upstream file the same as upstream.
+- Check that each fork block still matches upstream's function signature.
+
+**3. Check that no upstream files are missing:**
+
+```bash
+comm -23 <(git ls-tree -r --name-only $UP | sort) <(git ls-files | sort)
+```
+
+The list must be empty, or contain only files that the fork deletes on purpose.
+
+**4. Commit the merge:**
+
+```bash
+OMI_SKIP_DART_FORMAT=1 OMI_SKIP_WEB_FORMAT=1 git commit
+```
+
+The commit hook formats the staged files, and this can take several minutes. It
+refuses to commit firmware C files without `clang-format` 18. If it says so, put
+version 18 on your `PATH` (for example with `uv pip install clang-format==18.1.8`
+in a scratch venv).
+After the commit, upstream files that the fork does not change must be the same
+as upstream. This command must show only fork files:
+
+```bash
+git diff --name-only $UP HEAD
+```
+
+**5. Check the Python packages.** The images install from `backend/pylock*.toml`,
+not from `requirements.txt`. Each lock must contain `pymongo` and `boto3`, and
+must not contain `firebase-admin`:
+
+```bash
+grep -cE 'name = "(pymongo|boto3)"' backend/pylock.runtime.toml backend/pusher/pylock.toml
+```
+
+If a lock is wrong, run `backend/scripts/update-python-lock.sh`. It takes about
+10 minutes.
+
+**6. Test the backend.** Run these from `backend/`:
+
+```bash
+uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python -m pytest -q $(ls tests/unit/*.py | grep -iE 'selfhost|casdoor|mongo|minio|typesense_vector|firebase_admin|wrapped_token')
+```
+
+Then start the app with the self-hosted environment (`SELF_HOSTED=true`, fake
+`MONGODB_URL`, `S3_*`, `CASDOOR_*` and `SELF_HOSTED_LLM_URL` values are enough).
+Use `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for the Opus library. Make sure
+of these points:
+
+- `import main` works, and `GET /v1/health` gives 200.
+- `/v1/auth/token` is served by `routers.casdoor_auth`.
+- `firebase_admin` comes from `backend/firebase_admin/` (the fork's stand-in).
+- The database client is `MongoFirestore`.
+- `get_llm('memory_l2')` gives `SelfHostedChatOpenAI`. Upstream changes the LLM
+  routing often. If a sync breaks it, every summary and title fails, and no
+  test outside the fork tests shows it.
+
+Also import `pusher.main` and `desktop_backend` with the same environment.
+
+Some upstream tests fail because of the fork's design. To find out whether a
+failure is new, run the same test file on pure upstream in a second worktree
+(`git worktree add --detach <path> $UP`) with the same venv.
+
+**7. Build the apps** when the sync changes their fork files:
+
+```bash
+make -C desktop run-selfhosted FULL=1
+make mobile-ios
+```
+
+**8. Merge to `main`, push to the fork and deploy:**
+
+```bash
+cd /Users/stu/repos/omi
+git merge --ff-only sync/upstream-<date>
+git push stufork main
+make deploy
+```
+
+A sync changes dependencies and Dockerfiles, so use `make deploy`, not an
+overlay.
