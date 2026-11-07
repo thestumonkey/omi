@@ -143,7 +143,7 @@ class TestSdkSurface:
         # utils/firebase_admin_runtime.py refuses to start if any name is missing.
         assert all(hasattr(auth, name) for name in _AUTH_MUTATORS)
         stub = MagicMock(spec=list(_AUTH_MUTATORS))
-        assert install_firebase_auth_mutation_guard({"OMI_JIT_QA_LOCAL_STACK": "1"}, auth_module=stub)
+        assert install_firebase_auth_mutation_guard({"OMI_ISOLATED_LOCAL_STACK": "1"}, auth_module=stub)
 
     def test_messaging_accepts_fields_the_stub_never_heard_of(self):
         message = messaging.Message(

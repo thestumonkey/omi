@@ -1549,9 +1549,11 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') an
 
     _upstream_get_prerecorded_provider = get_prerecorded_provider
 
-    def get_prerecorded_provider(language: Optional[str] = 'en') -> PrerecordedSTTProvider:  # noqa: F811
+    def get_prerecorded_provider(  # noqa: F811
+        language: Optional[str] = 'en', *, selected_service: Optional[Tuple[str, Optional[str], str]] = None
+    ) -> PrerecordedSTTProvider:
         from utils.stt.prerecorded_stub import prerecorded_stub_enabled
 
         if prerecorded_stub_enabled():
-            return _upstream_get_prerecorded_provider(language)
+            return _upstream_get_prerecorded_provider(language, selected_service=selected_service)
         return _SelfHostedDeepgramProvider()

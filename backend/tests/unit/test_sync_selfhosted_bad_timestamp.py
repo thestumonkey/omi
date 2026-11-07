@@ -18,7 +18,7 @@ PROBE = (
     "import routers.sync as s\n"
     "def f(name): return UploadFile(file=io.BytesIO(b'x'), filename=name)\n"
     "good = 'audio_abc_opus_fs320_16000_1_1780000000.bin'\n"
-    "bad = 'audio_abc_opus_fs320_16000_1_1000.bin'\n"
+    "bad = 'audio_abc_opus_fs320_16000_1_4102444800.bin'  # year 2100\n"
     "try:\n"
     "    paths = s._retrieve_file_paths_v2([f(good), f(bad)], 'uid', 'job')\n"
     "    print('mixed', len(paths))\n"

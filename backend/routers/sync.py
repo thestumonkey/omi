@@ -3833,12 +3833,12 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
 
 
 # ── [fork-only] self-hosted: one bad file name must not refuse the whole batch ─
-# A pendant whose clock reset names its files with a timestamp before 2024 or in
-# the future. Upstream answers 400 for the whole batch, and the app then marks
-# every recording in it as permanently rejected. Here only those files are left
-# out; the batch still fails with 400 when no file has a valid timestamp.
+# A pendant with a bad clock can name a file with a time far in the future.
+# Upstream refuses the whole batch for it, and the app then marks every
+# recording in it as permanently rejected. Here only those files are left out;
+# the batch is still refused when no file has a valid timestamp.
 if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
-    from utils.sync.files import get_timestamp_from_path as _get_timestamp_from_path
+    from utils.request_validation import parse_sync_filename_timestamp as _parse_sync_filename_timestamp
 
     _upstream_retrieve_file_paths_v2 = _retrieve_file_paths_v2
 
@@ -3846,7 +3846,9 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         if not filename or not filename.endswith('.bin') or '_' not in filename:
             return True  # Not a timestamp problem: upstream answers 400 for it.
         try:
-            _get_timestamp_from_path(filename)
+            # Upstream's admission check: malformed or too far in the future.
+            # Reset-clock (pre-2024) names pass; upstream clamps them itself.
+            _parse_sync_filename_timestamp(filename)
         except ValueError:
             return False
         return True

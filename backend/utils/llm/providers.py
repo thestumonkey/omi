@@ -280,3 +280,15 @@ if os.environ.get('SELF_HOSTED_LLM_URL', '').strip():
         options: Optional[Dict[str, Any]] = None,
     ) -> BaseChatModel:
         return _selfhosted.get_selfhosted_llm(streaming, options)
+
+    # Upstream now sends all company-paid generation through the Omi LLM
+    # gateway service, which a self-hosted cluster does not run. Gateway chat
+    # clients therefore also come from the self-hosted server.
+    def get_or_create_omi_gateway_llm(
+        lane_id: str,
+        streaming: bool = False,
+        options: Optional[Dict[str, Any]] = None,
+        *,
+        feature: str | None = None,
+    ) -> BaseChatModel:
+        return _selfhosted.get_selfhosted_llm(streaming, options)
