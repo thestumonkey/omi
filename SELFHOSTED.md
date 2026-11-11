@@ -272,6 +272,11 @@ file is gitignored.
 | `llm` | any OpenAI-compatible LLM (below) | conflicts only. Each file is sent as text. |
 | `none` | nothing | nothing. The tool stops, and you fix it. |
 
+The `claude` fixer can edit files only in the sync worktree. It can run only
+read-only git commands and the fork tests. It cannot push, deploy or use the
+network. This matters because it reads upstream code, and text in that code
+could try to give it orders.
+
 With no setting, the tool uses `claude` if it is installed, then `llm` if an
 LLM URL is set, then `none`.
 

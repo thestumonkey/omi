@@ -43,11 +43,16 @@ pick_fixer() {
 
 state_file() { echo "$(git rev-parse --git-dir)/fork-sync-$1"; }
 
+# The fixer reads upstream code, which we do not control. Text in that code can
+# try to steer the model. So Claude gets only file edits in this worktree
+# (acceptEdits does not cover paths outside it, such as .git/hooks) and a fixed
+# list of read-only git commands plus the two test commands. No general python,
+# shell, network or push. The tests do run repo code, as the checks do anyway.
 run_claude() {
-  claude -p "$1" \
+  env -u FORK_SYNC_LLM_KEY -u SELF_HOSTED_LLM_KEY claude -p "$1" \
     --permission-mode acceptEdits \
-    --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git grep:*),Bash(git ls-files:*),Bash(git add:*),Bash(grep:*),Bash(ls:*),Bash(backend/.venv/bin/python:*),Bash(.venv/bin/python:*)" \
-    --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(git reset:*),Bash(git checkout:*),Bash(kubectl:*),Bash(helm:*),Bash(make:*)"
+    --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git grep:*),Bash(git ls-files:*),Bash(git add:*),Bash(cd backend && .venv/bin/python -m pytest:*),Bash(cd backend && .venv/bin/python scripts/selfhosted_boot_check.py)" \
+    --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(git reset:*),Bash(git checkout:*),Bash(git config:*),Bash(git remote:*),Bash(curl:*),Bash(wget:*),Bash(kubectl:*),Bash(helm:*),Bash(make:*),WebFetch,WebSearch"
 }
 
 has_markers() { grep -qE '^(<<<<<<<|>>>>>>>)( |$)' "$1" 2>/dev/null; }
