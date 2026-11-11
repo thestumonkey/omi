@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# [fork-only] Merge upstream Omi (or a fork release) into this self-hosted fork.
+#
+#   scripts/fork-sync                 merge upstream main (remote that points at BasedHardware/omi)
+#   scripts/fork-sync <ref>           merge any ref, for example origin/main or a selfhosted-* tag
+#   scripts/fork-sync continue        run in the sync worktree after you fix conflicts by hand
+#   scripts/fork-sync check [<ref>]   run only the checks in the current tree
+#
+# The work happens in a new worktree under .fork-sync/, on a new branch. Your
+# current branch does not change. The script never pushes and never deploys.
+#
+# Conflicts and failed checks go to a "fixer" (FORK_SYNC_FIXER):
+#   auto    (default) claude if the command is installed, else llm if an LLM URL is set, else none
+#   claude  Claude Code in print mode (`claude -p`). Fixes conflicts and failed checks.
+#   llm     any OpenAI-compatible LLM (scripts/fork_sync_llm_fix.py). Fixes conflicts only.
+#   none    stop and let you fix it
+#
+# Settings can go in .fork-sync.env in the repo root (gitignored). See SELFHOSTED.md.
+set -euo pipefail
+
+die() { echo "fork-sync: $*" >&2; exit 1; }
+say() { echo "fork-sync: $*"; }
+
+ROOT=$(git rev-parse --show-toplevel)
+MAIN_ROOT=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+if [ -f "$MAIN_ROOT/.fork-sync.env" ]; then
+  set -a; . "$MAIN_ROOT/.fork-sync.env"; set +a
+fi
+FIXER=${FORK_SYNC_FIXER:-auto}
+ROUNDS=${FORK_SYNC_ROUNDS:-2}
+SKIP_TESTS=${FORK_SYNC_SKIP_TESTS:-0}
+
+pick_fixer() {
+  case "$FIXER" in
+    auto)
+      if command -v claude >/dev/null 2>&1; then echo claude
+      elif [ -n "${FORK_SYNC_LLM_URL:-${SELF_HOSTED_LLM_URL:-}}" ]; then echo llm
+      else echo none; fi ;;
+    claude|llm|none) echo "$FIXER" ;;
+    *) die "FORK_SYNC_FIXER must be auto, claude, llm or none" ;;
+  esac
+}
+
+state_file() { echo "$(git rev-parse --git-dir)/fork-sync-$1"; }
+
+run_claude() {
+  claude -p "$1" \
+    --permission-mode acceptEdits \
+    --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git grep:*),Bash(git ls-files:*),Bash(git add:*),Bash(grep:*),Bash(ls:*),Bash(backend/.venv/bin/python:*),Bash(.venv/bin/python:*)" \
+    --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(git reset:*),Bash(git checkout:*),Bash(kubectl:*),Bash(helm:*),Bash(make:*)"
+}
+
+has_markers() { grep -qE '^(<<<<<<<|>>>>>>>)( |$)' "$1" 2>/dev/null; }
+
+# ---- checks -------------------------------------------------------------------
+
+check_missing_files() {
+  local target=$1 missing
+  missing=$(comm -23 <(git ls-tree -r --name-only "$target" | sort) <(git ls-files | sort))
+  if [ -n "$missing" ]; then
+    echo "FAIL files in $target that are missing here:"; echo "$missing" | sed 's/^/  /'
+    return 1
+  fi
+  echo "ok   no files from $target are missing"
+}
+
+check_locks() {
+  local f bad=0
+  for f in backend/pylock.runtime.toml backend/pusher/pylock.toml; do
+    [ -f "$f" ] || { echo "FAIL $f is missing"; bad=1; continue; }
+    grep -q 'name = "pymongo"' "$f" || { echo "FAIL $f has no pymongo"; bad=1; }
+    grep -q 'name = "boto3"' "$f" || { echo "FAIL $f has no boto3"; bad=1; }
+    if grep -q 'name = "firebase-admin"' "$f"; then echo "FAIL $f has firebase-admin"; bad=1; fi
+  done
+  [ $bad = 0 ] && echo "ok   package locks have pymongo and boto3, and no firebase-admin"
+  if [ $bad != 0 ]; then echo "     fix: backend/scripts/update-python-lock.sh (about 10 minutes)"; fi
+  return $bad
+}
+
+check_backend() {
+  ( cd backend
+    if [ ! -x .venv/bin/python ]; then
+      command -v uv >/dev/null 2>&1 || { echo "FAIL uv is not installed (https://docs.astral.sh/uv/)"; exit 1; }
+      uv venv -q --python 3.11 .venv
+    fi
+    echo "     installing backend packages (uv, cached after the first run)"
+    uv pip install -q --python .venv/bin/python -r requirements.txt
+    # Fork tests: every unit test whose file name names a fork part.
+    local tests
+    tests=$(ls tests/unit/*.py | grep -iE 'selfhost|casdoor|mongo|minio|typesense_vector|firebase_admin|wrapped_token')
+    if .venv/bin/python -m pytest -q -p no:cacheprovider $tests; then
+      echo "ok   fork unit tests"
+    else
+      echo "FAIL fork unit tests"; exit 1
+    fi
+    DYLD_FALLBACK_LIBRARY_PATH=${DYLD_FALLBACK_LIBRARY_PATH:-/opt/homebrew/lib} \
+      .venv/bin/python scripts/selfhosted_boot_check.py
+  )
+}
+
+run_checks() {
+  local target=${1:-} bad=0
+  if [ -n "$target" ]; then check_missing_files "$target" || bad=1; fi
+  check_locks || bad=1
+  if [ "$SKIP_TESTS" = 1 ]; then
+    echo "skip backend tests and boot check (FORK_SYNC_SKIP_TESTS=1)"
+  else
+    check_backend || bad=1
+  fi
+  return $bad
+}
+
+# ---- steps --------------------------------------------------------------------
+
+fix_conflicts() {
+  local ref=$1 target=$2 fixer files f
+  files=$(git diff --name-only --diff-filter=U)
+  [ -z "$files" ] && return 0
+  fixer=$(pick_fixer)
+  say "$(echo "$files" | wc -l | tr -d ' ') conflict(s), fixer: $fixer"
+  echo "$files" | sed 's/^/  /'
+  case "$fixer" in
+    claude)
+      run_claude "You are in a git worktree in the middle of a merge of $ref ($target) into this
+self-hosted Omi fork. Read the [fork] section of CLAUDE.md and the 'Conflict rules' section of
+SELFHOSTED.md. Resolve the conflicts in these files:
+$files
+Remove every conflict marker. Run git add on each file you fix. Do not commit and do not push.
+Do not change other files, except to move a fork block to a new upstream file as the rules say.
+At the end, print one short line per file: what you chose and why." || true ;;
+    llm)
+      echo "$files" | tr '\n' '\0' | xargs -0 python3 "$MAIN_ROOT/scripts/fork_sync_llm_fix.py" || true ;;
+  esac
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] && ! has_markers "$f" && git add -- "$f"
+  done <<< "$files"
+  files=$(git diff --name-only --diff-filter=U)
+  if [ -n "$files" ]; then
+    say "these files still have conflicts:"; echo "$files" | sed 's/^/  /'
+    say "fix them in $ROOT, run git add on each, then run: scripts/fork-sync continue"
+    exit 1
+  fi
+}
+
+# The commit hook refuses firmware C files unless clang-format 18 is on PATH.
+# Install it once, with uv, in the shared git dir.
+ensure_clang_format() {
+  git diff --cached --name-only | grep -qE '^omi/firmware/.*\.(c|h|cpp)$' || return 0
+  clang-format --version 2>/dev/null | grep -q 'version 18\.' && return 0
+  local dir
+  dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)/fork-sync-tools/clang-format-18"
+  if [ ! -x "$dir/bin/clang-format" ]; then
+    command -v uv >/dev/null 2>&1 || { say "firmware files changed: install uv, or put clang-format 18 on PATH"; return 0; }
+    say "installing clang-format 18 for the commit hook"
+    uv venv -q "$dir" && uv pip install -q --python "$dir/bin/python" clang-format==18.1.8
+  fi
+  export PATH="$dir/bin:$PATH"
+}
+
+commit_merge() {
+  local ref=$1 target=$2 msg
+  msg="Merge $ref ($target) into the self-hosted fork"
+  ensure_clang_format
+  say "committing the merge (the commit hook formats files, this can take minutes)"
+  OMI_SKIP_DART_FORMAT=1 OMI_SKIP_WEB_FORMAT=1 git commit -q -m "$msg" || {
+    say "the commit hook refused (see the lines above). Fix it, then run: scripts/fork-sync continue"
+    exit 1
+  }
+  # Some hooks rewrite the message; put ours back.
+  [ "$(git log -1 --format=%s)" = "$msg" ] || git commit -q --amend --only -m "$msg"
+}
+
+check_and_fix() {
+  local target=$1 round=0 log fixer
+  log=$(state_file checks.log)
+  fixer=$(pick_fixer)
+  while :; do
+    say "running checks (round $((round + 1)))"
+    if run_checks "$target" 2>&1 | tee "$log"; then return 0; fi   # pipefail: fails when the checks fail
+    round=$((round + 1))
+    if [ "$fixer" != claude ] || [ $round -gt "$ROUNDS" ]; then
+      say "checks failed. The log is $log"
+      [ "$fixer" = llm ] && say "the llm fixer fixes conflicts only. Fix the failures by hand or use FORK_SYNC_FIXER=claude."
+      say "after you fix them, commit in $ROOT and run: scripts/fork-sync check $target"
+      return 1
+    fi
+    say "asking claude to fix the failed checks"
+    run_claude "This worktree holds a committed merge of $target into this self-hosted Omi fork.
+The fork checks failed. The output is in $log. Find the upstream change that broke each fork
+part (use git log and git diff on $target). Fix the fork code, not the upstream code: follow the
+[fork] section of CLAUDE.md and the 'Conflict rules' section of SELFHOSTED.md. When you fix a
+fork seam, add or update a fork unit test for it. Do not commit and do not push.
+At the end, print a short list of what you changed and why." || true
+    if [ -z "$(git status --porcelain)" ]; then
+      say "claude changed nothing. The log is $log"; return 1
+    fi
+    git add -A
+    OMI_SKIP_DART_FORMAT=1 OMI_SKIP_WEB_FORMAT=1 git commit -q -m "fix(selfhosted): adapt fork seams to $target" \
+      || { say "the commit hook refused the fix commit. Fix it in $ROOT, commit, then run: scripts/fork-sync check $target"; return 1; }
+  done
+}
+
+finish() {
+  local target=$1 branch
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  say "done. Branch $branch passes the checks."
+  git log --oneline "$(cat "$(state_file base)")..HEAD" --first-parent
+  cat <<EOF
+
+Next steps (the script does not do these):
+  1. Read the changes:   git -C $ROOT diff $(cat "$(state_file base)")..HEAD --stat
+  2. Merge:              cd $MAIN_ROOT && git merge --ff-only $branch
+  3. Push to your fork, deploy, then check that a new recording gets a title and a summary.
+  4. Remove the worktree: git worktree remove $ROOT
+EOF
+}
+
+cmd_start() {
+  local ref=${1:-} remote target date wt branch
+  [ "$ROOT" = "$MAIN_ROOT" ] || die "run this from the main checkout, not from a worktree"
+  if [ -z "$ref" ]; then
+    remote=$(git remote -v | awk '/github\.com[:\/]BasedHardware\/omi(\.git)? \(fetch\)/ {print $1; exit}')
+    [ -n "$remote" ] || die "no remote points at BasedHardware/omi. Add one: git remote add upstream https://github.com/BasedHardware/omi.git"
+    ref="$remote/main"
+  fi
+  # Fetch only the branch. Upstream moves some of its tags, so a tag fetch fails.
+  # For a tag (for example a selfhosted-* release), run `git fetch <remote> --tags` first.
+  remote=${ref%%/*}
+  if [ "$remote" != "$ref" ] && git remote | grep -qx "$remote"; then
+    say "fetching $ref"
+    git fetch -q "$remote" "${ref#*/}" || say "fetch failed, using the local copy of $ref"
+  fi
+  target=$(git rev-parse --short "$ref^{commit}") || die "cannot find $ref"
+  if git merge-base --is-ancestor "$target" HEAD; then say "HEAD already contains $ref ($target). Nothing to do."; exit 0; fi
+  date=$(date +%F)
+  branch="sync/$(echo "$ref" | tr '/:' '--')-$date"
+  wt="$MAIN_ROOT/.fork-sync/$date-$target"
+  say "merging $ref ($target) into $(git rev-parse --abbrev-ref HEAD) in $wt"
+  git worktree add -q -b "$branch" "$wt" HEAD
+  cd "$wt"; ROOT=$wt
+  git rev-parse HEAD > "$(state_file base)"
+  echo "$ref" > "$(state_file ref)"
+  git config rerere.enabled true      # remember each conflict fix for the next sync
+  git config rerere.autoupdate true
+  git merge -q --no-ff --no-commit "$target" || true
+  fix_conflicts "$ref" "$target"
+  commit_merge "$ref" "$target"
+  check_and_fix "$target" || exit 1
+  finish "$target"
+}
+
+cmd_continue() {
+  local ref target
+  [ -f "$(state_file ref)" ] || die "run this inside a .fork-sync/ worktree"
+  ref=$(cat "$(state_file ref)")
+  if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    target=$(git rev-parse --short MERGE_HEAD)
+    fix_conflicts "$ref" "$target"
+    commit_merge "$ref" "$target"
+  else
+    target=$(git rev-parse --short HEAD^2 2>/dev/null || git rev-parse --short "$ref^{commit}")
+  fi
+  check_and_fix "$target" || exit 1
+  finish "$target"
+}
+
+case "${1:-}" in
+  -h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  continue) cmd_continue ;;
+  check) shift; run_checks "${1:-}" ;;
+  *) cmd_start "${1:-}" ;;
+esac

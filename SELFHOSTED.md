@@ -219,45 +219,165 @@ If the upload or the build fails:
 - The backend must have its plain http sign-in address (`omi-auth`). The iOS
   sign-in does not work without it.
 
-## Sync with upstream
+## Updates and upstream sync
 
-Upstream (`BasedHardware/omi`) adds about 250 commits each day. A sync each
-week or two keeps the conflicts small. A month gives about 10 conflicts.
+Upstream (`BasedHardware/omi`) adds about 250 commits each day. This fork
+follows it with a "hub" model:
 
-### Remotes
+- The fork maintainer merges upstream, fixes the fork code, tests it and
+  publishes a release tag, for example `selfhosted-2026.11.11`.
+- Users update to a release tag. A user who did not change fork code gets no
+  conflicts, and needs no LLM.
+- A user who wants upstream sooner, or who has their own changes, can run the
+  same sync tool, `scripts/fork-sync`.
 
-| Remote | Repository | Use |
+### Update your instance (users)
+
+Your clone's `origin` is the fork. Do this in the repo root:
+
+```bash
+git fetch origin --tags
+TAG=$(git tag -l 'selfhosted-*' --sort=-v:refname | head -1)   # the newest release
+git merge --ff-only $TAG
+make deploy
+```
+
+Then check that a new recording gets a title and a summary.
+
+If `git merge --ff-only` fails, you have your own commits. Use the sync tool:
+
+```bash
+scripts/fork-sync $TAG
+```
+
+The next sections tell how it works.
+
+### Sync with upstream yourself (users and maintainers)
+
+**1. Add upstream as a remote** (one time):
+
+```bash
+git remote add upstream https://github.com/BasedHardware/omi.git
+```
+
+The tool finds the remote that points at `BasedHardware/omi`, whatever its name.
+
+**2. Pick a fixer.** A fixer fixes merge conflicts and failed checks. Set
+`FORK_SYNC_FIXER` in the shell or in `.fork-sync.env` in the repo root. That
+file is gitignored.
+
+| Fixer | What it needs | What it fixes |
 |---|---|---|
-| `origin` | `BasedHardware/omi` | Upstream. Fetch only. Never push. |
-| `stufork` | `thestumonkey/omi` | The fork. Local `main` tracks `stufork/main`. |
-| `ushomi` | `Ushadow-io/omi` | The Ushadow copy. |
+| `claude` | [Claude Code](https://claude.com/claude-code) installed and signed in | conflicts and failed checks. It reads the repo and runs tests. |
+| `llm` | any OpenAI-compatible LLM (below) | conflicts only. Each file is sent as text. |
+| `none` | nothing | nothing. The tool stops, and you fix it. |
 
-The repo push hook runs upstream's PR checks against `origin`. These checks
-fail on fork code. The local hook `.git/hooks/pre-push` skips them for pushes to
-`stufork`. `make setup` can overwrite that hook. If a push to `stufork` runs the
-checks again, add this line after `if [ "$HOOK_NAME" = "pre-push" ]; then`:
+With no setting, the tool uses `claude` if it is installed, then `llm` if an
+LLM URL is set, then `none`.
 
-```bash
-  if [ "${1:-}" = "stufork" ]; then echo "pre-push: push to stufork, upstream checks skipped" >&2; exit 0; fi
-```
-
-### Steps
-
-**1. Merge in a separate worktree.** Then `main` does not change until the sync
-works.
+For `llm`, put this in `.fork-sync.env`. You can use the LLM that your Omi
+instance uses (`SELF_HOSTED_LLM_URL`):
 
 ```bash
-git fetch origin main
-UP=$(git rev-parse --short origin/main)     # keep this commit as the target
-git worktree add -b sync/upstream-$(date +%F) .claude/worktrees/upstream-sync main
-cd .claude/worktrees/upstream-sync
-git merge --no-ff --no-commit $UP
+FORK_SYNC_LLM_URL=http://your-llm-host:8000/v1
+FORK_SYNC_LLM_MODEL=your-model
+FORK_SYNC_LLM_KEY=sk-...          # if your LLM needs a key
 ```
 
-Use `$UP`, not `origin/main`, for the rest of the sync. A later fetch from any
-worktree moves `origin/main`.
+A small local model can fix small conflicts. It often fails on large syncs.
+When it fails, the tool stops and lists the files that are left.
 
-**2. Fix each conflict with these rules:**
+**3. Run the sync** from the repo root:
+
+```bash
+scripts/fork-sync                 # merge upstream main
+scripts/fork-sync <ref>           # or merge a tag or branch
+```
+
+The tool does these steps:
+
+1. It makes a new worktree in `.fork-sync/<date>-<commit>`, on a new branch.
+   Your current branch does not change.
+2. It merges. `git rerere` is on, so git reuses the conflict fixes from the
+   last sync.
+3. It gives the remaining conflicts to the fixer.
+4. It commits the merge.
+5. It runs the checks. If they fail, it gives the failures to the fixer (only
+   with `claude`), commits the fix and checks again.
+6. It prints the next steps. **It never pushes and never deploys.**
+
+The checks are:
+
+- No upstream files are missing.
+- The package locks contain `pymongo` and `boto3`, and do not contain
+  `firebase-admin`.
+- The fork unit tests pass.
+- The boot check passes: `backend/scripts/selfhosted_boot_check.py`. It starts
+  the three servers with fake addresses. It checks the sign-in routes, the
+  database stand-in and the LLM routing. Upstream often breaks these without a
+  merge conflict.
+
+The first run takes longer, because it installs the backend packages with `uv`.
+
+**4. If the tool stops**, it tells you why and what to run. Usually you:
+
+```bash
+cd .fork-sync/<date>-<commit>
+# fix the files that it lists, then:
+git add <file>
+scripts/fork-sync continue
+```
+
+**5. When it passes:**
+
+```bash
+git diff <old main>..sync/<branch> --stat    # read the changes
+git merge --ff-only sync/<branch>
+git push origin main                          # your fork, never upstream
+make deploy
+git worktree remove .fork-sync/<date>-<commit>
+```
+
+A sync changes dependencies and Dockerfiles, so use `make deploy`, not an
+overlay.
+
+Other commands:
+
+```bash
+scripts/fork-sync check       # only the checks, in the current tree (also: make fork-check)
+FORK_SYNC_SKIP_TESTS=1 scripts/fork-sync      # skip the slow backend checks
+```
+
+### Publish a release (maintainer)
+
+1. Run `scripts/fork-sync`, merge, push and deploy, as above.
+2. Check the real instance: sign in, record, and check for a title and a summary.
+   Build the apps if the sync changed their fork files
+   (`make -C desktop run-selfhosted FULL=1`, `make mobile-ios`).
+3. Tag and push the tag:
+
+```bash
+git tag -a selfhosted-$(date +%Y.%m.%d) -m "Self-hosted release on upstream $(git rev-parse --short HEAD^2)"
+git push <fork remote> selfhosted-$(date +%Y.%m.%d)
+```
+
+Sync each week or two. A month gives about 10 conflicts.
+
+### Pushes to your fork
+
+The repo push hook runs upstream's PR checks against upstream. These checks fail
+on fork code. To skip them for every push that does not go to upstream, add this
+line to `.git/hooks/pre-push`, after `if [ "$HOOK_NAME" = "pre-push" ]; then`:
+
+```bash
+  case "${2:-}" in *BasedHardware/omi*) ;; *) echo "pre-push: not upstream, upstream checks skipped" >&2; exit 0 ;; esac
+```
+
+`make setup` can overwrite the hook. Then add the line again.
+
+### Conflict rules
+
+The `claude` fixer reads these rules. Use them when you fix conflicts by hand.
 
 - Fork code lives in fork-only files, or in a block at the end of an upstream
   file. Such a block replaces an upstream function by name, under an
@@ -270,84 +390,20 @@ worktree moves `origin/main`.
 - When upstream moves code to a new file, move the fork change to the end of
   that new file. Keep the old upstream file the same as upstream.
 - Check that each fork block still matches upstream's function signature.
+- Do not add `firebase-admin` back to a `requirements.txt` or lock. The fork
+  replaces it with `backend/firebase_admin/`.
+- After the merge, upstream files that the fork does not change must be the same
+  as upstream. `git diff --name-only <upstream commit> HEAD` must show only fork
+  files.
 
-**3. Check that no upstream files are missing:**
+### Problems that the tool does not fix
 
-```bash
-comm -23 <(git ls-tree -r --name-only $UP | sort) <(git ls-files | sort)
-```
-
-The list must be empty, or contain only files that the fork deletes on purpose.
-
-**4. Commit the merge:**
-
-```bash
-OMI_SKIP_DART_FORMAT=1 OMI_SKIP_WEB_FORMAT=1 git commit
-```
-
-The commit hook formats the staged files, and this can take several minutes. It
-refuses to commit firmware C files without `clang-format` 18. If it says so, put
-version 18 on your `PATH` (for example with `uv pip install clang-format==18.1.8`
-in a scratch venv).
-After the commit, upstream files that the fork does not change must be the same
-as upstream. This command must show only fork files:
-
-```bash
-git diff --name-only $UP HEAD
-```
-
-**5. Check the Python packages.** The images install from `backend/pylock*.toml`,
-not from `requirements.txt`. Each lock must contain `pymongo` and `boto3`, and
-must not contain `firebase-admin`:
-
-```bash
-grep -cE 'name = "(pymongo|boto3)"' backend/pylock.runtime.toml backend/pusher/pylock.toml
-```
-
-If a lock is wrong, run `backend/scripts/update-python-lock.sh`. It takes about
-10 minutes.
-
-**6. Test the backend.** Run these from `backend/`:
-
-```bash
-uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/python -m pytest -q $(ls tests/unit/*.py | grep -iE 'selfhost|casdoor|mongo|minio|typesense_vector|firebase_admin|wrapped_token')
-```
-
-Then start the app with the self-hosted environment (`SELF_HOSTED=true`, fake
-`MONGODB_URL`, `S3_*`, `CASDOOR_*` and `SELF_HOSTED_LLM_URL` values are enough).
-Use `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for the Opus library. Make sure
-of these points:
-
-- `import main` works, and `GET /v1/health` gives 200.
-- `/v1/auth/token` is served by `routers.casdoor_auth`.
-- `firebase_admin` comes from `backend/firebase_admin/` (the fork's stand-in).
-- The database client is `MongoFirestore`.
-- `get_llm('memory_l2')` gives `SelfHostedChatOpenAI`. Upstream changes the LLM
-  routing often. If a sync breaks it, every summary and title fails, and no
-  test outside the fork tests shows it.
-
-Also import `pusher.main` and `desktop_backend` with the same environment.
-
-Some upstream tests fail because of the fork's design. To find out whether a
-failure is new, run the same test file on pure upstream in a second worktree
-(`git worktree add --detach <path> $UP`) with the same venv.
-
-**7. Build the apps** when the sync changes their fork files:
-
-```bash
-make -C desktop run-selfhosted FULL=1
-make mobile-ios
-```
-
-**8. Merge to `main`, push to the fork and deploy:**
-
-```bash
-cd /Users/stu/repos/omi
-git merge --ff-only sync/upstream-<date>
-git push stufork main
-make deploy
-```
-
-A sync changes dependencies and Dockerfiles, so use `make deploy`, not an
-overlay.
+- **The commit hook refuses a file.** The hook formats the staged files. The tool
+  installs `clang-format` 18 for firmware C files by itself, with `uv`. For any
+  other refusal, read the hook message, fix it, then run `scripts/fork-sync continue`.
+- **A package lock is wrong.** Run `backend/scripts/update-python-lock.sh` in the
+  worktree. It takes about 10 minutes.
+- **An upstream test fails.** The tool runs only the fork tests. To find out
+  whether an upstream test failure is new, run the same test file on pure
+  upstream, in a second worktree (`git worktree add --detach <path> <upstream
+  commit>`), with the same venv.

@@ -4,7 +4,7 @@
 # would run otherwise). Targets with a `##` comment are listed with it.
 
 .DEFAULT_GOAL := help
-.PHONY: help mobile-ios mobile-ios-run mobile-ios-upload deploy deploy-build deploy-status deploy-overlay deploy-diarizer
+.PHONY: help mobile-ios mobile-ios-run mobile-ios-upload deploy deploy-build deploy-status deploy-overlay deploy-diarizer fork-sync fork-check
 
 help:                ## show this list
 	@echo "Self-hosted:"
@@ -30,6 +30,13 @@ deploy-overlay:      ## ship only changed backend files: REF=<sha> [DRY_RUN=1] [
 
 deploy-diarizer:     ## build and deploy the CPU diarizer
 	$(MAKE) -C backend diarizer
+
+# Merge upstream or a fork release in a worktree, fix, check. Never pushes. See SELFHOSTED.md.
+fork-sync:           ## merge upstream main (or REF=<ref>) in a new worktree and check it
+	scripts/fork-sync $(REF)
+
+fork-check:          ## run the fork checks (package locks, fork tests, boot check) here
+	scripts/fork-sync check
 
 # Self-hosted iOS app. Settings: app/.env.selfhosted (see app/scripts/selfhosted-ios.sh).
 mobile-ios:          ## build the iOS .ipa

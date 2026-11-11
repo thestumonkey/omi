@@ -313,6 +313,10 @@ pnpm-workspace.yaml
 .agent-artifacts/ui-evidence/*
 !.agent-artifacts/ui-evidence/lane-web-batch/
 
+# [fork] scripts/fork-sync worktrees and settings.
+.fork-sync/
+.fork-sync.env
+
 # [fork] Credential files, matched anywhere (they were once committed from the
 # repo root with a live OAuth client secret and refresh token).
 google-credentials.json
