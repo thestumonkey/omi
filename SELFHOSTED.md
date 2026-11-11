@@ -316,6 +316,9 @@ The checks are:
 - No upstream files are missing.
 - The package locks contain `pymongo` and `boto3`, and do not contain
   `firebase-admin`.
+- The fork helm values render no GKE-only objects, such as `PodMonitoring`.
+  Upstream adds these for its Google cluster. Helm refuses a whole upgrade when
+  the cluster does not know a type. This needs `helm`.
 - The fork unit tests pass.
 - The boot check passes: `backend/scripts/selfhosted_boot_check.py`. It starts
   the three servers with fake addresses. It checks the sign-in routes, the

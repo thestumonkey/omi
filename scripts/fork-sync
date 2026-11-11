@@ -82,6 +82,29 @@ check_locks() {
   return $bad
 }
 
+# Upstream's charts add GKE-only objects (PodMonitoring, BackendConfig). Their
+# types do not exist on a self-hosted cluster, so helm refuses the whole upgrade.
+# Render each fork values file and fail on those types. The diarizer is not
+# checked: charts/diarizer/deploy-local.sh removes its BackendConfig itself.
+check_charts() {
+  command -v helm >/dev/null 2>&1 || { echo "skip helm charts (helm is not installed)"; return 0; }
+  local f out bad=0
+  for f in backend/charts/*/local_*values*.yaml; do
+    case "$f" in backend/charts/diarizer/*) continue ;; esac
+    if ! out=$(helm template fork-check "$(dirname "$f")" -f "$f" --set image.tag=check 2>&1); then
+      echo "FAIL helm cannot render $f: $(echo "$out" | tail -1)"; bad=1; continue
+    fi
+    if echo "$out" | grep -qE '^apiVersion: .*(googleapis\.com|cloud\.google\.com|gke\.io)'; then
+      echo "FAIL $f renders GKE-only objects:"
+      echo "$out" | grep -A1 -E '^apiVersion: .*(googleapis\.com|cloud\.google\.com|gke\.io)' | grep '^kind:' | sort -u | sed 's/^/       /'
+      echo "     fix: turn them off in $f (for example podMonitoring.enabled: false)"
+      bad=1
+    fi
+  done
+  [ $bad = 0 ] && echo "ok   helm charts render no GKE-only objects"
+  return $bad
+}
+
 check_backend() {
   ( cd backend
     if [ ! -x .venv/bin/python ]; then
@@ -107,6 +130,7 @@ run_checks() {
   local target=${1:-} bad=0
   if [ -n "$target" ]; then check_missing_files "$target" || bad=1; fi
   check_locks || bad=1
+  check_charts || bad=1
   if [ "$SKIP_TESTS" = 1 ]; then
     echo "skip backend tests and boot check (FORK_SYNC_SKIP_TESTS=1)"
   else
