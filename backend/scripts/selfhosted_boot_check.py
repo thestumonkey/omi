@@ -127,7 +127,18 @@ def main():
         names['structured'] = type(get_llm_gateway_chat_structured()).__name__
         return all(n == 'SelfHostedChatOpenAI' for n in names.values()), str(names)
 
+    def speech_to_text():
+        # Upstream retired Deepgram in 2026-10 with no merge conflict for the fork.
+        from utils.stt import pre_recorded
+        from utils.stt.streaming import get_stt_service_for_language
+
+        service, _, model = get_stt_service_for_language('en')
+        live = f'{getattr(service, "value", service)} {model}'
+        upload = type(pre_recorded._deepgram_client_for_request()).__name__
+        return live.startswith('deepgram') and upload == 'DeepgramClient', f'live={live} upload={upload}'
+
     run_check('GET /v1/health gives 200', health)
+    run_check('speech-to-text uses Deepgram (live and uploads)', speech_to_text)
     run_check('Casdoor sign-in routes', casdoor_routes)
     run_check('firebase_admin is the fork stand-in', firebase_stand_in)
     run_check('database client is MongoFirestore', mongo_client)

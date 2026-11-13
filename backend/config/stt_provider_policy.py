@@ -403,3 +403,22 @@ def provider_for_service(service: object) -> str | None:
     if value == 'deepgram':
         return DEEPGRAM_CLOUD_PROVIDER
     return None
+
+
+# ── [fork-only] self-hosted: Deepgram keeps serving live audio ───────────────
+# Upstream retired Deepgram (e2439263aa: its own contract ended) by removing it
+# from PROVIDER_SERVING_SURFACES. A self-hosted server pays for its own Deepgram
+# key and runs none of Modulate, Soniox or Parakeet, so without this block live
+# audio finds no provider. With SELF_HOSTED and DEEPGRAM_API_KEY set, Deepgram
+# serves the streaming surface again, as before the retirement.
+# provider_is_enabled reads this module name at call time.
+import os as _fork_os  # noqa: E402
+
+if _fork_os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') and _fork_os.getenv(
+    'DEEPGRAM_API_KEY'
+):
+    PROVIDER_SERVING_SURFACES = {  # type: ignore[misc]  # noqa: F811
+        **PROVIDER_SERVING_SURFACES,
+        DEEPGRAM_CLOUD_PROVIDER: frozenset({STTServingSurface.STREAMING}),
+        DEEPGRAM_SELF_HOSTED_PROVIDER: frozenset({STTServingSurface.STREAMING}),
+    }

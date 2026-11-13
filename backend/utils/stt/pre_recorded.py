@@ -1493,6 +1493,20 @@ if os.getenv('SELF_HOSTED', '').strip().lower() in ('1', 'true', 'yes', 'on') an
 
     _SELFHOSTED_DEEPGRAM_MODEL = 'nova-3'
 
+    # Upstream's client now refuses every call (Deepgram retired upstream,
+    # e2439263aa). Build the client from our own key instead.
+    _selfhosted_deepgram_client: Optional[DeepgramClient] = None
+
+    def _deepgram_client_for_request() -> DeepgramClient:  # noqa: F811
+        global _selfhosted_deepgram_client
+        if _selfhosted_deepgram_client is None:
+            from deepgram import DeepgramClientOptions
+
+            _selfhosted_deepgram_client = DeepgramClient(
+                os.environ['DEEPGRAM_API_KEY'], DeepgramClientOptions(options={"keepalive": "true"})
+            )
+        return _selfhosted_deepgram_client
+
     def _selfhosted_audio_bytes(audio_url: str) -> bytes:
         """Read one of our own presigned storage URLs, via the storage API."""
         from utils.other.minio_storage import read_own_presigned_url
