@@ -92,6 +92,12 @@ def test_round_trip(index):
     assert list(index.list(prefix='u1-', namespace='ns1')) == [['u1-a', 'u1-b']] or sorted(
         next(index.list(prefix='u1-', namespace='ns1'))
     ) == ['u1-a', 'u1-b']
+    fetched = index.fetch(ids=['u1-a', 'u1-b', 'missing'], namespace='ns1')
+    assert sorted(fetched['vectors']) == ['u1-a', 'u1-b']
+    assert fetched['vectors']['u1-a']['metadata']['uid'] == 'u1'
+    assert fetched['vectors']['u1-a']['values'] == pytest.approx([1, 0, 0])
+    assert index.fetch(ids=['u1-a'], namespace='other')['vectors'] == {}
+
     index.delete(ids=['u1-a'], namespace='ns1')
     index.delete(filter={'uid': {'$eq': 'u2'}}, namespace='ns1')
     assert index.describe_index_stats()['namespaces'] == {'ns1': {'vector_count': 1}}

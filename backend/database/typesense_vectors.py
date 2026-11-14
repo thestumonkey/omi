@@ -20,9 +20,11 @@ Scores are cosine similarity (1 - Typesense's cosine distance), as Pinecone's.
 Settings: TYPESENSE_HOST, TYPESENSE_HOST_PORT, TYPESENSE_PROTOCOL, TYPESENSE_API_KEY.
 """
 
+import functools
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -223,7 +225,9 @@ class TypesenseVectorIndex:
 
     # -- Pinecone API --
 
-    def upsert(self, vectors: Iterable[Dict[str, Any]], namespace: str = '') -> Dict[str, int]:
+    def upsert(self, vectors: Iterable[Dict[str, Any]], namespace: str = '', **_: Any) -> Dict[str, int]:
+        # **_: upstream's owner routing (database/pinecone_partition_index.py)
+        # passes Pinecone client options such as _return_http_data_only.
         docs = [to_document(namespace, v) for v in vectors if self._width_ok(v['values'], f"vector {v['id']}")]
         if not docs:
             return {'upserted_count': 0}
@@ -300,6 +304,26 @@ class TypesenseVectorIndex:
             documents.delete({'filter_by': self._filter(namespace, None if delete_all else filter)})
         return {}
 
+    def fetch(self, ids: List[str], namespace: str = '', **_: Any) -> Dict[str, Any]:
+        """Pinecone fetch: the records with these ids. Missing ids are left out.
+
+        Upstream's owner routing reads records before each update or delete,
+        to check that they belong to the user.
+        """
+        import json
+
+        vectors: Dict[str, Any] = {}
+        for i in range(0, len(ids or []), _DELETE_BATCH):
+            joined = ','.join(_literal(v) for v in ids[i : i + _DELETE_BATCH])
+            exported = self._collection().documents.export(
+                {'filter_by': f'_ns:={_literal(namespace)} && _vid:=[{joined}]'}
+            )
+            for line in exported.splitlines():
+                if line.strip():
+                    hit = to_match({'document': json.loads(line)}, include_values=True, include_metadata=True)
+                    vectors[hit['id']] = {'id': hit['id'], 'values': hit['values'], 'metadata': hit['metadata']}
+        return {'namespace': namespace, 'vectors': vectors}
+
     def list(self, prefix: str = '', namespace: str = '', **_: Any) -> Iterator[List[str]]:
         exported = self._collection().documents.export(
             {'filter_by': f'_ns:={_literal(namespace)}', 'include_fields': '_vid'}
@@ -328,3 +352,36 @@ def _filter_field_names(pinecone_filter: Optional[Dict[str, Any]]) -> List[str]:
         elif not (isinstance(value, dict) and set(value) == {'$exists'}):
             names.append(key)
     return names
+
+
+# ── Pinecone HTTP-info mode (_return_http_data_only=False) ──────────────────
+# Upstream's owner routing (database/pinecone_partition_index.py) asks for
+# (body, status, headers) and reads Pinecone's freshness numbers: a write's
+# x-pinecone-request-lsn, and a query's x-pinecone-max-indexed-lsn, which must
+# be at least that write's number before an account purge counts as visible.
+# Typesense shows a write as soon as it is acknowledged, so a clock reading
+# that only goes up serves as both numbers.
+_lsn_lock = threading.Lock()
+_last_lsn = 0
+
+
+def _lsn() -> str:
+    global _last_lsn
+    with _lsn_lock:
+        _last_lsn = max(time.time_ns(), _last_lsn + 1)
+        return str(_last_lsn)
+
+
+def _http_info(method, header: str):
+    @functools.wraps(method)
+    def wrapper(self, *args, _return_http_data_only: bool = True, **kwargs):
+        body = method(self, *args, **kwargs)
+        return body if _return_http_data_only else (body, 200, {header: _lsn()})
+
+    return wrapper
+
+
+for _name in ('upsert', 'update', 'delete'):
+    setattr(TypesenseVectorIndex, _name, _http_info(getattr(TypesenseVectorIndex, _name), 'x-pinecone-request-lsn'))
+# Pinecone's private query entry point; upstream calls it for purge checks.
+TypesenseVectorIndex._query = _http_info(TypesenseVectorIndex.query, 'x-pinecone-max-indexed-lsn')
