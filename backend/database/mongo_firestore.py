@@ -22,8 +22,10 @@ so NO Google credentials / network are involved.
 
 import functools
 import re
+import threading
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pymongo import ASCENDING, DESCENDING, MongoClient
@@ -40,7 +42,91 @@ from google.cloud.firestore_v1.base_query import BaseCompositeFilter
 DELETE_FIELD = _fs.DELETE_FIELD
 SERVER_TIMESTAMP = _fs.SERVER_TIMESTAMP
 
-_RESERVED = ('_id', '_p', '_k')
+_RESERVED = ('_id', '_p', '_k', '_ut')
+
+
+# ── Write preconditions (Firestore's option= on update/delete) ──────────────
+# Every write stores `_ut`, a revision number that is new for each write. A
+# snapshot gives it back as `update_time`. A LastUpdateOption built from that
+# snapshot becomes a filter on the Mongo write, so the write happens only if
+# nobody wrote the document since the read: a compare-and-set. A precondition
+# that the shim cannot check fails closed with FailedPrecondition.
+_rev_lock = threading.Lock()
+_last_rev = 0
+
+
+def _next_rev() -> int:
+    """A revision that is larger than any earlier one from this process."""
+    global _last_rev
+    with _rev_lock:
+        _last_rev = max(time.time_ns(), _last_rev + 1)
+        return _last_rev
+
+
+class _UpdateTime(datetime):
+    """A datetime for update_time that also holds the exact revision."""
+
+    _rev: int
+
+    @classmethod
+    def from_rev(cls, rev: int) -> '_UpdateTime':
+        t = _EPOCH + timedelta(microseconds=rev // 1000)  # integer math: no float rounding
+        out = cls(t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond, tzinfo=timezone.utc)
+        out._rev = rev
+        return out
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+class _WriteResult:
+    """Firestore's WriteResult: upstream reads result.update_time after a write."""
+
+    def __init__(self, rev: int):
+        self.update_time = _UpdateTime.from_rev(rev)
+
+
+def _rev_filter(t) -> dict:
+    """Mongo filter on `_ut` for a last_update_time value.
+
+    The exact revision when it came from this store. A plain datetime (for
+    example update_time copied into a conversation's updated_at and loaded back)
+    matches at microsecond precision, like Firestore timestamps. Revisions are
+    nanosecond-unique, so two writes to one document within one microsecond are
+    the only case a stale value could match.
+    """
+    from google.api_core.exceptions import FailedPrecondition
+
+    rev = getattr(t, '_rev', None)
+    if isinstance(rev, int):
+        return {'_ut': rev}
+    if isinstance(t, datetime):
+        if t.tzinfo is None:
+            raise FailedPrecondition(f'update_time {t!r} has no time zone')
+        us = (t - _EPOCH) // timedelta(microseconds=1)
+    elif hasattr(t, 'seconds') and hasattr(t, 'nanos'):  # protobuf Timestamp
+        us = int(t.seconds) * 1_000_000 + int(t.nanos) // 1000
+    else:
+        raise FailedPrecondition(f'unsupported update_time {type(t).__name__}')
+    return {'_ut': {'$gte': us * 1000, '$lt': (us + 1) * 1000}}
+
+
+def _precondition(option) -> Tuple[dict, Optional[bool]]:
+    """Return (extra Mongo filter, required existence) for a write option."""
+    from google.api_core.exceptions import FailedPrecondition
+
+    if option is None:
+        return {}, None
+    if hasattr(option, '_last_update_time'):
+        t = option._last_update_time
+        if t is None:
+            # The read saw a document written before revisions existed.
+            return {'_ut': {'$exists': False}}, True
+        return _rev_filter(t), True
+    if hasattr(option, '_exists'):
+        return {}, bool(option._exists)
+    raise FailedPrecondition(f'unsupported write option {type(option).__name__}')
+
 
 # Firestore op string -> function producing a Mongo match expression for a field.
 _OP = {
@@ -219,7 +305,8 @@ class DocumentSnapshot:
         self._raw = raw
         self.exists = raw is not None
         self.create_time = None
-        self.update_time = None
+        rev = raw.get('_ut') if raw else None
+        self.update_time = _UpdateTime.from_rev(rev) if isinstance(rev, int) else None
 
     def to_dict(self) -> Optional[dict]:
         if self._raw is None:
@@ -230,9 +317,10 @@ class DocumentSnapshot:
         return (self.to_dict() or {}).get(field)
 
 
-# Firestore read/write methods take retry= and timeout= (and update/delete take
-# option=). Upstream passes them often, for example a 3-second bounded read.
-# The shim accepts and ignores them: pymongo uses its own timeouts.
+# Firestore read/write methods take retry= and timeout=. Upstream passes them
+# often, for example a 3-second bounded read. The shim accepts and ignores
+# them: pymongo uses its own timeouts. update/delete also take option=, a write
+# precondition, which the shim enforces (see _precondition).
 class DocumentReference:
     def __init__(self, store: 'MongoFirestore', path: str):
         self._store = store
@@ -282,7 +370,7 @@ class DocumentReference:
     def _session(self, transaction):
         return transaction._session if transaction is not None else None
 
-    def _replace_non_map_parents(self, specs, session):
+    def _replace_non_map_parents(self, specs, session, extra_filter=None):
         """Firestore writes ``a.b`` even when ``a`` is null or a scalar: ``a``
         becomes a map. Mongo refuses ("Cannot create field 'b' in element
         {a: null}"), so turn such parents into empty maps first."""
@@ -290,7 +378,7 @@ class DocumentReference:
         if not parents:
             return
         top = {p.split('.')[0]: 1 for p in parents}
-        raw = self._mc().find_one({'_id': self.path}, top, session=session)
+        raw = self._mc().find_one({'_id': self.path, **(extra_filter or {})}, top, session=session)
         if not raw:
             return
         fix = {}
@@ -301,11 +389,11 @@ class DocumentReference:
             if value is not _MISSING and not isinstance(value, dict):
                 fix[path] = {}
         if fix:
-            self._mc().update_one({'_id': self.path}, {'$set': fix}, session=session)
+            self._mc().update_one({'_id': self.path, **(extra_filter or {})}, {'$set': fix}, session=session)
 
     def set(self, data: dict, merge: bool = False, transaction=None, retry=None, timeout=None):
         spec, later = _split_transforms(data, merge=merge)
-        base = {'_id': self.path, '_p': self._parent, '_k': self.id}
+        base = {'_id': self.path, '_p': self._parent, '_k': self.id, '_ut': _next_rev()}
         s = self._session(transaction)
         if merge:
             spec.setdefault('$set', {}).update(base)
@@ -319,11 +407,12 @@ class DocumentReference:
             for extra in (spec, later):
                 if extra:
                     self._mc().update_one({'_id': self.path}, extra, session=s)
+        return _WriteResult(base['_ut'])
 
     def create(self, data: dict, transaction=None, retry=None, timeout=None):
         """Write a new document; fail with Conflict (409) if it already exists, like Firestore."""
         spec, later = _split_transforms(data)
-        doc = {'_id': self.path, '_p': self._parent, '_k': self.id}
+        doc = {'_id': self.path, '_p': self._parent, '_k': self.id, '_ut': _next_rev()}
         doc.update(spec.pop('$set', {}))
         s = self._session(transaction)
         try:
@@ -336,19 +425,29 @@ class DocumentReference:
         for extra in (spec, later):
             if extra:
                 self._mc().update_one({'_id': self.path}, extra, session=s)
+        return _WriteResult(doc['_ut'])
 
     def update(self, data: dict, transaction=None, option=None, retry=None, timeout=None):
         spec, later = _split_transforms(data)
-        spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id})
-        s = self._session(transaction)
-        self._replace_non_map_parents((spec, later), s)
-        res = self._mc().update_one({'_id': self.path}, spec, upsert=False, session=s)
-        if res.matched_count == 0:
-            from google.api_core.exceptions import NotFound
+        extra_filter, must_exist = _precondition(option)
+        if must_exist is False:
+            from google.api_core.exceptions import FailedPrecondition
 
+            raise FailedPrecondition(f'update needs an existing document: {self.path}')
+        rev = _next_rev()
+        spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id, '_ut': rev})
+        s = self._session(transaction)
+        self._replace_non_map_parents((spec, later), s, extra_filter)
+        res = self._mc().update_one({'_id': self.path, **extra_filter}, spec, upsert=False, session=s)
+        if res.matched_count == 0:
+            from google.api_core.exceptions import FailedPrecondition, NotFound
+
+            if extra_filter:
+                raise FailedPrecondition(f'document changed since it was read: {self.path}')
             raise NotFound(f'No document to update: {self.path}')
         if later:
             self._mc().update_one({'_id': self.path}, later, session=s)
+        return _WriteResult(rev)
 
     def get(self, field_paths=None, transaction=None, retry=None, timeout=None) -> DocumentSnapshot:
         # Firestore's DocumentReference.get(field_paths=None, transaction=None):
@@ -357,12 +456,25 @@ class DocumentReference:
         if field_paths:
             # always keep the bookkeeping fields so DocumentSnapshot stays well-formed
             projection = {f: 1 for f in field_paths}
-            projection.update({'_id': 1, '_p': 1, '_k': 1})
+            projection.update({'_id': 1, '_p': 1, '_k': 1, '_ut': 1})
         raw = self._mc().find_one({'_id': self.path}, projection, session=self._session(transaction))
         return DocumentSnapshot(self, raw)
 
     def delete(self, transaction=None, option=None, retry=None, timeout=None):
-        self._mc().delete_one({'_id': self.path}, session=self._session(transaction))
+        extra_filter, must_exist = _precondition(option)
+        s = self._session(transaction)
+        if must_exist is False:
+            if self._mc().find_one({'_id': self.path}, {'_id': 1}, session=s) is not None:
+                from google.api_core.exceptions import FailedPrecondition
+
+                raise FailedPrecondition(f'delete needs a missing document: {self.path}')
+            return _UpdateTime.from_rev(_next_rev())
+        res = self._mc().delete_one({'_id': self.path, **extra_filter}, session=s)
+        if must_exist and res.deleted_count == 0:
+            from google.api_core.exceptions import FailedPrecondition
+
+            raise FailedPrecondition(f'document changed or missing since it was read: {self.path}')
+        return _UpdateTime.from_rev(_next_rev())  # Firestore returns the delete time
 
 
 class _CountQuery:
@@ -439,7 +551,8 @@ class Query:
 
     def select(self, field_paths) -> 'Query':
         q = self._clone()
-        q._projection = {f: 1 for f in field_paths} if field_paths else {'_id': 1}
+        # Keep _ut so a selected snapshot still has update_time for preconditions.
+        q._projection = {**{f: 1 for f in field_paths}, '_ut': 1} if field_paths else {'_id': 1, '_ut': 1}
         return q
 
     def count(self) -> _CountQuery:
@@ -539,23 +652,27 @@ class WriteBatch:
     def create(self, ref, data):
         self._ops.append(('create', ref, data, None))
 
-    def update(self, ref, data):
-        self._ops.append(('update', ref, data, None))
+    def update(self, ref, data, option=None):
+        self._ops.append(('update', ref, data, option))
 
-    def delete(self, ref):
-        self._ops.append(('delete', ref, None, None))
+    def delete(self, ref, option=None):
+        self._ops.append(('delete', ref, None, option))
 
     def commit(self, retry=None, timeout=None):
-        for kind, ref, data, merge in self._ops:
+        # The 4th slot is merge for set, and the write option for update/delete.
+        results = []
+        for kind, ref, data, extra in self._ops:
             if kind == 'set':
-                ref.set(data, merge=merge)
+                results.append(ref.set(data, merge=extra))
             elif kind == 'create':
-                ref.create(data)
+                results.append(ref.create(data))
             elif kind == 'update':
-                ref.update(data)
+                results.append(ref.update(data, option=extra))
             elif kind == 'delete':
-                ref.delete()
+                ref.delete(option=extra)
+                results.append(_WriteResult(_next_rev()))
         self._ops.clear()
+        return results
 
 
 class Transaction:
@@ -594,11 +711,11 @@ class Transaction:
     def create(self, ref, data):
         self._writes.append(lambda: ref.create(data, transaction=self))
 
-    def update(self, ref, data):
-        self._writes.append(lambda: ref.update(data, transaction=self))
+    def update(self, ref, data, option=None):
+        self._writes.append(lambda: ref.update(data, transaction=self, option=option))
 
-    def delete(self, ref):
-        self._writes.append(lambda: ref.delete(transaction=self))
+    def delete(self, ref, option=None):
+        self._writes.append(lambda: ref.delete(transaction=self, option=option))
 
     def _flush(self):
         for op in self._writes:
@@ -706,6 +823,13 @@ class MongoFirestore:
     @staticmethod
     def _safe(name: str) -> str:
         return name.replace('$', '_').replace(' ', '_')
+
+    @staticmethod
+    def write_option(**kwargs):
+        """Firestore's write_option(last_update_time=...|exists=...); see _precondition."""
+        from google.cloud.firestore_v1.base_client import BaseClient
+
+        return BaseClient.write_option(**kwargs)
 
     def collection(self, path: str) -> CollectionReference:
         return CollectionReference(self, path)
