@@ -28,6 +28,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from bson.int64 import Int64
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import ConfigurationError, DuplicateKeyError, InvalidOperation, OperationFailure
 
@@ -298,10 +299,23 @@ class _AggResult:
         self.value = value
 
 
+def _plain(value):
+    # pymongo returns integers above 2**31 as bson.Int64. Firestore returns int.
+    # Upstream checks `type(x) is int` (pinecone_partition_state), so convert.
+    if type(value) is Int64:
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
 class DocumentSnapshot:
     def __init__(self, ref: 'DocumentReference', raw: Optional[dict]):
         self.reference = ref
         self.id = ref.id
+        raw = _plain(raw)
         self._raw = raw
         self.exists = raw is not None
         self.create_time = None
@@ -338,6 +352,10 @@ class DocumentReference:
 
     def _mc(self):
         return self._store._db[self._store._safe(self._coll_name)]
+
+    @property
+    def parent(self) -> 'CollectionReference':
+        return CollectionReference(self._store, self._parent)
 
     def collection(self, name: str) -> 'CollectionReference':
         return CollectionReference(self._store, f'{self.path}/{name}')
@@ -629,6 +647,12 @@ class CollectionReference(Query):
         super().__init__(store, path)
         self.path = path
         self.id = path.split('/')[-1]
+
+    @property
+    def parent(self) -> Optional[DocumentReference]:
+        # Firestore: a top-level collection has no parent document.
+        head = self.path.rsplit('/', 1)[0] if '/' in self.path else ''
+        return DocumentReference(self._store, head) if head else None
 
     def document(self, doc_id: Optional[str] = None) -> DocumentReference:
         if doc_id is None:
