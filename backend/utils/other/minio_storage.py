@@ -110,6 +110,12 @@ class Blob:
         self._metadata_pending = False
 
     @property
+    def bucket(self) -> 'Bucket':
+        # GCS blobs carry their bucket; upstream reads blob.bucket.name (for
+        # example database/account_deletion_operational_holds.py in audio merge).
+        return Bucket(self._s3, self._bucket)
+
+    @property
     def metadata(self):
         if self._metadata_pending:
             self._metadata_pending = False

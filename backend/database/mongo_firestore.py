@@ -230,6 +230,9 @@ class DocumentSnapshot:
         return (self.to_dict() or {}).get(field)
 
 
+# Firestore read/write methods take retry= and timeout= (and update/delete take
+# option=). Upstream passes them often, for example a 3-second bounded read.
+# The shim accepts and ignores them: pymongo uses its own timeouts.
 class DocumentReference:
     def __init__(self, store: 'MongoFirestore', path: str):
         self._store = store
@@ -300,7 +303,7 @@ class DocumentReference:
         if fix:
             self._mc().update_one({'_id': self.path}, {'$set': fix}, session=session)
 
-    def set(self, data: dict, merge: bool = False, transaction=None):
+    def set(self, data: dict, merge: bool = False, transaction=None, retry=None, timeout=None):
         spec, later = _split_transforms(data, merge=merge)
         base = {'_id': self.path, '_p': self._parent, '_k': self.id}
         s = self._session(transaction)
@@ -317,7 +320,7 @@ class DocumentReference:
                 if extra:
                     self._mc().update_one({'_id': self.path}, extra, session=s)
 
-    def create(self, data: dict, transaction=None):
+    def create(self, data: dict, transaction=None, retry=None, timeout=None):
         """Write a new document; fail with Conflict (409) if it already exists, like Firestore."""
         spec, later = _split_transforms(data)
         doc = {'_id': self.path, '_p': self._parent, '_k': self.id}
@@ -334,7 +337,7 @@ class DocumentReference:
             if extra:
                 self._mc().update_one({'_id': self.path}, extra, session=s)
 
-    def update(self, data: dict, transaction=None):
+    def update(self, data: dict, transaction=None, option=None, retry=None, timeout=None):
         spec, later = _split_transforms(data)
         spec.setdefault('$set', {}).update({'_p': self._parent, '_k': self.id})
         s = self._session(transaction)
@@ -347,7 +350,7 @@ class DocumentReference:
         if later:
             self._mc().update_one({'_id': self.path}, later, session=s)
 
-    def get(self, field_paths=None, transaction=None) -> DocumentSnapshot:
+    def get(self, field_paths=None, transaction=None, retry=None, timeout=None) -> DocumentSnapshot:
         # Firestore's DocumentReference.get(field_paths=None, transaction=None):
         # the first positional arg is an optional list of field paths to project.
         projection = None
@@ -358,7 +361,7 @@ class DocumentReference:
         raw = self._mc().find_one({'_id': self.path}, projection, session=self._session(transaction))
         return DocumentSnapshot(self, raw)
 
-    def delete(self, transaction=None):
+    def delete(self, transaction=None, option=None, retry=None, timeout=None):
         self._mc().delete_one({'_id': self.path}, session=self._session(transaction))
 
 
@@ -366,7 +369,7 @@ class _CountQuery:
     def __init__(self, query: 'Query'):
         self._query = query
 
-    def get(self, transaction=None):
+    def get(self, transaction=None, retry=None, timeout=None):
         q = self._query
         n = q._store._db[q._store._safe(q._leaf)].count_documents(
             q._mongo_filter(), session=(transaction._session if transaction else None)
@@ -492,7 +495,7 @@ class Query:
             ors.append(clause)
         return {'$or': ors} if len(ors) > 1 else ors[0]
 
-    def stream(self, transaction=None) -> Iterable[DocumentSnapshot]:
+    def stream(self, transaction=None, retry=None, timeout=None) -> Iterable[DocumentSnapshot]:
         s = transaction._session if transaction else None
         cur = self._store._db[self._store._safe(self._leaf)].find(self._mongo_filter(), self._projection, session=s)
         if self._order:
@@ -504,7 +507,7 @@ class Query:
         for raw in cur:
             yield DocumentSnapshot(DocumentReference(self._store, raw['_id']), raw)
 
-    def get(self, transaction=None) -> List[DocumentSnapshot]:
+    def get(self, transaction=None, retry=None, timeout=None) -> List[DocumentSnapshot]:
         return list(self.stream(transaction=transaction))
 
 
@@ -519,7 +522,7 @@ class CollectionReference(Query):
             doc_id = uuid.uuid4().hex
         return DocumentReference(self._store, f'{self.path}/{doc_id}')
 
-    def add(self, data: dict, document_id: Optional[str] = None):
+    def add(self, data: dict, document_id: Optional[str] = None, retry=None, timeout=None):
         ref = self.document(document_id)
         ref.set(data)
         return (_now(), ref)
@@ -542,7 +545,7 @@ class WriteBatch:
     def delete(self, ref):
         self._ops.append(('delete', ref, None, None))
 
-    def commit(self):
+    def commit(self, retry=None, timeout=None):
         for kind, ref, data, merge in self._ops:
             if kind == 'set':
                 ref.set(data, merge=merge)
@@ -581,7 +584,7 @@ class Transaction:
         self._in_txn = False
 
     # read API used inside transactional functions
-    def get(self, ref: DocumentReference) -> DocumentSnapshot:
+    def get(self, ref: DocumentReference, retry=None, timeout=None) -> DocumentSnapshot:
         return ref.get(transaction=self)
 
     # buffered write API
