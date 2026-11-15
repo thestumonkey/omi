@@ -11,6 +11,9 @@ Implements the GCS surface storage.py uses:
   Blob.upload_from_filename/upload_from_string/download_to_filename/
       download_as_bytes/delete/exists/reload/open('wb')/make_public/
       generate_signed_url ; Blob.name / Blob.size / Blob.public_url
+  Generations (GCS object versions): Blob.generation / metageneration /
+      updated, if_generation_match on reads and writes (PreconditionFailed),
+      Bucket.blob(name, generation=N), Blob.patch / compose, ranged reads
 
 Backend = any S3-compatible store (MinIO, AWS S3, Cloudflare R2). Config via env:
   S3_ENDPOINT_URL (e.g. http://minio:9000; omit for AWS S3)
@@ -25,12 +28,15 @@ GCP credentials and makes no network calls.
 """
 
 import datetime
+import hashlib
 import io
 import os
+import time
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud.exceptions import NotFound
 
 
@@ -98,12 +104,65 @@ class _BlobWriter:
         return False
 
 
+# GCS gives every object a generation (a new number on each write) and a
+# metageneration (a new number on each metadata change). S3 has neither, so the
+# shim keeps them in two hidden metadata keys that `Blob.metadata` never shows.
+_GEN_KEY = 'omi-generation'
+_METAGEN_KEY = 'omi-metageneration'
+_HIDDEN = (_GEN_KEY, _METAGEN_KEY)
+
+
+def _new_generation() -> int:
+    # Microseconds, like GCS. Unique enough for one writer per object path.
+    return time.time_ns() // 1000
+
+
+def _etag_generation(etag: str) -> int:
+    # Objects written before the shim kept a generation: derive a stable one.
+    return int(hashlib.sha256((etag or '').strip('"').encode()).hexdigest()[:15], 16) or 1
+
+
+def _precondition(name: str, wanted, actual) -> None:
+    if wanted is not None and int(wanted) != int(actual or 0):
+        raise PreconditionFailed(f'{name}: generation {actual} does not match {wanted}')
+
+
+class _BlobReader:
+    """File-like reader for Blob.open('rb')."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def read(self, size=-1):
+        return self._body.read() if size is None or size < 0 else self._body.read(size)
+
+    def close(self):
+        self._body.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 class Blob:
-    def __init__(self, client, bucket_name: str, name: str):
+    def __init__(self, client, bucket_name: str, name: str, generation=None):
         self._s3 = client
         self._bucket = bucket_name
         self.name = name
         self.size = None
+        # Bucket.blob(name, generation=N) pins one version: reads fail with
+        # NotFound once the object has a newer generation (no S3 versioning).
+        self._pinned = int(generation) if generation is not None else None
+        self._generation = None
+        self._metageneration = None
+        self.updated = None
+        self.content_encoding = None
+        self.cache_control = None
+        self.content_type = None
+        self.chunk_size = None
         # GCS custom metadata: set before an upload to store it; filled by reload().
         # A blob from list_blobs loads it on first read, like GCS listings carry it.
         self._metadata = None
@@ -115,16 +174,51 @@ class Blob:
         # example database/account_deletion_operational_holds.py in audio merge).
         return Bucket(self._s3, self._bucket)
 
+    # ---- object state ----
+    def _apply_head(self, head: dict) -> None:
+        raw = head.get('Metadata') or {}
+        self.size = head.get('ContentLength', self.size)
+        self.updated = head.get('LastModified')
+        self.content_encoding = head.get('ContentEncoding') or None
+        self.cache_control = head.get('CacheControl') or None
+        self.content_type = head.get('ContentType') or None
+        self._generation = int(raw[_GEN_KEY]) if raw.get(_GEN_KEY) else _etag_generation(head.get('ETag'))
+        self._metageneration = int(raw.get(_METAGEN_KEY) or 1)
+        self._metadata = {k: v for k, v in raw.items() if k not in _HIDDEN} or None
+        self._metadata_pending = False
+        if self._pinned is not None and self._pinned != self._generation:
+            raise NotFound(f'{self.name}#{self._pinned}')
+
+    def _head(self) -> dict:
+        try:
+            head = self._s3.head_object(Bucket=self._bucket, Key=self.name)
+        except ClientError as e:
+            if _is_404(e):
+                raise NotFound(self.name)
+            raise
+        self._apply_head(head)
+        return head
+
+    def _lazy(self):
+        if self._metadata_pending:
+            try:
+                self._head()
+            except NotFound:
+                self._metadata_pending = False
+
+    @property
+    def generation(self):
+        self._lazy()
+        return self._generation if self._generation is not None else self._pinned
+
+    @property
+    def metageneration(self):
+        self._lazy()
+        return self._metageneration
+
     @property
     def metadata(self):
-        if self._metadata_pending:
-            self._metadata_pending = False
-            try:
-                head = self._s3.head_object(Bucket=self._bucket, Key=self.name)
-                self._metadata = head.get('Metadata') or None
-            except ClientError as e:
-                if not _is_404(e):
-                    raise
+        self._lazy()
         return self._metadata
 
     @metadata.setter
@@ -132,68 +226,128 @@ class Blob:
         self._metadata_pending = False
         self._metadata = value
 
-    def _metadata_args(self) -> dict:
-        if not self.metadata:
-            return {}
-        return {'Metadata': {str(k): str(v) for k, v in self.metadata.items() if v is not None}}
+    def _write_args(self, generation: int, metageneration: int = 1) -> dict:
+        meta = {str(k): str(v) for k, v in (self.metadata or {}).items() if v is not None and k not in _HIDDEN}
+        meta[_GEN_KEY] = str(generation)
+        meta[_METAGEN_KEY] = str(metageneration)
+        args = {'Metadata': meta}
+        if self.cache_control:
+            args['CacheControl'] = self.cache_control
+        if self.content_encoding:
+            args['ContentEncoding'] = self.content_encoding
+        return args
 
-    # ---- uploads ----
-    def upload_from_filename(self, file_path: str, content_type=None, *_, **__):
-        extra = {**({'ContentType': content_type} if content_type else {}), **self._metadata_args()}
-        self._s3.upload_file(file_path, self._bucket, self.name, ExtraArgs=extra or None)
+    def _check_write(self, if_generation_match) -> None:
+        """if_generation_match=0 means create only; N means the current object is N."""
+        if if_generation_match is None:
+            return
+        try:
+            current = self._s3.head_object(Bucket=self._bucket, Key=self.name)
+        except ClientError as e:
+            if not _is_404(e):
+                raise
+            if int(if_generation_match) != 0:
+                raise PreconditionFailed(f'{self.name}: object does not exist')
+            return
+        raw = current.get('Metadata') or {}
+        actual = int(raw[_GEN_KEY]) if raw.get(_GEN_KEY) else _etag_generation(current.get('ETag'))
+        _precondition(self.name, if_generation_match, actual)
 
-    def upload_from_string(self, data, content_type=None, *_, **__):
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        kwargs = {'Bucket': self._bucket, 'Key': self.name, 'Body': data, **self._metadata_args()}
+    def _put(self, body, content_type=None, if_generation_match=None) -> None:
+        self._check_write(if_generation_match)
+        generation = _new_generation()
+        kwargs = {'Bucket': self._bucket, 'Key': self.name, 'Body': body, **self._write_args(generation)}
         if content_type:
             kwargs['ContentType'] = content_type
         self._s3.put_object(**kwargs)
+        self._generation, self._metageneration = generation, 1
+        self.size = len(body) if isinstance(body, (bytes, bytearray)) else self.size
+
+    # ---- uploads ----
+    def upload_from_filename(self, file_path: str, content_type=None, *_, if_generation_match=None, **__):
+        with open(file_path, 'rb') as f:
+            self._put(f.read(), content_type, if_generation_match)
+
+    def upload_from_string(self, data, content_type=None, *_, if_generation_match=None, **__):
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        self._put(data, content_type, if_generation_match)
+
+    def upload_from_file(self, file_obj, content_type=None, *_, if_generation_match=None, **__):
+        self._put(file_obj.read(), content_type, if_generation_match)
 
     def open(self, mode='wb', content_type=None, **_):
-        if 'w' not in mode:
-            raise NotImplementedError("Blob.open only supports write modes in this adapter")
+        if 'r' in mode:
+            return _BlobReader(self._get()['Body'])
         return _BlobWriter(self, content_type)
 
     # ---- downloads ----
-    def download_to_filename(self, file_path: str, *_, **__):
+    def _get(self, if_generation_match=None, start=None, end=None) -> dict:
+        kwargs = {'Bucket': self._bucket, 'Key': self.name}
+        if start is not None or end is not None:
+            # GCS `end` is inclusive, like an HTTP Range.
+            kwargs['Range'] = f'bytes={start or 0}-{"" if end is None else end}'
         try:
-            self._s3.download_file(self._bucket, self.name, file_path)
+            obj = self._s3.get_object(**kwargs)
         except ClientError as e:
             if _is_404(e):
                 raise NotFound(self.name)
             raise
+        self._apply_head(obj)
+        _precondition(self.name, if_generation_match, self._generation)
+        return obj
 
-    def download_as_bytes(self, *_, **__) -> bytes:
-        try:
-            return self._s3.get_object(Bucket=self._bucket, Key=self.name)['Body'].read()
-        except ClientError as e:
-            if _is_404(e):
-                raise NotFound(self.name)
-            raise
+    def download_as_bytes(self, *_, start=None, end=None, if_generation_match=None, **__) -> bytes:
+        return self._get(if_generation_match, start, end)['Body'].read()
+
+    def download_to_filename(self, file_path: str, *_, if_generation_match=None, **__):
+        data = self.download_as_bytes(if_generation_match=if_generation_match)
+        with open(file_path, 'wb') as f:
+            f.write(data)
+
+    def download_to_file(self, file_obj, *_, if_generation_match=None, **__):
+        file_obj.write(self.download_as_bytes(if_generation_match=if_generation_match))
 
     # ---- metadata / lifecycle ----
     def exists(self, *_, **__) -> bool:
         try:
-            self._s3.head_object(Bucket=self._bucket, Key=self.name)
+            self._head()
             return True
-        except ClientError as e:
-            if _is_404(e):
-                return False
-            raise
+        except NotFound:
+            return False
 
     def reload(self, *_, **__):
-        try:
-            head = self._s3.head_object(Bucket=self._bucket, Key=self.name)
-            self.size = head.get('ContentLength')
-            self.metadata = head.get('Metadata') or None
-        except ClientError as e:
-            if _is_404(e):
-                raise NotFound(self.name)
-            raise
+        self._head()
 
-    def delete(self, *_, **__):
+    def patch(self, *_, if_generation_match=None, if_metageneration_match=None, **__):
+        """Write metadata/cache_control without changing the bytes or the generation."""
+        wanted = self._metadata
+        cache_control = self.cache_control
+        head = self._head()
+        _precondition(self.name, if_generation_match, self._generation)
+        if if_metageneration_match is not None and int(if_metageneration_match) != self._metageneration:
+            raise PreconditionFailed(f'{self.name}: metageneration changed')
+        self._metadata, self.cache_control = wanted, cache_control
+        metageneration = self._metageneration + 1
+        args = self._write_args(self._generation, metageneration)
+        self._s3.copy_object(
+            Bucket=self._bucket,
+            Key=self.name,
+            CopySource={'Bucket': self._bucket, 'Key': self.name},
+            MetadataDirective='REPLACE',
+            ContentType=head.get('ContentType') or 'application/octet-stream',
+            **args,
+        )
+        self._metageneration = metageneration
+
+    def delete(self, *_, if_generation_match=None, **__):
+        self._check_write(if_generation_match)
         self._s3.delete_object(Bucket=self._bucket, Key=self.name)
+
+    def compose(self, sources, *_, if_generation_match=None, **__):
+        """Join sources into this object. S3 has no small-part compose: copy the bytes."""
+        data = b''.join(source.download_as_bytes(if_generation_match=source._pinned) for source in sources)
+        self._put(data, self.content_type, if_generation_match)
 
     def make_public(self, *_, **__):
         self._s3.put_object_acl(Bucket=self._bucket, Key=self.name, ACL='public-read')
@@ -222,8 +376,16 @@ class Bucket:
         self._s3 = client
         self.name = name
 
-    def blob(self, name: str) -> Blob:
-        return Blob(self._s3, self.name, name)
+    def blob(self, name: str, *_, generation=None, **__) -> Blob:
+        return Blob(self._s3, self.name, name, generation=generation)
+
+    def get_blob(self, name: str, *_, **__):
+        blob = self.blob(name)
+        try:
+            blob.reload()
+        except NotFound:
+            return None
+        return blob
 
     def list_blobs(self, prefix: str = None, **_):
         paginator = self._s3.get_paginator('list_objects_v2')
@@ -234,14 +396,26 @@ class Bucket:
             for obj in page.get('Contents', []):
                 b = Blob(self._s3, self.name, obj['Key'])
                 b.size = obj.get('Size')
+                b.updated = obj.get('LastModified')
                 b._metadata_pending = True
                 yield b
 
     def copy_blob(self, blob: Blob, destination_bucket: 'Bucket', new_name: str = None, *_, **__) -> Blob:
+        # A copy is a new write in GCS, so it gets its own generation.
+        source = self.blob(blob.name)
+        head = source._head()
         target = destination_bucket.blob(new_name or blob.name)
+        target._metadata, target.cache_control = source._metadata, source.cache_control
+        generation = _new_generation()
         self._s3.copy_object(
-            Bucket=destination_bucket.name, Key=target.name, CopySource={'Bucket': blob._bucket, 'Key': blob.name}
+            Bucket=destination_bucket.name,
+            Key=target.name,
+            CopySource={'Bucket': self.name, 'Key': blob.name},
+            MetadataDirective='REPLACE',
+            ContentType=head.get('ContentType') or 'application/octet-stream',
+            **target._write_args(generation),
         )
+        target._generation, target._metageneration = generation, 1
         return target
 
 
