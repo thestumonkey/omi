@@ -3414,7 +3414,7 @@ _upstream_extract_memories_inner = _extract_memories_inner
 def _extract_memories_inner(
     uid: str, conversation: Conversation, **kwargs: Any
 ) -> ConversationMemoryExtractionResult:  # noqa: F811
-    if _owner_memory_gate.gate_enabled():
+    if _owner_memory_gate.applies_to(uid):
         presence = _owner_memory_gate.owner_presence(
             conversation.transcript_segments or [], min_words=_owner_memory_gate.min_owner_words()
         )
@@ -3443,12 +3443,12 @@ def _get_structured(uid: str, language_code: str, conversation: Any, *args: Any,
     trigger = kwargs.get('trigger', ProcessingTrigger.CAPTURE_END)
     segments = getattr(conversation, 'transcript_segments', None) or []
     if (
-        _owner_memory_gate.gate_enabled()
-        and segments
+        segments
         and not kwargs.get('user_kept', False)
         and trigger is not ProcessingTrigger.SERVER_RECOVERY
         and not isinstance(conversation, ExternalIntegrationCreateConversation)
         and not is_release_probe_uid(uid)
+        and _owner_memory_gate.applies_to(uid)
     ):
         presence = _owner_memory_gate.owner_presence(segments, min_words=_owner_memory_gate.min_owner_words())
         if not presence.admitted:

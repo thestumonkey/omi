@@ -48,6 +48,22 @@ def default_enabled() -> bool:
     return selfhosted_config.is_self_hosted()
 
 
+def can_identify_owner(uid: str) -> bool:
+    """Speaker ID marks the owner only with a Voice Profile. Without one, every
+    recording would look ownerless, so the gate stays open. A storage error
+    also keeps it open: showing a TV recording is better than hiding the owner's."""
+    try:
+        from utils.other.storage import get_user_has_speech_profile
+
+        return bool(get_user_has_speech_profile(uid))
+    except Exception:
+        return False
+
+
+def applies_to(uid: str) -> bool:
+    return gate_enabled() and can_identify_owner(uid)
+
+
 def min_owner_words() -> int:
     try:
         return max(0, int(os.environ.get('SELF_HOSTED_MEMORY_OWNER_MIN_WORDS', DEFAULT_MIN_OWNER_WORDS)))

@@ -57,6 +57,7 @@ def test_extract_memories_inner_skips_when_owner_absent(monkeypatch):
     calls = []
     monkeypatch.setattr(pc, "_upstream_extract_memories_inner", lambda *a, **k: calls.append(a))
     monkeypatch.setenv("SELF_HOSTED_MEMORY_OWNER_GATE", "on")
+    _voice_profile(monkeypatch, True)
     conversation = SimpleNamespace(id="c1", transcript_segments=TV, source="omi")
     result = pc._extract_memories_inner("u1", conversation)
     assert result.count == 0 and result.path == "owner_gate"
@@ -67,6 +68,22 @@ def test_extract_memories_inner_skips_when_owner_absent(monkeypatch):
     assert len(calls) == 1
 
 
+def _voice_profile(monkeypatch, present):
+    import utils.other.storage as storage
+
+    if isinstance(present, Exception):
+
+        def has(uid):
+            raise present
+
+    else:
+
+        def has(uid):
+            return present
+
+    monkeypatch.setattr(storage, "get_user_has_speech_profile", has)
+
+
 def _conv_gate(monkeypatch):
     import utils.conversations.process_conversation as pc
 
@@ -74,6 +91,7 @@ def _conv_gate(monkeypatch):
     monkeypatch.setattr(pc, "_upstream_get_structured", lambda *a, **k: (calls.append(a), (pc.Structured(), False))[1])
     monkeypatch.setattr(pc, "is_release_probe_uid", lambda uid: False)
     monkeypatch.setenv("SELF_HOSTED_MEMORY_OWNER_GATE", "on")
+    _voice_profile(monkeypatch, True)
     return pc, calls
 
 
@@ -104,4 +122,24 @@ def test_conversation_gate_off_reaches_upstream(monkeypatch):
     pc, calls = _conv_gate(monkeypatch)
     monkeypatch.setenv("SELF_HOSTED_MEMORY_OWNER_GATE", "off")
     assert pc._get_structured("u1", "en", SimpleNamespace(id="c5", transcript_segments=TV))[1] is False
+    assert len(calls) == 1
+
+
+def test_no_voice_profile_hides_nothing(monkeypatch):
+    # Speaker ID cannot find the owner without a Voice Profile, so the rule
+    # would hide every recording. It must stay open.
+    pc, calls = _conv_gate(monkeypatch)
+    _voice_profile(monkeypatch, False)
+    assert pc._get_structured("u1", "en", SimpleNamespace(id="c6", transcript_segments=TV))[1] is False
+    assert len(calls) == 1
+    memory_calls = []
+    monkeypatch.setattr(pc, "_upstream_extract_memories_inner", lambda *a, **k: memory_calls.append(a))
+    pc._extract_memories_inner("u1", SimpleNamespace(id="c7", transcript_segments=TV, source="omi"))
+    assert len(memory_calls) == 1
+
+
+def test_voice_profile_lookup_error_hides_nothing(monkeypatch):
+    pc, calls = _conv_gate(monkeypatch)
+    _voice_profile(monkeypatch, RuntimeError("storage down"))
+    assert pc._get_structured("u1", "en", SimpleNamespace(id="c8", transcript_segments=TV))[1] is False
     assert len(calls) == 1
