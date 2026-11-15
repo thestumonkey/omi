@@ -49,6 +49,7 @@ import 'package:omi/pages/home/widgets/home_daily_recaps_setting.dart';
 import 'package:omi/models/subscription.dart';
 import 'package:omi/pages/home/widgets/payment_issue_row.dart';
 import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/selfhosted/show_discarded_chip.dart';
 import 'package:omi/ui/ui.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -886,6 +887,7 @@ class _ConversationsPageState extends State<ConversationsPage>
               const SliverToBoxAdapter(child: UpdateFirmwareCardWidget()),
               // Review absorbs the voice prompts; the old card shows only while Review is off.
               const SliverToBoxAdapter(child: ReviewEntryCard()),
+              const SliverToBoxAdapter(child: ShowDiscardedChip()), // [fork-only] selfhosted/show_discarded_chip.dart
               // Opt-in from Developer Settings. Hidden, the row is not mounted, so nothing is fetched.
               SliverToBoxAdapter(
                 child: ValueListenableBuilder<bool>(
