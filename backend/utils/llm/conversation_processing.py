@@ -854,3 +854,17 @@ def generate_summary_with_prompt(conversation_text: str, prompt: str, language_c
             timed_out=provider_fallback_reason(exc) == 'timeout',
         ) from exc
     return _content_str(response)
+
+
+# ── Self-hosted seam [fork-only] ─────────────────────────────────────────────
+# Upstream sizes the notes loop for a fast cloud model: 3 x 60s. A self-hosted
+# server runs one request at a time (SELF_HOSTED_LLM_MAX_CONCURRENCY), so the
+# notes call can wait behind other work and then take minutes on a long
+# transcript (an hour of talk took 149s on an 8B model). The loop then ended as
+# a bare TimeoutError and the conversation stayed "processing". Give the loop
+# the same 3x budget, sized by the self-hosted per-request read timeout.
+# notes_mount() reads this name at call time, so rebinding it here is enough.
+if os.environ.get('SELF_HOSTED_LLM_URL', '').strip():
+    from utils.llm import selfhosted as _selfhosted
+
+    NOTES_LOOP_DEADLINE_SECONDS = max(NOTES_LOOP_DEADLINE_SECONDS, 3 * _selfhosted._SELF_HOSTED_LLM_READ_TIMEOUT)
