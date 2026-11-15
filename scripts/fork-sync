@@ -5,6 +5,8 @@
 #   scripts/fork-sync <ref>           merge any ref, for example origin/main or a selfhosted-* tag
 #   scripts/fork-sync continue        run in the sync worktree after you fix conflicts by hand
 #   scripts/fork-sync check [<ref>]   run only the checks in the current tree
+#   scripts/fork-sync env [<old> <new>]  list upstream server switches the fork does not set
+#                                     (default: what upstream main added since our last merge)
 #
 # The work happens in a new worktree under .fork-sync/, on a new branch. Your
 # current branch does not change. The script never pushes and never deploys.
@@ -139,6 +141,36 @@ run_checks() {
   return $bad
 }
 
+# Upstream can add a server switch the new code needs (OMI_SHAPED_AGENT_MODE=on),
+# with no conflict and no release note. List the ones the fork does not match.
+# Information only: it never fails the sync.
+env_report() {
+  local old=$1 new=$2 py=backend/.venv/bin/python
+  if [ -x "$py" ] && "$py" -c 'import yaml' 2>/dev/null; then
+    "$py" "$MAIN_ROOT/scripts/fork_sync_env_check.py" "$old" "$new"
+  elif command -v uv >/dev/null 2>&1; then
+    uv run -q --with pyyaml python "$MAIN_ROOT/scripts/fork_sync_env_check.py" "$old" "$new"
+  else
+    echo "skip upstream switches (install uv)"
+  fi
+}
+
+upstream_ref() {
+  local remote
+  remote=$(git remote -v | awk '/github\.com[:\/]BasedHardware\/omi(\.git)? \(fetch\)/ {print $1; exit}')
+  [ -n "$remote" ] || die "no remote points at BasedHardware/omi. Add one: git remote add upstream https://github.com/BasedHardware/omi.git"
+  echo "$remote/main"
+}
+
+cmd_env() {
+  local old=${1:-} new=${2:-}
+  if [ -z "$new" ]; then
+    new=$(upstream_ref)
+    old=$(git merge-base HEAD "$new") || die "cannot find a merge base with $new"
+  fi
+  env_report "$old" "$new"
+}
+
 # ---- steps --------------------------------------------------------------------
 
 fix_conflicts() {
@@ -234,24 +266,23 @@ finish() {
   branch=$(git rev-parse --abbrev-ref HEAD)
   say "done. Branch $branch passes the checks."
   git log --oneline "$(cat "$(state_file base)")..HEAD" --first-parent
+  echo
+  env_report "$(git merge-base "$(cat "$(state_file base)")" "$target")" "$target"
   cat <<EOF
 
 Next steps (the script does not do these):
   1. Read the changes:   git -C $ROOT diff $(cat "$(state_file base)")..HEAD --stat
   2. Merge:              cd $MAIN_ROOT && git merge --ff-only $branch
-  3. Push to your fork, deploy, then check that a new recording gets a title and a summary.
-  4. Remove the worktree: git worktree remove $ROOT
+  3. Set the upstream switches above that the fork needs (read each one's code first).
+  4. Push to your fork, deploy, then check that a new recording gets a title and a summary.
+  5. Remove the worktree: git worktree remove $ROOT
 EOF
 }
 
 cmd_start() {
   local ref=${1:-} remote target date wt branch
   [ "$ROOT" = "$MAIN_ROOT" ] || die "run this from the main checkout, not from a worktree"
-  if [ -z "$ref" ]; then
-    remote=$(git remote -v | awk '/github\.com[:\/]BasedHardware\/omi(\.git)? \(fetch\)/ {print $1; exit}')
-    [ -n "$remote" ] || die "no remote points at BasedHardware/omi. Add one: git remote add upstream https://github.com/BasedHardware/omi.git"
-    ref="$remote/main"
-  fi
+  [ -n "$ref" ] || ref=$(upstream_ref)
   # Fetch only the branch. Upstream moves some of its tags, so a tag fetch fails.
   # For a tag (for example a selfhosted-* release), run `git fetch <remote> --tags` first.
   remote=${ref%%/*}
@@ -294,8 +325,9 @@ cmd_continue() {
 }
 
 case "${1:-}" in
-  -h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
   continue) cmd_continue ;;
   check) shift; run_checks "${1:-}" ;;
+  env) shift; cmd_env "${1:-}" "${2:-}" ;;
   *) cmd_start "${1:-}" ;;
 esac

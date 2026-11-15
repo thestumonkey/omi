@@ -349,10 +349,19 @@ git worktree remove .fork-sync/<date>-<commit>
 A sync changes dependencies and Dockerfiles, so use `make deploy`, not an
 overlay.
 
+At the end, the script lists upstream server switches that changed and that
+the fork does not match. Upstream sets these in its own servers, not in the
+code. One can be needed for the new code to work: with `OMI_SHAPED_AGENT_MODE`
+unset, every summary failed. Read each listed switch's code before you deploy.
+Set the ones the fork needs in
+`backend/charts/backend-listen/local_omi_backend_listen_values.yaml`, and on
+`pusher` and `desktop-backend-py` with `kubectl -n omi set env`.
+
 Other commands:
 
 ```bash
 scripts/fork-sync check       # only the checks, in the current tree (also: make fork-check)
+scripts/fork-sync env         # only the switch list: upstream main since our last merge
 FORK_SYNC_SKIP_TESTS=1 scripts/fork-sync      # skip the slow backend checks
 ```
 
