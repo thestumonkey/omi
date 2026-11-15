@@ -5,9 +5,9 @@ writes "third party" and "unknown" memories from those conversations; it only
 refuses to say they are about the owner. This gate drops the whole memory pass
 unless the transcript proves the owner spoke:
 
-  * exactly one speaker cluster is marked as the owner (``is_user``), the same
-    evidence upstream's ``may_attribute_to_owner`` trusts; and
-  * that cluster said at least SELF_HOSTED_MEMORY_OWNER_MIN_WORDS words (default
+  * a speaker cluster is marked as the owner (``is_user``), the same evidence
+    upstream's ``may_attribute_to_owner`` trusts; and
+  * the owner clusters together said at least SELF_HOSTED_MEMORY_OWNER_MIN_WORDS words (default
     20), so one mis-matched TV line does not open the gate.
 
 The same rule marks such a conversation discarded (restorable with "Show
@@ -81,12 +81,17 @@ class OwnerPresence:
 
 def owner_presence(segments: Sequence[Any], *, min_words: int) -> OwnerPresence:
     evidence = OwnerAttributionEvidence.from_segments(segments or [])
-    if evidence.trust != 'unique_owner':
+    # Two owner clusters still mean the owner spoke: a phone recording carries
+    # the live transcript and the uploaded-audio transcript, with different
+    # speaker labels (SPEAKER_0 and SPEAKER_00) both matched to the Voice
+    # Profile. Count every owner word; only "no owner" proves a TV recording.
+    if evidence.trust not in ('unique_owner', 'multi_owner'):
         return OwnerPresence(evidence.trust, 0, False, f'owner_{evidence.trust}')
     owner_words = sum(
         len(str(getattr(segment, 'text', '') or '').split())
         for segment in segments
-        if getattr(segment, 'is_user', False) and speaker_cluster_key(segment) == evidence.owner_cluster_id
+        if getattr(segment, 'is_user', False)
+        and (evidence.trust == 'multi_owner' or speaker_cluster_key(segment) == evidence.owner_cluster_id)
     )
     if owner_words < min_words:
         return OwnerPresence(evidence.trust, owner_words, False, 'owner_too_quiet')

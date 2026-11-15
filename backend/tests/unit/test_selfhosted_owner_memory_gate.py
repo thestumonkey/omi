@@ -35,9 +35,12 @@ def test_owner_talking_is_admitted():
     assert gate.owner_presence(segs, min_words=20).admitted
 
 
-def test_two_owner_clusters_are_rejected():
-    segs = [_seg("word " * 30, 0, is_user=True), _seg("word " * 30, 1, is_user=True)]
-    assert gate.owner_presence(segs, min_words=20).reason == "owner_multi_owner"
+def test_two_owner_clusters_count_together():
+    # Live and uploaded-audio transcripts label the owner SPEAKER_0 and SPEAKER_00.
+    segs = [_seg("word " * 12, 0, is_user=True), _seg("word " * 12, 1, is_user=True)]
+    presence = gate.owner_presence(segs, min_words=20)
+    assert presence.admitted and presence.owner_words == 24
+    assert not gate.owner_presence(segs[:1], min_words=20).admitted
 
 
 def test_gate_defaults_follow_self_hosted(monkeypatch):
