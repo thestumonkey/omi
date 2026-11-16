@@ -16,7 +16,8 @@ summaries, tasks and memories, and gives you a chat that remembers them.
 
 Upstream Omi uses Google services and Omi's cloud. This fork runs the same
 upstream code on servers that you control. Your recordings, notes and memories
-stay on your servers.
+stay on your servers. The goal is 100% self-hosted: the one cloud part left is
+speech to text, and you can run that yourself too.
 
 Upstream's own README is in [`README.md`](../README.md).
 
@@ -31,7 +32,7 @@ Upstream's own README is in [`README.md`](../README.md).
 | Search vectors | Pinecone | Typesense, with local embeddings |
 | Speaker detection | Hosted service | Local `diarizer` server |
 | Plans and limits | Paid plans | None (`SELF_HOSTED=true`) |
-| Speech to text | Deepgram | Deepgram (no change, needs a Deepgram key) |
+| Speech to text | Hosted vendors | Your choice: Deepgram cloud (default), Parakeet on your own NVIDIA GPU, or Deepgram self-hosted. See [Speech to text](../SELFHOSTED.md#speech-to-text) |
 
 These apps work with the fork:
 
@@ -62,7 +63,7 @@ All the steps are in [`SELFHOSTED.md`](../SELFHOSTED.md).
 - A Kubernetes cluster (the fork uses microk8s) with an image registry.
 - MongoDB, Redis and Casdoor.
 - An OpenAI-compatible AI model server. An 8B model works. A GPU helps a lot.
-- A Deepgram API key.
+- Speech to text: a Deepgram API key, or an NVIDIA GPU for Parakeet.
 - A Mac with Xcode, for the Mac and iOS apps.
 
 **Steps:**

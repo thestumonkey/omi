@@ -135,6 +135,92 @@ redirect address.
 | Helm says `valueFrom may not be specified when value is not empty` | Someone set a value by hand on the live Deployment. | `kubectl -n omi set env deploy/omi-backend NAME-`, then deploy again |
 | New pod stays `Pending` | The node has no space for a second pod. | Keep the `Recreate` strategy in the values file |
 
+## Speech to text
+
+Speech to text (STT) turns audio into words. It runs twice for each recording:
+
+- **Live**: while you talk, for the words you see on the screen.
+- **Uploaded audio**: for audio that the phone or desktop sends later.
+
+Pick one of these options. All other parts of the stack (speaker detection, the
+`diarizer`, and voice detection, VAD) already run on your servers.
+
+| Option | Runs where | Cost | Needs | Tested on this fork |
+|---|---|---|---|---|
+| A. Deepgram cloud (default) | Deepgram's servers. Your audio leaves your network. | Per minute of audio | A Deepgram API key | Yes |
+| B. Parakeet (NVIDIA) | Your GPU machine | Free (open models) | An NVIDIA GPU | No |
+| C. Deepgram self-hosted | Your GPU machine | A Deepgram self-hosted licence | An NVIDIA GPU and a Deepgram licence | No |
+
+For 100% self-hosted, use B.
+
+### A. Deepgram cloud
+
+1. Put the key in the Secret:
+   `kubectl -n omi patch secret dev-omi-backend-secrets --type merge -p '{"stringData":{"DEEPGRAM_API_KEY":"<key>"}}'`
+2. Keep `STT_SERVICE_MODELS=dg-nova-3` in
+   `backend/charts/backend-listen/local_omi_backend_listen_values.yaml`.
+
+With `SELF_HOSTED=true` and `DEEPGRAM_API_KEY` set, two fork blocks send live
+and uploaded audio to Deepgram: the tail of `backend/config/stt_provider_policy.py`
+and the tail of `backend/utils/stt/pre_recorded.py`.
+
+### B. Parakeet (fully self-hosted)
+
+Upstream wrote this server and runs it in its own cloud. The code is in
+`backend/parakeet/` (read `backend/parakeet/README.md`) and the chart is in
+`backend/charts/parakeet/`. It gives live words (`WS /v3/stream`), uploaded
+audio (`POST /v2/transcribe`), speakers and spoken language.
+
+Limits:
+
+- It needs an NVIDIA GPU. The image is built on `nvcr.io/nvidia/nemo`. It does
+  not run on an AMD GPU or a CPU.
+- The live model (`nvidia/parakeet-rnnt-1.1b`) does English only. The upload
+  model (`nvidia/parakeet-tdt-0.6b-v3`) does 25 languages.
+- The chart values are for upstream's Google cloud. Build your own image and
+  write your own values file.
+
+Steps:
+
+1. Build and push the image:
+   `docker build -t registry.example.com:32000/parakeet:1 backend/parakeet`
+   and `docker push registry.example.com:32000/parakeet:1`.
+2. Copy `backend/charts/parakeet/dev_omi_parakeet_values.yaml` to
+   `backend/charts/parakeet/local_omi_parakeet_values.yaml`. Set `image` to your
+   image, remove the Google-only parts, and put the pod on the GPU node.
+3. Deploy it:
+   `helm upgrade --install parakeet backend/charts/parakeet -n omi -f backend/charts/parakeet/local_omi_parakeet_values.yaml`.
+4. Set these on **all** backend servers (`omi-backend`, `pusher`,
+   `desktop-backend-py`):
+
+   | Setting | Value | Why |
+   |---|---|---|
+   | `HOSTED_PARAKEET_API_URL` | `http://parakeet.omi` (the chart's service, port 80) | Where the server is |
+   | `STT_SERVICE_MODELS` | `parakeet` | Live audio goes to Parakeet |
+   | `STT_STREAMING_PARAKEET_SLOT_ENABLED` | `true` | Live Parakeet is off without it |
+   | `STT_PRERECORDED_MODEL` | `parakeet` | Uploaded audio goes to Parakeet |
+   | `STT_GPU_FLEET_OFF` | unset or `false` | `true` turns Parakeet off |
+
+5. Remove `DEEPGRAM_API_KEY` from the Secret. While it is set, the fork blocks
+   send audio to Deepgram.
+6. Make a test recording. Check that live words show and that the conversation
+   gets a summary.
+
+### C. Deepgram self-hosted
+
+Deepgram sells a version of its server that runs on your own GPU. Get the
+licence and the images from Deepgram, and run them by their guide. Then set:
+
+| Setting | Value |
+|---|---|
+| `DEEPGRAM_SELF_HOSTED_ENABLED` | `true` |
+| `DEEPGRAM_SELF_HOSTED_URL` | your Deepgram server address |
+| `DEEPGRAM_API_KEY` | your Deepgram key |
+
+The values file already has `DEEPGRAM_SELF_HOSTED_ENABLED`, and a commented-out
+entry for `DEEPGRAM_SELF_HOSTED_URL`. Only live audio uses the self-hosted
+server. Uploaded audio still goes to Deepgram cloud.
+
 ## Build the Mac app
 
 You need a Mac with Xcode.
