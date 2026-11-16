@@ -78,8 +78,8 @@ All the steps are in [`SELFHOSTED.md`](../SELFHOSTED.md).
 
 Run `make` in the repo root to see all commands.
 
-> **Note:** the deploy section is written for the maintainer's cluster. It has
-> those host names and addresses in it. Change them to your own.
+> **Note:** the examples use `example.com`. `SELFHOSTED.md` lists the files
+> where you put your own domain and image registry.
 
 ## Keep up to date
 

@@ -8,6 +8,15 @@ and a local LLM. The design is in the `[fork]` section of `CLAUDE.md`.
 
 Run `make` in the repo root to list the commands.
 
+The examples use `example.com` for your domain and `registry.example.com:32000`
+for your image registry. Put your own values in these files:
+
+| Value | File |
+|---|---|
+| Image registry | `REGISTRY` in `backend/Makefile` and `backend/scripts/selfhosted-overlay.sh`, and `skaffold.yaml` (or run `make deploy REGISTRY=...`) |
+| Server host names | `backend/charts/*/local_*_values.yaml` |
+| Casdoor app and redirect address | `backend/config/casdoor/apps.yaml` |
+
 ## Keep secrets out of git
 
 Secrets live in only these places:
@@ -27,14 +36,14 @@ must stay out of git, for example `registry.key`. Add each file by its path.
 ### What runs
 
 Everything is in namespace `omi` on the microk8s cluster. The image registry is
-`192.168.1.42:32000`.
+`registry.example.com:32000`.
 
 | Service | Deployed by | Address |
 |---|---|---|
-| `omi-backend` (API) | helm release `omi-backend`, `make deploy` | `omi.spangled-kettle.ts.net`, and plain http at `omi-auth.spangled-kettle.ts.net` for iOS sign-in |
+| `omi-backend` (API) | helm release `omi-backend`, `make deploy` | `omi.example.com`, and plain http at `omi-auth.example.com` for iOS sign-in |
 | `pusher` | `kubectl set image`, `make deploy` | inside the cluster |
-| `desktop-backend-py` | image: `make deploy`. Settings: helm release `desktop-backend-py` | `desktop-backend-py.spangled-kettle.ts.net` |
-| `omi-minio` (files) | helm release `omi`, `make deploy` | `omi-files.spangled-kettle.ts.net` |
+| `desktop-backend-py` | image: `make deploy`. Settings: helm release `desktop-backend-py` | `desktop-backend-py.example.com` |
+| `omi-minio` (files) | helm release `omi`, `make deploy` | `omi-files.example.com` |
 | `diarizer` (speakers) | `make deploy-diarizer` | inside the cluster |
 | `typesense` (search, vectors) | helm release `omi-typesense` | inside the cluster |
 | `omi-backend-memory-maintenance` | cron job in the `omi-backend` chart | runs each hour |
@@ -122,7 +131,7 @@ redirect address.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Image pulls time out | The registry (zot) has stuck requests. Look for `waiting on channel` in its log. | `kubectl -n container-registry delete pod zot-0` |
-| `http: server gave HTTP response to HTTPS client` | A microk8s restart removed the node's registry setting. | Add `/var/snap/microk8s/current/args/certs.d/192.168.1.42:32000/hosts.toml` with `server="http://192.168.1.42:32000"` and `capabilities=["pull","resolve"]`, then run `sudo snap restart microk8s.daemon-containerd` |
+| `http: server gave HTTP response to HTTPS client` | A microk8s restart removed the node's registry setting. | Add `/var/snap/microk8s/current/args/certs.d/registry.example.com:32000/hosts.toml` with `server="http://registry.example.com:32000"` and `capabilities=["pull","resolve"]`, then run `sudo snap restart microk8s.daemon-containerd` |
 | Helm says `valueFrom may not be specified when value is not empty` | Someone set a value by hand on the live Deployment. | `kubectl -n omi set env deploy/omi-backend NAME-`, then deploy again |
 | New pod stays `Pending` | The node has no space for a second pod. | Keep the `Recreate` strategy in the values file |
 
@@ -133,10 +142,10 @@ You need a Mac with Xcode.
 **1. Make `desktop/macos/.env.app`** (only once):
 
 ```bash
-OMI_PYTHON_API_URL=https://omi.spangled-kettle.ts.net/
-OMI_AUTH_API_URL=https://omi.spangled-kettle.ts.net/
-OMI_DESKTOP_API_URL=https://desktop-backend-py.spangled-kettle.ts.net/
-OMI_FIREBASE_REST_BASE_URL=https://omi.spangled-kettle.ts.net/
+OMI_PYTHON_API_URL=https://omi.example.com/
+OMI_AUTH_API_URL=https://omi.example.com/
+OMI_DESKTOP_API_URL=https://desktop-backend-py.example.com/
+OMI_FIREBASE_REST_BASE_URL=https://omi.example.com/
 FIREBASE_API_KEY=placeholder
 ```
 
@@ -181,11 +190,11 @@ stack.
 **2. Make `app/.env.selfhosted`** (only once):
 
 ```bash
-OMI_API_BASE_URL=https://omi.spangled-kettle.ts.net/
-OMI_AUTH_HTTP_HOST=omi-auth.spangled-kettle.ts.net
-IOS_BUNDLE_ID=com.omi-chakra-ios
+OMI_API_BASE_URL=https://omi.example.com/
+OMI_AUTH_HTTP_HOST=omi-auth.example.com
+IOS_BUNDLE_ID=com.example.omi
 IOS_TEAM_ID=<Apple team ID>
-IOS_DISPLAY_NAME=omi-chakra
+IOS_DISPLAY_NAME=omi-selfhosted
 FLUTTER=~/fvm/versions/3.44.5/bin/flutter
 APP_STORE_CONNECT_API_KEY_KEY_ID=<key ID>
 APP_STORE_CONNECT_API_KEY_ISSUER_ID=<issuer ID>
